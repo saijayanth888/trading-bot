@@ -58,10 +58,11 @@ services:
       - CRYPTOQUANT_API_KEY=${CRYPTOQUANT_API_KEY:-}
       - WHALE_ALERT_API_KEY=${WHALE_ALERT_API_KEY:-}
       - GLASSNODE_API_KEY=${GLASSNODE_API_KEY:-}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-sonnet-4-20250514}
+      # All AI sentiment scoring runs locally via Ollama — no external API costs.
+      # The dual-Hermes-3 trust-the-majority pattern uses both models in parallel.
       - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.1:8b}
+      - OLLAMA_MODEL_FAST=${OLLAMA_MODEL_FAST:-hermes3:8b}
+      - OLLAMA_MODEL_DEEP=${OLLAMA_MODEL_DEEP:-hermes3:70b-q4_K_M}
       - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
       - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY:-}
       - PERPLEXITY_MODEL=${PERPLEXITY_MODEL:-sonar}

@@ -1,31 +1,34 @@
 """
-Sentiment engine — Perplexity (news fetcher) + local Ollama (scorer).
+Sentiment engine — Perplexity (news fetcher, optional) + dual local Ollama
+(Hermes-3 trust-the-majority scorer).
 
 Every 15 minutes:
-  1. Ask Perplexity Sonar for crypto market headlines + summaries from the
-     last hour. Perplexity does the web crawling and de-duplication for us.
-  2. Pass the structured headline list to a local Llama (or any Ollama
-     model) and ask it to emit a single JSON sentiment verdict.
-  3. Store {score, confidence, market_impact, key_events} in the
-     `sentiment_log` table inside the on-chain SQLite.
+  1. (Optional) Ask Perplexity Sonar for crypto market headlines from the
+     last hour. If `PERPLEXITY_API_KEY` is unset, we feed an empty list to
+     the scorers and let them emit a low-confidence neutral.
+  2. Score the headlines with TWO local Ollama models in parallel:
+        fast → OLLAMA_MODEL_FAST (default hermes3:8b)
+        deep → OLLAMA_MODEL_DEEP (default hermes3:70b-q4_K_M)
+  3. Trust-The-Majority: emit a directional signal only when both models
+     agree on `market_impact`; otherwise emit neutral with low confidence.
+  4. Store the verdict + both raw responses in `sentiment_log` (Postgres).
 
-Why this shape:
-  - Perplexity replaces the brittle RSS/Reddit scrapers (one API to
-    maintain, no parser rot, mainstream + niche coverage in one call).
-  - Ollama is the *judgment* layer — runs on the Spark, no third party
-    sees how we score. Privacy-friendly and free.
+Both scoring models run locally on the Spark via Ollama — zero external
+API calls in the hot path. Perplexity is the single optional outbound.
 
 `get_sentiment_features(pair)` returns a DataFrame with FreqAI-prefixed
 columns suitable for `pd.merge_asof` onto a candle dataframe.
 
 Environment:
-  PERPLEXITY_API_KEY  — required to fetch news (graceful skip → neutral signal).
-  PERPLEXITY_MODEL    — default "sonar" (Online). "sonar-pro" for better
-                        synthesis at higher cost.
-  PERPLEXITY_RECENCY  — search recency filter, default "hour".
-                        ("hour" | "day" | "week" | "month")
+  PERPLEXITY_API_KEY  — optional; if set, fetches news from Sonar.
+  PERPLEXITY_MODEL    — default "sonar".
+  PERPLEXITY_RECENCY  — default "hour".
   OLLAMA_HOST         — default "http://host.docker.internal:11434".
-  OLLAMA_MODEL        — default "llama3.1:8b".
+  OLLAMA_MODEL_FAST   — default "hermes3:8b" — used as the fast scanner.
+  OLLAMA_MODEL_DEEP   — default "hermes3:70b-q4_K_M" — used as the deep
+                        thinker. If the model isn't pulled yet, the engine
+                        falls back to fast-only mode and logs a warning.
+  OLLAMA_MODEL        — legacy alias for OLLAMA_MODEL_FAST (still honoured).
 """
 
 from __future__ import annotations
@@ -71,7 +74,12 @@ PERPLEXITY_RECENCY = os.getenv("PERPLEXITY_RECENCY", "hour")  # hour|day|week|mo
 PERPLEXITY_MAX_TOKENS = int(os.getenv("PERPLEXITY_MAX_TOKENS", "1500"))
 
 OLLAMA_BASE = os.getenv("OLLAMA_HOST", "http://host.docker.internal:11434").rstrip("/")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+# OLLAMA_MODEL is kept as a backwards-compatible alias for OLLAMA_MODEL_FAST.
+OLLAMA_MODEL_FAST = os.getenv("OLLAMA_MODEL_FAST",
+                              os.getenv("OLLAMA_MODEL", "hermes3:8b"))
+OLLAMA_MODEL_DEEP = os.getenv("OLLAMA_MODEL_DEEP", "hermes3:70b-q4_K_M")
+# Exposed for downstream code that imports OLLAMA_MODEL by name.
+OLLAMA_MODEL = OLLAMA_MODEL_FAST
 
 # Truncate the headline list passed to Ollama so prompts stay bounded.
 MAX_HEADLINES_TO_LLM = 60
@@ -304,9 +312,15 @@ async def _fetch_perplexity_news(
 async def _analyze_ollama(
     session: aiohttp.ClientSession,
     items: list[dict[str, Any]],
+    model: str | None = None,
+    *,
+    num_ctx: int = 4096,
+    timeout_total: float = 180,
 ) -> dict | None:
+    """Score `items` with the given Ollama model. Returns None on failure."""
     from .sentiment_prompts import OLLAMA_SYSTEM_PROMPT, build_user_prompt
 
+    target = model or OLLAMA_MODEL_FAST
     user_prompt = build_user_prompt(
         items=items,
         window_minutes=POLL_INTERVAL_S // 60,
@@ -314,43 +328,95 @@ async def _analyze_ollama(
     )
 
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": target,
         "messages": [
             {"role": "system", "content": OLLAMA_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
         "format": "json",
         "stream": False,
-        "options": {"temperature": 0.2, "num_ctx": 4096},
+        "options": {"temperature": 0.2, "num_ctx": num_ctx},
     }
 
     async with _OLLAMA_RL():
         resp = await _request_with_backoff(
             session, "POST", f"{OLLAMA_BASE}/api/chat",
             json_body=payload,
-            timeout=aiohttp.ClientTimeout(total=180),
+            timeout=aiohttp.ClientTimeout(total=timeout_total),
         )
     if resp is None:
         return None
     try:
         body = await resp.json(content_type=None)
     except (json.JSONDecodeError, aiohttp.ContentTypeError) as exc:
-        logger.warning("ollama bad JSON envelope: %s", exc)
+        logger.warning("ollama[%s] bad JSON envelope: %s", target, exc)
         return None
     finally:
         resp.release()
 
+    # Detect "model not pulled yet" so the caller can fall back gracefully.
+    if isinstance(body, dict) and "error" in body:
+        logger.warning("ollama[%s] error: %s", target, body["error"])
+        return None
+
     content = (body.get("message") or {}).get("content", "")
     if not content:
-        logger.warning("ollama empty content; full response: %s", body)
+        logger.warning("ollama[%s] empty content; body=%s", target, body)
         return None
     try:
         data = json.loads(content)
     except json.JSONDecodeError as exc:
-        logger.warning("ollama non-JSON content: %s | snippet=%s",
-                       exc, content[:200])
+        logger.warning("ollama[%s] non-JSON content: %s | snippet=%s",
+                       target, exc, content[:200])
         return None
     return _coerce_result(data)
+
+
+def _trust_the_majority(fast: dict | None, deep: dict | None) -> dict:
+    """
+    Both Hermes models must agree on direction for a non-neutral verdict.
+    Confidence is the min of the two (worst-case bound). If only one model
+    returned (e.g. 70B not pulled yet), trust it but halve confidence.
+    """
+    have_both = bool(fast) and bool(deep)
+    if have_both:
+        same_dir = (
+            fast["market_impact"] == deep["market_impact"]
+            and fast["market_impact"] in ("bullish", "bearish")
+        )
+        if same_dir:
+            return {
+                "sentiment_score": (fast["sentiment_score"] + deep["sentiment_score"]) / 2,
+                "confidence": min(fast["confidence"], deep["confidence"]),
+                "market_impact": fast["market_impact"],
+                "key_events": list(fast["key_events"])[:5],
+                "agreement": True,
+            }
+        # Disagreement — neutral
+        return {
+            "sentiment_score": 0.0,
+            "confidence": 0.0,
+            "market_impact": "neutral",
+            "key_events": list((fast or deep or {}).get("key_events") or [])[:5],
+            "agreement": False,
+        }
+
+    # Single-model fallback
+    src = fast or deep
+    if not src or src["market_impact"] == "neutral":
+        return {
+            "sentiment_score": 0.0, "confidence": 0.0,
+            "market_impact": "neutral",
+            "key_events": list((src or {}).get("key_events") or [])[:5],
+            "agreement": False,
+        }
+    return {
+        "sentiment_score": src["sentiment_score"],
+        "confidence": src["confidence"] * 0.5,    # halved — single source
+        "market_impact": src["market_impact"],
+        "key_events": list(src["key_events"])[:5],
+        "agreement": False,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -384,28 +450,8 @@ def _coerce_result(data: dict) -> dict:
     }
 
 
-def _finalize_single_source(llama: dict | None) -> dict:
-    """
-    Single-source finalisation: trust Ollama directly. `agreement` is set
-    to True iff Ollama returned a directional verdict (bullish/bearish);
-    a neutral verdict still emits a row but with score=0 and conf=0 so
-    downstream sizing logic ignores it.
-    """
-    if not llama or llama["market_impact"] == "neutral":
-        return {
-            "sentiment_score": 0.0,
-            "confidence": 0.0,
-            "market_impact": "neutral",
-            "key_events": list((llama or {}).get("key_events") or [])[:5],
-            "agreement": False,
-        }
-    return {
-        "sentiment_score": llama["sentiment_score"],
-        "confidence": llama["confidence"],
-        "market_impact": llama["market_impact"],
-        "key_events": list(llama["key_events"])[:5],
-        "agreement": True,
-    }
+# `_finalize_single_source` retired — `_trust_the_majority` above handles
+# both single-source and dual-model cases.
 
 
 # ---------------------------------------------------------------------------
@@ -417,26 +463,45 @@ async def _poll_once() -> dict | None:
     async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
         items = await _fetch_perplexity_news(session)
         if not items:
-            logger.warning("no news items — emitting neutral row anyway")
+            logger.info("no news items — both models will see an empty list")
 
-        llama = await _analyze_ollama(session, items)
+        # Fast + deep run in parallel; deep model gets a larger context window.
+        # If a model isn't pulled yet, _analyze_ollama returns None and the
+        # majority logic falls back to single-source mode.
+        fast, deep = await asyncio.gather(
+            _analyze_ollama(session, items, OLLAMA_MODEL_FAST,
+                            num_ctx=4096, timeout_total=120),
+            _analyze_ollama(session, items, OLLAMA_MODEL_DEEP,
+                            num_ctx=8192, timeout_total=300),
+            return_exceptions=False,
+        )
 
-    final = _finalize_single_source(llama)
+    final = _trust_the_majority(fast, deep)
     ts_dt = datetime.now(timezone.utc)
     final["ts"] = int(ts_dt.timestamp())
 
+    # Reuse the legacy schema columns: claude_* now hold the deep model's
+    # output, llama_* hold the fast model's output. Avoids a migration.
     db.execute_one(
         """
         INSERT INTO sentiment_log
             (ts, sentiment_score, confidence, market_impact, agreement, key_events,
-             llama_score, llama_impact, raw_llama, n_headlines)
-        VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb, %s)
+             claude_score, claude_impact, raw_claude,
+             llama_score, llama_impact, raw_llama,
+             n_headlines)
+        VALUES (%s, %s, %s, %s, %s, %s::jsonb,
+                %s, %s, %s::jsonb,
+                %s, %s, %s::jsonb,
+                %s)
         ON CONFLICT (ts) DO UPDATE SET
             sentiment_score = EXCLUDED.sentiment_score,
             confidence      = EXCLUDED.confidence,
             market_impact   = EXCLUDED.market_impact,
             agreement       = EXCLUDED.agreement,
             key_events      = EXCLUDED.key_events,
+            claude_score    = EXCLUDED.claude_score,
+            claude_impact   = EXCLUDED.claude_impact,
+            raw_claude      = EXCLUDED.raw_claude,
             llama_score     = EXCLUDED.llama_score,
             llama_impact    = EXCLUDED.llama_impact,
             raw_llama       = EXCLUDED.raw_llama,
@@ -449,17 +514,23 @@ async def _poll_once() -> dict | None:
             final["market_impact"],
             bool(final["agreement"]),
             json.dumps(final["key_events"]),
-            llama["sentiment_score"] if llama else None,
-            llama["market_impact"] if llama else None,
-            json.dumps(llama) if llama else None,
+            deep["sentiment_score"] if deep else None,
+            deep["market_impact"] if deep else None,
+            json.dumps(deep) if deep else None,
+            fast["sentiment_score"] if fast else None,
+            fast["market_impact"] if fast else None,
+            json.dumps(fast) if fast else None,
             len(items),
         ),
     )
 
     logger.info(
-        "poll done: impact=%s score=%+.2f conf=%.2f items=%d",
+        "poll done: impact=%s score=%+.2f conf=%.2f agree=%s items=%d "
+        "(fast=%s deep=%s)",
         final["market_impact"], final["sentiment_score"],
-        final["confidence"], len(items),
+        final["confidence"], final["agreement"], len(items),
+        fast["market_impact"] if fast else "—",
+        deep["market_impact"] if deep else "—",
     )
     return final
 
@@ -496,8 +567,9 @@ class SentimentEngine:
         )
         self._thread.start()
         logger.info(
-            "sentiment engine started (interval=%ds, perplexity=%s, ollama=%s)",
-            POLL_INTERVAL_S, PERPLEXITY_MODEL, OLLAMA_MODEL,
+            "sentiment engine started (interval=%ds, perplexity=%s, "
+            "ollama_fast=%s, ollama_deep=%s)",
+            POLL_INTERVAL_S, PERPLEXITY_MODEL, OLLAMA_MODEL_FAST, OLLAMA_MODEL_DEEP,
         )
 
     def stop(self) -> None:
