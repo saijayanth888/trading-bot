@@ -56,8 +56,7 @@
             "BTC/USD",
             "ETH/USD",
             "SOL/USD",
-            "ADA/USD",
-            "MATIC/USD"
+            "ADA/USD"
         ],
         "pair_blacklist": []
     },
