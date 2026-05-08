@@ -288,37 +288,78 @@ class FreqAIMeanRevV1(IStrategy):
     entry_threshold = DecimalParameter(0.55, 0.85, default=0.62, space="buy", optimize=True)
     exit_threshold = DecimalParameter(0.45, 0.75, default=0.55, space="sell", optimize=True)
 
-    # Per-regime tweaks to the entry / exit thresholds (deltas applied to the
-    # tuned base value above).
-    REGIME_ENTRY_DELTA = {
-        "trending_up":     -0.05,   # more permissive
-        "mean_reverting":   0.00,
-        "high_volatility":  0.15,   # very strict
-        "trending_down":    None,   # never enter long
-        "unknown":          0.00,
+    # Defaults — overridable via config.json[regime_gating].* (operator-tunable
+    # without redeploy) or FREQTRADE__REGIME_GATING__<KEY> env vars.
+    _DEFAULT_REGIME_GATING = {
+        "entry_delta": {
+            "trending_up": -0.05,
+            "mean_reverting": 0.00,
+            "high_volatility": 0.15,
+            "trending_down": 0.20,    # was None — now: require base+0.20 floor
+            "unknown": 0.00,
+        },
+        "exit_delta": {
+            "mean_reverting": -0.10,
+            "trending_up": 0.05,
+            "high_volatility": 0.00,
+            "trending_down": -0.20,
+            "unknown": 0.00,
+        },
+        "high_vol_stake_factor": 0.5,
+        "high_vol_min_confidence": 0.75,
+        "mean_rev_take_profit": 0.015,
+        "trending_up_trail_trigger": 0.03,
+        "trending_up_trail_distance": -0.025,
+        "tft_min_confidence": 0.40,
+        "meta_min_confidence": 0.40,
     }
-    REGIME_EXIT_DELTA = {
-        "mean_reverting": -0.10,    # exit on weaker bearish signal
-        "trending_up":     0.05,    # let winners run
-        "high_volatility": 0.00,
-        "trending_down":  -0.20,    # bail fast if we somehow have a position
-        "unknown":         0.00,
-    }
-    HIGH_VOL_STAKE_FACTOR = 0.5
-    HIGH_VOL_MIN_CONFIDENCE = 0.75
-    MEAN_REV_TAKE_PROFIT = 0.015
-    TRENDING_UP_TRAIL_TRIGGER = 0.03
-    TRENDING_UP_TRAIL_DISTANCE = -0.025
 
-    # TFT-specific: minimum quantile-derived confidence required to enter,
-    # gracefully ignored if the column is absent (e.g. when running with
-    # the legacy LightGBM model).
-    TFT_MIN_CONFIDENCE = 0.40
+    @property
+    def _regime_gating(self) -> dict:
+        """config.json[regime_gating] merged on top of _DEFAULT_REGIME_GATING."""
+        cfg = dict(self._DEFAULT_REGIME_GATING)
+        override = (self.config.get("regime_gating", {}) or {})
+        for k, v in override.items():
+            if k.startswith("_"):     # skip _doc strings
+                continue
+            cfg[k] = v
+        return cfg
 
-    # Meta-agent: minimum combined (TFT + DRL) confidence required to enter.
-    # If the DRL ensemble weights aren't on disk yet (cold start), the
-    # strategy silently falls back to pure TFT thresholds above.
-    META_MIN_CONFIDENCE = 0.40
+    @property
+    def REGIME_ENTRY_DELTA(self) -> dict:
+        return self._regime_gating["entry_delta"]
+
+    @property
+    def REGIME_EXIT_DELTA(self) -> dict:
+        return self._regime_gating["exit_delta"]
+
+    @property
+    def HIGH_VOL_STAKE_FACTOR(self) -> float:
+        return float(self._regime_gating["high_vol_stake_factor"])
+
+    @property
+    def HIGH_VOL_MIN_CONFIDENCE(self) -> float:
+        return float(self._regime_gating["high_vol_min_confidence"])
+
+    @property
+    def MEAN_REV_TAKE_PROFIT(self) -> float:
+        return float(self._regime_gating["mean_rev_take_profit"])
+
+    @property
+    def TRENDING_UP_TRAIL_TRIGGER(self) -> float:
+        return float(self._regime_gating["trending_up_trail_trigger"])
+
+    @property
+    def TRENDING_UP_TRAIL_DISTANCE(self) -> float:
+        return float(self._regime_gating["trending_up_trail_distance"])
+
+    @property
+    def TFT_MIN_CONFIDENCE(self) -> float:
+        return float(self._regime_gating["tft_min_confidence"])
+
+    @property
+    def META_MIN_CONFIDENCE(self) -> float:
+        return float(self._regime_gating["meta_min_confidence"])
     # Cache loaded ensembles per save_dir so we don't re-deserialize each candle.
     _DRL_CACHE: "dict[str, object]" = {}
 
@@ -453,6 +494,21 @@ class FreqAIMeanRevV1(IStrategy):
                 self._slack = SlackAlerter.from_env()
                 if self._slack and self._slack.enabled:
                     logger.info("[strategy] slack alerts enabled")
+                    # One-shot startup ping so the operator sees the wiring alive
+                    # without waiting for the first trade.
+                    try:
+                        mode = "DRY-RUN (paper)" if self.config.get("dry_run", True) else "LIVE"
+                        ratio = self.config.get("tradable_balance_ratio", 1.0)
+                        self._slack.notify_error(
+                            component="bot_start",
+                            exc=f"FreqAIMeanRevV1 booted — mode={mode}, "
+                                f"tradable_balance_ratio={ratio}, "
+                                f"strategy={type(self).__name__}",
+                            context={"timeframe": self.timeframe,
+                                     "max_open_trades": self.config.get("max_open_trades")},
+                        )
+                    except Exception:
+                        pass
             except Exception as exc:
                 logger.warning("[strategy] slack init failed: %s", exc)
                 self._slack = None
