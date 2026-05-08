@@ -450,6 +450,13 @@ class ExecutionEngine:
             )
 
     def _best_prices(self, product_id: str) -> tuple[float, float]:
+        """
+        Top-of-book bid/ask used by the slippage gate.
+
+        Uses `get_best_bid_ask(product_ids=[...])` — the dedicated CDP
+        endpoint — instead of `get_product()`, which only exposes 24h
+        stats and does not populate live bid/ask attributes.
+        """
         if self._price_fn is not None:
             return self._price_fn(product_id)
         if self.cfg.dry_run:
@@ -458,13 +465,23 @@ class ExecutionEngine:
             # that route through us aware of the path.
             return (0.0, 0.0)
         client = self._ensure_client()
-        # Coinbase Advanced Trade: get_product returns price stats incl. best bid/ask
-        prod = client.get_product(product_id=product_id)
-        # SDK returns dict-like response; attribute / key access tolerant
-        return (
-            float(getattr(prod, "best_bid", None) or prod["best_bid"]),
-            float(getattr(prod, "best_ask", None) or prod["best_ask"]),
+        resp = client.get_best_bid_ask(product_ids=[product_id])
+        pricebooks = (
+            getattr(resp, "pricebooks", None)
+            or (resp["pricebooks"] if isinstance(resp, dict) and "pricebooks" in resp else [])
         )
+        if not pricebooks:
+            raise SlippageError(f"no pricebook for {product_id}")
+        pb = pricebooks[0]
+        bids = getattr(pb, "bids", None) or (pb.get("bids", []) if isinstance(pb, dict) else [])
+        asks = getattr(pb, "asks", None) or (pb.get("asks", []) if isinstance(pb, dict) else [])
+        if not bids or not asks:
+            raise SlippageError(f"empty book for {product_id}")
+        bid_p = float(getattr(bids[0], "price", None)
+                      or (bids[0]["price"] if isinstance(bids[0], dict) else 0))
+        ask_p = float(getattr(asks[0], "price", None)
+                      or (asks[0]["price"] if isinstance(asks[0], dict) else 0))
+        return bid_p, ask_p
 
     def _submit_order(
         self, *, product_id: str, side: OrderSide, base_size: float,
