@@ -62,7 +62,7 @@ services:
       # The dual-Hermes-3 trust-the-majority pattern uses both models in parallel.
       - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
       - OLLAMA_MODEL_FAST=${OLLAMA_MODEL_FAST:-hermes3:8b}
-      - OLLAMA_MODEL_DEEP=${OLLAMA_MODEL_DEEP:-hermes3:70b-q4_K_M}
+      - OLLAMA_MODEL_DEEP=${OLLAMA_MODEL_DEEP:-hermes3:70b}
       - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
       - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY:-}
       - PERPLEXITY_MODEL=${PERPLEXITY_MODEL:-sonar}

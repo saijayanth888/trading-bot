@@ -8,7 +8,7 @@ Every 15 minutes:
      the scorers and let them emit a low-confidence neutral.
   2. Score the headlines with TWO local Ollama models in parallel:
         fast → OLLAMA_MODEL_FAST (default hermes3:8b)
-        deep → OLLAMA_MODEL_DEEP (default hermes3:70b-q4_K_M)
+        deep → OLLAMA_MODEL_DEEP (default hermes3:70b)
   3. Trust-The-Majority: emit a directional signal only when both models
      agree on `market_impact`; otherwise emit neutral with low confidence.
   4. Store the verdict + both raw responses in `sentiment_log` (Postgres).
@@ -25,7 +25,7 @@ Environment:
   PERPLEXITY_RECENCY  — default "hour".
   OLLAMA_HOST         — default "http://host.docker.internal:11434".
   OLLAMA_MODEL_FAST   — default "hermes3:8b" — used as the fast scanner.
-  OLLAMA_MODEL_DEEP   — default "hermes3:70b-q4_K_M" — used as the deep
+  OLLAMA_MODEL_DEEP   — default "hermes3:70b" — used as the deep
                         thinker. If the model isn't pulled yet, the engine
                         falls back to fast-only mode and logs a warning.
   OLLAMA_MODEL        — legacy alias for OLLAMA_MODEL_FAST (still honoured).
@@ -77,7 +77,7 @@ OLLAMA_BASE = os.getenv("OLLAMA_HOST", "http://host.docker.internal:11434").rstr
 # OLLAMA_MODEL is kept as a backwards-compatible alias for OLLAMA_MODEL_FAST.
 OLLAMA_MODEL_FAST = os.getenv("OLLAMA_MODEL_FAST",
                               os.getenv("OLLAMA_MODEL", "hermes3:8b"))
-OLLAMA_MODEL_DEEP = os.getenv("OLLAMA_MODEL_DEEP", "hermes3:70b-q4_K_M")
+OLLAMA_MODEL_DEEP = os.getenv("OLLAMA_MODEL_DEEP", "hermes3:70b")
 # Exposed for downstream code that imports OLLAMA_MODEL by name.
 OLLAMA_MODEL = OLLAMA_MODEL_FAST
 
