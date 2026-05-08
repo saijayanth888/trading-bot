@@ -144,6 +144,19 @@
         <div id="trades-body">Loading…</div>
       </section>
 
+      <!-- ─── Regime parameters editor ────────────────────────────────── -->
+      <section class="ops-card wide-card" id="card-regime-params" data-status="ok">
+        <div class="card-head">
+          <h3>Regime parameters · <span class="muted" style="font-size:11px;">edits write config.json (atomic + backed up) and reload freqtrade</span></h3>
+          <span class="age" id="regime-params-age">—</span>
+        </div>
+        <div id="regime-params-body">Loading…</div>
+        <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:12px;">
+          <button class="btn" id="btn-rg-revert">Revert</button>
+          <button class="btn primary" id="btn-rg-apply" disabled>Apply changes…</button>
+        </div>
+      </section>
+
       <!-- ─── Controls ────────────────────────────────────────────────── -->
       <div class="controls-bar">
         <button id="btn-pause"  class="btn primary">⏸ Pause Trading</button>

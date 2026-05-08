@@ -163,8 +163,10 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       # Mount the same user_data the bot writes into so the dashboard reads
-      # the live trade_journal SQLite + evolution.json.
-      - ./user_data:/freqtrade/user_data:ro
+      # the live trade_journal SQLite + evolution.json. RW so the Ops tab
+      # can write config.json (validated + atomic + backed-up) when the
+      # operator updates regime params from /ops.
+      - ./user_data:/freqtrade/user_data
     environment:
       - USER_DATA_ROOT=/freqtrade/user_data
       - DASHBOARD_PAIRS=${DASHBOARD_PAIRS:-BTC/USD,ETH/USD,SOL/USD}

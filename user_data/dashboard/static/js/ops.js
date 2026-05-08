@@ -286,9 +286,111 @@ function openResumeModal() {
   });
 }
 
+// ─── Regime parameters editor ──────────────────────────────────────
+let _rg_pristine = null;   // { regime_gating, schema, config_path }
+let _rg_dirty = false;
+
+function rgRowsHtml(rg, schema) {
+  const regs = schema.regimes;
+  const dlo = schema.delta_range[0], dhi = schema.delta_range[1];
+  const rows = [];
+
+  // Per-regime entry/exit deltas as a small grid
+  rows.push(`<h4 style="margin:6px 0;font-size:13px;">Per-regime entry / exit deltas <span class="muted" style="font-size:11px;">(allowed [${dlo}, ${dhi}], blank = null = hard-block)</span></h4>`);
+  let grid = `<div style="display:grid;grid-template-columns:120px repeat(${regs.length}, 1fr);gap:6px;align-items:center;font-size:12px;">`;
+  grid += `<div></div>`;
+  for (const r of regs) grid += `<div class="muted" style="text-align:center;">${esc(r)}</div>`;
+  for (const which of ["entry_delta", "exit_delta"]) {
+    grid += `<div class="muted">${esc(which)}</div>`;
+    for (const r of regs) {
+      const v = (rg[which] || {})[r];
+      const val = v === null || v === undefined ? "" : v;
+      grid += `<input data-rg-deep="${esc(which)}" data-rg-key="${esc(r)}" type="number" step="0.01" value="${esc(val)}" style="width:100%;padding:4px 6px;background:#060a1c;color:#e8ecf8;border:1px solid #2c386a;border-radius:4px;font:inherit;font-variant-numeric:tabular-nums;" />`;
+    }
+  }
+  grid += `</div>`;
+  rows.push(grid);
+
+  // Scalar params (one input per row)
+  rows.push(`<h4 style="margin:14px 0 6px;font-size:13px;">Scalar parameters</h4>`);
+  let scal = `<div style="display:grid;grid-template-columns:1fr 160px 200px;gap:6px;align-items:center;font-size:12px;">`;
+  scal += `<div class="muted">key</div><div class="muted" style="text-align:center;">value</div><div class="muted" style="text-align:center;">allowed range</div>`;
+  for (const [k, [lo, hi]] of Object.entries(schema.scalar_ranges)) {
+    const v = rg[k];
+    scal += `<div>${esc(k)}</div>`;
+    scal += `<input data-rg-key="${esc(k)}" type="number" step="0.01" value="${esc(v ?? "")}" style="width:100%;padding:4px 6px;background:#060a1c;color:#e8ecf8;border:1px solid #2c386a;border-radius:4px;font:inherit;font-variant-numeric:tabular-nums;" />`;
+    scal += `<div class="muted" style="text-align:center;">[${lo}, ${hi}]</div>`;
+  }
+  scal += `</div>`;
+  rows.push(scal);
+
+  return rows.join("");
+}
+
+async function refreshRegimeConfig() {
+  const r = await jsonFetch("/api/ops/regime_config");
+  const env = r.body;
+  setStatus("card-regime-params", env.status || "down");
+  document.getElementById("regime-params-age").textContent = env.error || env.data?.config_path || "live";
+  const body = document.getElementById("regime-params-body");
+  if (!env.data) { body.textContent = env.error || "—"; return; }
+  _rg_pristine = JSON.parse(JSON.stringify(env.data));
+  body.innerHTML = rgRowsHtml(env.data.regime_gating, env.data.schema);
+  _rg_dirty = false;
+  document.getElementById("btn-rg-apply").disabled = true;
+
+  body.querySelectorAll("input[data-rg-key]").forEach(el => {
+    el.addEventListener("input", () => {
+      _rg_dirty = true;
+      document.getElementById("btn-rg-apply").disabled = false;
+    });
+  });
+}
+
+function rgCollect() {
+  // Build a regime_gating object from the inputs.
+  const out = {};
+  document.querySelectorAll("#regime-params-body input[data-rg-key]").forEach(el => {
+    const key = el.dataset.rgKey;
+    const deep = el.dataset.rgDeep;
+    const raw = el.value.trim();
+    const val = raw === "" ? null : Number(raw);
+    if (deep) {
+      out[deep] = out[deep] || {};
+      out[deep][key] = val;
+    } else {
+      // Scalars don't accept null — skip if blank
+      if (val !== null) out[key] = val;
+    }
+  });
+  return out;
+}
+
+async function applyRegimeConfig() {
+  const btn = document.getElementById("btn-rg-apply");
+  btn.disabled = true; btn.textContent = "Applying…";
+  const payload = { regime_gating: rgCollect() };
+  const r = await fetch("/api/ops/regime_config", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(payload),
+  });
+  const env = await r.json().catch(() => ({}));
+  if (r.ok && env.data) {
+    const lines = (env.data.changes || []).join("\n  ");
+    alert(`Applied ${env.data.changes?.length || 0} change(s):\n  ${lines}\n\nBackup: ${env.data.backup}\nFreqtrade reload: ${env.data.freqtrade_reload}\n\n${env.data.note || ""}`);
+    refreshRegimeConfig();
+  } else {
+    alert(`Failed: ${JSON.stringify(env, null, 2)}`);
+  }
+  btn.textContent = "Apply changes…";
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("btn-pause").addEventListener("click", pauseClicked);
   document.getElementById("btn-resume").addEventListener("click", openResumeModal);
+  document.getElementById("btn-rg-apply").addEventListener("click", applyRegimeConfig);
+  document.getElementById("btn-rg-revert").addEventListener("click", () => refreshRegimeConfig());
   document.getElementById("resume-cancel").addEventListener("click", () => {
     document.getElementById("resume-modal").classList.remove("open");
     document.getElementById("resume-input").value = "";
@@ -312,6 +414,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   refreshRegime().then(refreshSentiment);
   refreshServices(); refreshTraining(); refreshMcp(); refreshTrades();
+  refreshRegimeConfig();
 
   setInterval(() => { refreshRegime().then(refreshSentiment); }, REFRESH_MS.regime);
   setInterval(refreshServices, REFRESH_MS.services);

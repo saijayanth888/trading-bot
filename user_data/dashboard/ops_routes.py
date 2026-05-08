@@ -325,6 +325,177 @@ async def pause(request: Request):
     return _envelope("ok", data={"freqtrade_response": payload, "reason": note})
 
 
+# --------------------------------------------------------------------------
+# Regime params editor: GET / POST /api/ops/regime_config
+# --------------------------------------------------------------------------
+
+# Param-name → (min, max) sanity range. Anything outside is rejected.
+# Conservative ranges; tune by editing config.json directly if you need wider.
+_REGIMES = ("trending_up", "trending_down", "mean_reverting", "high_volatility", "unknown")
+_DELTA_RANGE = (-0.5, 0.5)   # entry_delta / exit_delta per regime
+_RANGES = {
+    "high_vol_stake_factor":      (0.0, 1.0),
+    "high_vol_min_confidence":    (0.0, 1.0),
+    "mean_rev_take_profit":       (0.0, 0.10),
+    "trending_up_trail_trigger":  (0.0, 0.10),
+    "trending_up_trail_distance": (-0.10, 0.0),
+    "tft_min_confidence":         (0.0, 1.0),
+    "meta_min_confidence":        (0.0, 1.0),
+}
+
+CONFIG_PATH = Path(os.environ.get(
+    "FREQTRADE_CONFIG_PATH",
+    "/freqtrade/user_data/config.json",
+))
+
+# Same root the strategy uses; we drop config-backup-*.json snapshots here.
+USER_DATA_ROOT_FOR_BACKUPS = Path(os.environ.get(
+    "USER_DATA_ROOT",
+    "/freqtrade/user_data",
+))
+
+
+@router.get("/regime_config")
+def regime_config_get():
+    """Return the current regime_gating block + the schema (ranges) for the UI."""
+    try:
+        import json
+        cfg = json.loads(CONFIG_PATH.read_text())
+        rg = cfg.get("regime_gating") or {}
+    except Exception as exc:
+        return _envelope("down", error=str(exc))
+
+    return _envelope("ok", data={
+        "regime_gating": {k: v for k, v in rg.items() if not k.startswith("_")},
+        "schema": {
+            "regimes": list(_REGIMES),
+            "delta_range": list(_DELTA_RANGE),
+            "scalar_ranges": _RANGES,
+        },
+        "config_path": str(CONFIG_PATH),
+    })
+
+
+@router.post("/regime_config")
+async def regime_config_post(request: Request):
+    """Validate + atomically write the new regime_gating block.
+
+    Body must be ``{"regime_gating": {...}}`` matching the existing shape.
+    We:
+      1. Accept only known keys; reject extras.
+      2. Validate each value against its sanity range.
+      3. Snapshot the old config to ``user_data/data/config-backup-<ts>.json``.
+      4. Atomic-write the new config (tmp + rename).
+      5. Best-effort POST freqtrade ``/api/v1/reload_config`` so it picks up.
+
+    Returns the diff in the envelope so the frontend can confirm.
+    """
+    import json
+    body = await request.json() if request.headers.get("content-length") else {}
+    new_rg = body.get("regime_gating")
+    if not isinstance(new_rg, dict):
+        raise HTTPException(status_code=400, detail="body.regime_gating must be a dict")
+
+    # Load current config + the existing regime_gating
+    try:
+        cfg_text = CONFIG_PATH.read_text()
+        cfg = json.loads(cfg_text)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"could not read {CONFIG_PATH}: {exc}")
+    current = cfg.get("regime_gating") or {}
+
+    # Validate every submitted key/value against the known shape.
+    diffs: list[str] = []
+    for key, value in new_rg.items():
+        if key.startswith("_"):
+            continue  # never overwrite documentation keys
+        if key in ("entry_delta", "exit_delta"):
+            if not isinstance(value, dict):
+                raise HTTPException(status_code=400, detail=f"{key} must be a dict")
+            for r, v in value.items():
+                if r not in _REGIMES:
+                    raise HTTPException(status_code=400, detail=f"{key}.{r}: unknown regime")
+                if v is None:
+                    continue  # null = hard-block long entries; allowed
+                if not isinstance(v, (int, float)):
+                    raise HTTPException(status_code=400, detail=f"{key}.{r}: must be a number or null")
+                lo, hi = _DELTA_RANGE
+                if not (lo <= v <= hi):
+                    raise HTTPException(status_code=400, detail=f"{key}.{r}={v} outside allowed range [{lo}, {hi}]")
+                old = (current.get(key) or {}).get(r)
+                if old != v:
+                    diffs.append(f"{key}.{r}: {old} → {v}")
+        elif key in _RANGES:
+            if not isinstance(value, (int, float)):
+                raise HTTPException(status_code=400, detail=f"{key} must be a number")
+            lo, hi = _RANGES[key]
+            if not (lo <= value <= hi):
+                raise HTTPException(status_code=400, detail=f"{key}={value} outside allowed range [{lo}, {hi}]")
+            old = current.get(key)
+            if old != value:
+                diffs.append(f"{key}: {old} → {value}")
+        else:
+            raise HTTPException(status_code=400, detail=f"unknown param: {key}")
+
+    if not diffs:
+        return _envelope("ok", data={"changes": [], "note": "no-op (values unchanged)"})
+
+    # Build the new config (preserve "_doc" and any extras we didn't touch)
+    merged = dict(current)
+    for k, v in new_rg.items():
+        if k in ("entry_delta", "exit_delta"):
+            base = dict(current.get(k) or {})
+            base.update(v)
+            merged[k] = base
+        else:
+            merged[k] = v
+    cfg["regime_gating"] = merged
+
+    # Snapshot the previous config so the operator can roll back.
+    try:
+        from datetime import datetime as _dt
+        backup_dir = USER_DATA_ROOT_FOR_BACKUPS / "data"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = _dt.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+        backup_path = backup_dir / f"config-backup-{stamp}.json"
+        backup_path.write_text(cfg_text)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"could not snapshot existing config: {exc}")
+
+    # Atomic write: tmp file + rename (same fs guaranteed since it's the same dir).
+    try:
+        tmp = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".tmp")
+        tmp.write_text(json.dumps(cfg, indent=4))
+        tmp.replace(CONFIG_PATH)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"atomic write failed: {exc}")
+
+    # Best-effort freqtrade reload.
+    reload_status = None
+    try:
+        async with httpx.AsyncClient(timeout=ENDPOINT_TIMEOUT_S) as client:
+            token = await _ensure_jwt(client)
+            if token:
+                r = await client.post(f"{FREQTRADE_API_URL}/api/v1/reload_config",
+                                      headers={"Authorization": f"Bearer {token}"})
+                reload_status = r.status_code
+    except Exception as exc:
+        reload_status = f"error: {exc}"
+
+    return _envelope("ok", data={
+        "changes": diffs,
+        "backup": str(backup_path),
+        "freqtrade_reload": reload_status,
+        "note": "Some params (entry/exit deltas) take effect on the next candle. "
+                "Trail distance / take-profit affect new positions only.",
+    })
+
+
+# --------------------------------------------------------------------------
+# Pause / Resume (continued)
+# --------------------------------------------------------------------------
+
+
 @router.post("/resume")
 async def resume(request: Request):
     body = await request.json() if request.headers.get("content-length") else {}
