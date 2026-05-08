@@ -316,8 +316,17 @@ async def _analyze_ollama(
     *,
     num_ctx: int = 4096,
     timeout_total: float = 180,
+    keep_alive: str = "30s",
 ) -> dict | None:
-    """Score `items` with the given Ollama model. Returns None on failure."""
+    """
+    Score `items` with the given Ollama model. Returns None on failure.
+
+    `keep_alive` controls how long Ollama keeps the model in VRAM after
+    this call. We default to "30s" — long enough to absorb a same-cycle
+    follow-up, short enough that the 70B (~91 GB allocation) doesn't park
+    in GPU between 15-min poll cycles. Override to "0s" to evict
+    immediately (good for one-shot tools).
+    """
     from .sentiment_prompts import OLLAMA_SYSTEM_PROMPT, build_user_prompt
 
     target = model or OLLAMA_MODEL_FAST
@@ -335,6 +344,7 @@ async def _analyze_ollama(
         ],
         "format": "json",
         "stream": False,
+        "keep_alive": keep_alive,
         "options": {"temperature": 0.2, "num_ctx": num_ctx},
     }
 
@@ -466,13 +476,19 @@ async def _poll_once() -> dict | None:
             logger.info("no news items — both models will see an empty list")
 
         # Fast + deep run in parallel; deep model gets a larger context window.
+        # The 70B costs ~50-91 GB of GPU memory to keep loaded, so we use
+        # keep_alive="0s" on the deep call — model evicts from VRAM right
+        # after the response, freeing the GPU for TFT training between
+        # 15-min sentiment polls. The 8B is small enough to keep warm.
         # If a model isn't pulled yet, _analyze_ollama returns None and the
         # majority logic falls back to single-source mode.
         fast, deep = await asyncio.gather(
             _analyze_ollama(session, items, OLLAMA_MODEL_FAST,
-                            num_ctx=4096, timeout_total=120),
+                            num_ctx=4096, timeout_total=120,
+                            keep_alive="5m"),
             _analyze_ollama(session, items, OLLAMA_MODEL_DEEP,
-                            num_ctx=8192, timeout_total=300),
+                            num_ctx=8192, timeout_total=300,
+                            keep_alive="0s"),
             return_exceptions=False,
         )
 
