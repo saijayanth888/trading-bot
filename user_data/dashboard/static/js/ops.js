@@ -196,10 +196,13 @@ async function refreshMcp() {
   const lastCallStr = d.last_call
     ? `${esc(d.last_call.tool)} @ ${esc(d.last_call.ts)}`
     : "<span class=\"muted\">none in log</span>";
+  const probeDetail = d.probe.via === "heartbeat"
+    ? `heartbeat ${esc(d.probe.age_s ?? "?")}s ago (${esc(d.probe.content || "?")})`
+    : `${esc(d.probe.code)}`;
   body.innerHTML =
     `<div class="row"><span class="label">endpoint</span><span class="value muted">${esc(d.endpoint)}</span></div>` +
     `<div class="row"><span class="label">transport</span><span class="value">${esc(d.transport)}</span></div>` +
-    `<div class="row"><span class="label">probe</span><span class="value">${esc(d.probe.code)} ${okBad}</span></div>` +
+    `<div class="row"><span class="label">probe</span><span class="value">${probeDetail} ${okBad}</span></div>` +
     `<div class="row"><span class="label">last call</span><span class="value">${lastCallStr}</span></div>`;
 }
 

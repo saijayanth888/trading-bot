@@ -153,11 +153,12 @@ def training_state(freqtrade_log: Path | None = None) -> dict[str, Any]:
     for log_path in log_candidates:
         if log_path and log_path.exists():
             try:
-                # tail efficiently
+                # tail efficiently — seek to the last 200k bytes
                 with log_path.open("rb") as f:
                     f.seek(0, 2)
                     size = f.tell()
-                    chunk = f.read(min(size, 200_000))
+                    f.seek(max(0, size - 200_000))
+                    chunk = f.read()
                 tail = chunk.decode("utf-8", errors="replace").splitlines()
                 for line in reversed(tail):
                     if "TFTModel" in line and "epoch " in line:
@@ -231,14 +232,18 @@ def _parse_tft_line(line: str, log_path: Path) -> dict[str, Any]:
 
 
 async def mcp_state() -> dict[str, Any]:
-    """Probe streamable-http and parse last tool call from the audit log."""
-    probe = await http_probe(f"http://{HOST}:8089/mcp")
+    """Liveness via heartbeat file (firewall blocks docker-bridge → host:8089),
+    plus parse last tool call from the audit log so the panel shows real activity.
+    """
+    hb = heartbeat_probe(HEARTBEAT_MCP)
     out: dict[str, Any] = {
-        "endpoint": probe["endpoint"],
+        "endpoint": "http://localhost:8089/mcp",
         "transport": "streamable-http",
         "probe": {
-            "code": probe.get("code"),
-            "ok_for_streamable_http": probe.get("up", False),
+            "via": "heartbeat",
+            "ok_for_streamable_http": hb.get("up", False),
+            "age_s": hb.get("age_s"),
+            "content": hb.get("content"),
         },
         "tools_count": None,
         "last_call": None,
@@ -249,7 +254,9 @@ async def mcp_state() -> dict[str, Any]:
             with MCP_LOG_PATH.open("rb") as f:
                 f.seek(0, 2)
                 size = f.tell()
-                chunk = f.read(min(size, 100_000))
+                # Read the last 100k bytes (or whole file if smaller).
+                f.seek(max(0, size - 100_000))
+                chunk = f.read()
             tail = chunk.decode("utf-8", errors="replace").splitlines()
             # Newest-first scan for "tool=" markers.
             for line in reversed(tail):
