@@ -182,9 +182,16 @@ _TF_TO_GRAN = {
 async def fetch_coinbase_candles(
     pair: str, timeframe: str = "5m", limit: int = 300,
 ) -> pd.DataFrame | None:
-    """Public Coinbase candles — used when freqtrade is unavailable."""
+    """
+    Public Coinbase candles — used when freqtrade is unavailable.
+
+    Coinbase Exchange's public `/products/{id}/candles` caps each request
+    at 300 candles, regardless of the time window. If a caller asks for
+    more, we cap silently rather than 400-ing.
+    """
     product = pair.replace("/", "-").upper()
     gran = _TF_TO_GRAN.get(timeframe, 300)
+    limit = min(int(limit), 300)
     end = datetime.now(timezone.utc)
     start = end - timedelta(seconds=gran * limit)
     try:

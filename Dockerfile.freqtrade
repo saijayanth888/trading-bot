@@ -1,0 +1,24 @@
+# Trading-bot freqtrade image — extends the stock freqtradeorg base with
+# the Python extras our strategy + modules need at import time
+# (psycopg for Postgres, stable-baselines3 for the DRL ensemble, hmmlearn
+# for the regime detector, influxdb-client for metrics, etc).
+#
+# Built once per requirements-extra.txt change; rebuild with:
+#   docker compose build freqtrade
+
+FROM freqtradeorg/freqtrade:stable_freqaitorch
+
+USER root
+
+# hmmlearn ships a C++ extension that PyPI doesn't pre-build for python
+# 3.14 / aarch64 yet, so we need a toolchain. Strip apt lists after to
+# keep the image reasonably lean.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        gcc g++ make \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-extra.txt /tmp/requirements-extra.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-extra.txt
+
+USER ftuser

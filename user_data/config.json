@@ -35,8 +35,7 @@
     },
     "entry_pricing": {
         "price_side": "same",
-        "use_order_book": true,
-        "order_book_top": 1,
+        "use_order_book": false,
         "price_last_balance": 0.0,
         "check_depth_of_market": {
             "enabled": false,
@@ -45,8 +44,7 @@
     },
     "exit_pricing": {
         "price_side": "same",
-        "use_order_book": true,
-        "order_book_top": 1
+        "use_order_book": false
     },
     "exchange": {
         "name": "coinbase",
@@ -77,13 +75,13 @@
         "expiration_hours": 26,
         "identifier": "tft_v1",
         "fit_live_predictions_candles": 300,
-        "conv_width": 120,
+        "conv_width": 60,
         "feature_parameters": {
             "include_timeframes": [
                 "5m",
                 "15m",
                 "1h",
-                "4h"
+                "6h"
             ],
             "include_corr_pairlist": [
                 "BTC/USD",
@@ -92,10 +90,10 @@
             "label_period_candles": 12,
             "flat_threshold_bps": 10,
             "include_shifted_candles": 0,
-            "DI_threshold": 0.9,
+            "DI_threshold": 0,
             "weight_factor": 0.9,
             "principal_component_analysis": false,
-            "use_SVM_to_remove_outliers": true,
+            "use_SVM_to_remove_outliers": false,
             "indicator_periods_candles": [
                 10,
                 20

@@ -58,7 +58,7 @@ def dsn() -> str:
          password — this is what makes special chars like '@' work.
 
     Inside docker-compose the network host is `postgres` on 5432; from the
-    Spark host it's `localhost` on 5433.
+    Spark host it's `localhost` on 5434.
     """
     explicit = os.environ.get("DATABASE_URL", "").strip()
     if explicit:

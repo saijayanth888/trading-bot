@@ -266,15 +266,15 @@ This starts:
 
 | Service | Port | What it does |
 |---|---|---|
-| `postgres` | 5433 | PostgreSQL + TimescaleDB (`tradebot` + `freqtrade` DBs) |
+| `postgres` | 5434 | PostgreSQL + TimescaleDB (`tradebot` + `freqtrade` DBs) |
 | `freqtrade` | 8080 | trading bot (FreqAI + TFT + DRL + risk + execution) |
 | `influxdb` | 8086 | time-series metrics store consumed by Grafana |
 | `grafana` | 3000 | observability dashboards (auto-provisioned) |
 | `dashboard` | 8081 | TradingView-style live trade dashboard |
 
-> **Note**: port `5433` (not `5432`) avoids conflicting with another local
+> **Note**: port `5434` (not `5432`) avoids conflicting with another local
 > Postgres instance (e.g. ModelForge). Internal compose-network traffic still
-> uses port `5432` — the host-mapped 5433 is only relevant when connecting
+> uses port `5432` — the host-mapped 5434 is only relevant when connecting
 > from the Spark itself.
 
 ### 4. Paper-trade until ready

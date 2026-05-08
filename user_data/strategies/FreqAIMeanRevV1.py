@@ -132,6 +132,37 @@ _SENTIMENT_NEUTRAL = {
 _REGIME_NEUTRAL = {col: 0.0 for col in REGIME_FEATURES}
 
 
+def _normalize_dt_index(df: DataFrame) -> DataFrame:
+    """
+    Force a tz-aware DatetimeIndex to millisecond resolution so it matches
+    the `date` column Freqtrade puts in the candle dataframe. Pandas 3.0
+    refuses to merge_asof across resolutions, and our Postgres-backed
+    feature dataframes come back at microsecond precision by default.
+    """
+    if not isinstance(df.index, pd.DatetimeIndex):
+        return df
+    if df.index.tz is None:
+        df.index = df.index.tz_localize("UTC")
+    try:
+        df.index = df.index.astype("datetime64[ms, UTC]")
+    except Exception:
+        # Fallback for older pandas: floor to millisecond and re-localize
+        df.index = df.index.floor("ms")
+    return df
+
+
+def _normalize_dt_column(df: DataFrame, col: str = "date") -> DataFrame:
+    """Same as `_normalize_dt_index` for a Series column (left side of merge_asof)."""
+    if col not in df.columns:
+        return df
+    s = pd.to_datetime(df[col], utc=True)
+    try:
+        df[col] = s.astype("datetime64[ms, UTC]")
+    except Exception:
+        df[col] = s.dt.floor("ms")
+    return df
+
+
 def _attach_onchain(dataframe: DataFrame, pair: str) -> DataFrame:
     """Merge on-chain features onto a candle dataframe (1h cadence, ffill)."""
     onchain = None
@@ -147,8 +178,8 @@ def _attach_onchain(dataframe: DataFrame, pair: str) -> DataFrame:
             dataframe[col] = default
         return dataframe
 
-    df_sorted = dataframe.sort_values("date").reset_index(drop=True)
-    onchain_sorted = onchain.sort_index()
+    df_sorted = _normalize_dt_column(dataframe.sort_values("date").reset_index(drop=True))
+    onchain_sorted = _normalize_dt_index(onchain.sort_index())
     merged = pd.merge_asof(
         df_sorted, onchain_sorted,
         left_on="date", right_index=True,
@@ -177,8 +208,8 @@ def _attach_sentiment(dataframe: DataFrame, pair: str) -> DataFrame:
             dataframe[col] = default
         return dataframe
 
-    df_sorted = dataframe.sort_values("date").reset_index(drop=True)
-    sentiment_sorted = sentiment.sort_index()
+    df_sorted = _normalize_dt_column(dataframe.sort_values("date").reset_index(drop=True))
+    sentiment_sorted = _normalize_dt_index(sentiment.sort_index())
     merged = pd.merge_asof(
         df_sorted, sentiment_sorted,
         left_on="date", right_index=True,
@@ -212,8 +243,8 @@ def _attach_regime(dataframe: DataFrame, pair: str) -> DataFrame:
         dataframe["regime_confidence"] = 0.0
         return dataframe
 
-    df_sorted = dataframe.sort_values("date").reset_index(drop=True)
-    regime_sorted = regime.sort_index()
+    df_sorted = _normalize_dt_column(dataframe.sort_values("date").reset_index(drop=True))
+    regime_sorted = _normalize_dt_index(regime.sort_index())
     merged = pd.merge_asof(
         df_sorted, regime_sorted,
         left_on="date", right_index=True,

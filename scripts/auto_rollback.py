@@ -50,7 +50,7 @@ def _resolve_dsn() -> str:
     user = os.environ.get("POSTGRES_USER", "tradebot")
     password = os.environ.get("POSTGRES_PASSWORD", "tradebot-change-me")
     host = os.environ.get("POSTGRES_HOST", "localhost")
-    port = os.environ.get("POSTGRES_PORT", "5433")
+    port = os.environ.get("POSTGRES_PORT", "5434")
     db = os.environ.get("POSTGRES_DB", "tradebot")
     return f"postgresql://{quote_plus(user)}:{quote_plus(password)}@{host}:{port}/{db}"
 

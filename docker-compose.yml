@@ -6,9 +6,9 @@ services:
     mem_limit: 2g
     memswap_limit: 2g
     shm_size: 256m
-    # Port 5433 to avoid conflicting with ModelForge's 5432 instance.
+    # Port 5434 to avoid conflicting with ModelForge's mf-postgres on 5433.
     ports:
-      - "5433:5432"
+      - "5434:5432"
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-tradebot}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-tradebot-change-me}
@@ -27,11 +27,14 @@ services:
       start_period: 20s
 
   freqtrade:
-    image: freqtradeorg/freqtrade:stable_freqaitorch
+    build:
+      context: .
+      dockerfile: Dockerfile.freqtrade
+    image: trading-bot/freqtrade:local
     container_name: freqtrade
     restart: unless-stopped
-    mem_limit: 16g
-    memswap_limit: 16g
+    mem_limit: 32g
+    memswap_limit: 32g
     shm_size: 2g
     depends_on:
       postgres:
@@ -63,8 +66,10 @@ services:
       - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY:-}
       - PERPLEXITY_MODEL=${PERPLEXITY_MODEL:-sonar}
       - PERPLEXITY_RECENCY=${PERPLEXITY_RECENCY:-hour}
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-tradebot}:${POSTGRES_PASSWORD:-tradebot-change-me}@postgres:5432/${POSTGRES_DB:-tradebot}
-      - FREQTRADE_DB_URL=postgresql://${POSTGRES_USER:-tradebot}:${POSTGRES_PASSWORD:-tradebot-change-me}@postgres:5432/freqtrade
+      # NOTE: DATABASE_URL + FREQTRADE_DB_URL are intentionally NOT inlined
+      # here — passwords with special chars (e.g. '@') break URL parsing.
+      # freqtrade_entrypoint.py builds them from POSTGRES_* below using
+      # urllib.parse.quote_plus on the password.
       - INFLUX_URL=http://influxdb:8086
       - INFLUX_TOKEN=${INFLUX_TOKEN:-trading-token}
       - INFLUX_ORG=${INFLUX_ORG:-trading-bot}

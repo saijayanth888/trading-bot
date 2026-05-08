@@ -256,12 +256,25 @@ async def ws_state(ws: WebSocket) -> None:
 # ---------------------------------------------------------------------------
 
 
+_EPOCH_UTC = pd.Timestamp("1970-01-01", tz="UTC")
+
+
+def _to_unix_seconds(series: pd.Series) -> pd.Series:
+    """
+    Convert a tz-aware datetime Series into int64 unix seconds.
+    pandas 3.x broke `series.astype("int64") // 10**9` on tz-aware datetimes
+    (returns 1 for every row); epoch-arithmetic is the version-portable fix.
+    """
+    s = pd.to_datetime(series, utc=True)
+    return ((s - _EPOCH_UTC) // pd.Timedelta(seconds=1)).astype("int64")
+
+
 def _candles_to_chart(df: pd.DataFrame) -> tuple[list[dict], list[dict]]:
     candles: list[dict] = []
     volume: list[dict] = []
     if "date" not in df.columns:
         return candles, volume
-    times = pd.to_datetime(df["date"], utc=True).astype("int64") // 10**9
+    times = _to_unix_seconds(df["date"])
     for i, t in enumerate(times):
         try:
             o = float(df["open"].iat[i]); h = float(df["high"].iat[i])
@@ -282,7 +295,7 @@ def _line_series(df: pd.DataFrame, col: str) -> list[dict]:
     if "date" not in df.columns or col not in df.columns:
         return []
     out: list[dict] = []
-    times = pd.to_datetime(df["date"], utc=True).astype("int64") // 10**9
+    times = _to_unix_seconds(df["date"])
     series = df[col]
     for i in range(len(df)):
         v = series.iat[i]
@@ -296,7 +309,7 @@ def _hist_series(df: pd.DataFrame, col: str) -> list[dict]:
     if "date" not in df.columns or col not in df.columns:
         return []
     out: list[dict] = []
-    times = pd.to_datetime(df["date"], utc=True).astype("int64") // 10**9
+    times = _to_unix_seconds(df["date"])
     series = df[col]
     for i in range(len(df)):
         v = series.iat[i]
