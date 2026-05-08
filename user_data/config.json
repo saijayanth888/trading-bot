@@ -50,8 +50,8 @@
     },
     "exchange": {
         "name": "coinbase",
-        "key": "YOUR_COINBASE_API_KEY_HERE",
-        "secret": "YOUR_COINBASE_API_SECRET_HERE",
+        "key": "__OVERRIDDEN_BY__FREQTRADE__EXCHANGE__KEY__",
+        "secret": "__OVERRIDDEN_BY__FREQTRADE__EXCHANGE__SECRET__",
         "ccxt_config": {},
         "ccxt_async_config": {},
         "pair_whitelist": [
@@ -64,7 +64,9 @@
         "pair_blacklist": []
     },
     "pairlists": [
-        {"method": "StaticPairList"}
+        {
+            "method": "StaticPairList"
+        }
     ],
     "freqai": {
         "enabled": true,
@@ -77,8 +79,16 @@
         "fit_live_predictions_candles": 300,
         "conv_width": 120,
         "feature_parameters": {
-            "include_timeframes": ["5m", "15m", "1h", "4h"],
-            "include_corr_pairlist": ["BTC/USD", "ETH/USD"],
+            "include_timeframes": [
+                "5m",
+                "15m",
+                "1h",
+                "4h"
+            ],
+            "include_corr_pairlist": [
+                "BTC/USD",
+                "ETH/USD"
+            ],
             "label_period_candles": 12,
             "flat_threshold_bps": 10,
             "include_shifted_candles": 0,
@@ -86,12 +96,15 @@
             "weight_factor": 0.9,
             "principal_component_analysis": false,
             "use_SVM_to_remove_outliers": true,
-            "indicator_periods_candles": [10, 20],
+            "indicator_periods_candles": [
+                10,
+                20
+            ],
             "noise_standard_deviation": 0.05,
             "buffer_train_data_candles": 20
         },
         "data_split_parameters": {
-            "test_size": 0.20,
+            "test_size": 0.2,
             "shuffle": false
         },
         "model_training_parameters": {
@@ -99,8 +112,8 @@
             "n_heads": 4,
             "dropout": 0.1,
             "var_dim": 8,
-            "lr": 1e-3,
-            "weight_decay": 1e-4,
+            "lr": 0.001,
+            "weight_decay": 0.0001,
             "n_epochs": 25,
             "batch_size": 256,
             "quantile_loss_weight": 0.3,
@@ -123,11 +136,11 @@
         "listen_port": 8080,
         "verbosity": "error",
         "enable_openapi": false,
-        "jwt_secret_key": "CHANGE_ME_RUN_openssl_rand_hex_32",
-        "ws_token": "CHANGE_ME_WS_TOKEN",
+        "jwt_secret_key": "__OVERRIDDEN_BY__FREQTRADE__API_SERVER__JWT_SECRET_KEY__",
+        "ws_token": "__OVERRIDDEN_BY__FREQTRADE__API_SERVER__WS_TOKEN__",
         "CORS_origins": [],
-        "username": "freqtrader",
-        "password": "CHANGE_ME_PASSWORD"
+        "username": "__OVERRIDDEN_BY__FREQTRADE__API_SERVER__USERNAME__",
+        "password": "__OVERRIDDEN_BY__FREQTRADE__API_SERVER__PASSWORD__"
     },
     "internals": {
         "process_throttle_secs": 5
@@ -135,9 +148,9 @@
     "risk_management": {
         "max_portfolio_drawdown_pct": 0.08,
         "daily_loss_limit_pct": 0.03,
-        "max_position_size_pct": 0.10,
+        "max_position_size_pct": 0.1,
         "max_concurrent_positions": 6,
-        "correlation_threshold": 0.70,
+        "correlation_threshold": 0.7,
         "correlation_lookback_days": 30,
         "correlation_min_overlap": 50,
         "circuit_breaker_consecutive_losses": 5,
@@ -161,5 +174,5 @@
         "api_secret_env": "COINBASE_API_SECRET"
     },
     "logfile": "user_data/logs/freqtrade.log",
-    "db_url": "postgresql+psycopg2://tradebot:tradebot-change-me@postgres:5432/freqtrade"
+    "db_url": "__OVERRIDDEN_BY__FREQTRADE__DB_URL__"
 }

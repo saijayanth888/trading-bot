@@ -222,14 +222,22 @@ Scripts under `scripts/`:
 
 ### 2. Configure secrets
 
+All secrets live in `.env`. `user_data/config.json` only contains placeholder
+sentinels and is safe to keep in version control as-is.
+
 ```bash
 cp .env.example .env
-# edit .env — at minimum:
+# Fill in:
 #   SLACK_WEBHOOK_URL                         (alerts)
 #   PERPLEXITY_API_KEY                        (news fetcher; Ollama scores locally)
 #   POSTGRES_PASSWORD                         (anything strong)
-#   INFLUX_TOKEN, INFLUX_ADMIN_PASSWORD       (metrics + Grafana)
-#   GRAFANA_ADMIN_PASSWORD
+#   INFLUX_TOKEN                              (`openssl rand -hex 32`)
+#   INFLUX_ADMIN_PASSWORD                     (Influx web UI)
+#   GRAFANA_ADMIN_PASSWORD                    (Grafana web UI)
+#   FREQTRADE_API_PASS                        (`openssl rand -hex 24`)
+#   FREQTRADE_JWT_SECRET                      (`openssl rand -hex 32`)
+#   FREQTRADE_WS_TOKEN                        (`openssl rand -hex 16`)
+chmod 600 .env
 ```
 
 **Coinbase API key** (only needed when you flip out of dry-run):
@@ -239,19 +247,14 @@ cp .env.example .env
 3. Set an **IP allowlist** to your Spark host's outbound IP
 4. Coinbase emits a JSON download — save it as **`secrets/coinbase.json`**
 
-That's it. Compose mounts `./secrets` read-only into the container and the
-SDK loads `coinbase.json` natively via `RESTClient(key_file=...)`. No need
-to escape PEM newlines inside `.env`.
+`scripts/freqtrade_entrypoint.py` runs at container start, reads that file,
+and exports its `name` and `privateKey` fields as `FREQTRADE__EXCHANGE__KEY`
+and `FREQTRADE__EXCHANGE__SECRET`. Freqtrade's native env-var override
+mechanism then injects them into `config.json[exchange]` at runtime — so
+**you never paste secrets into config.json**.
 
-Edit `user_data/config.json` for the UI login + JWT secrets:
-
-| Field | Value |
-|---|---|
-| `api_server.username` / `password` | UI login |
-| `api_server.jwt_secret_key` | `openssl rand -hex 32` |
-| `api_server.ws_token` | `openssl rand -hex 16` |
-
-`dry_run: true` is the default — no real money trades until you flip it.
+`dry_run: true` is the default in `config.json` — no real money trades
+until you flip it.
 
 ### 3. Bring up the stack
 

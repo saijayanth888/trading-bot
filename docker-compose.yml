@@ -40,6 +40,8 @@ services:
         condition: service_started
     volumes:
       - ./user_data:/freqtrade/user_data
+      # Operator scripts (entrypoint loader, etc) — read-only.
+      - ./scripts:/freqtrade/scripts:ro
       # Drop your Coinbase JSON key here (e.g. ./secrets/coinbase.json).
       # Read-only so the container cannot rewrite it.
       - ./secrets:/run/secrets/trading-bot:ro
@@ -68,11 +70,20 @@ services:
       - INFLUX_ORG=${INFLUX_ORG:-trading-bot}
       - INFLUX_BUCKET=${INFLUX_BUCKET:-trading}
       # Recommended: drop the JSON key Coinbase emits at ./secrets/coinbase.json.
-      # The compose mount above exposes it inside the container at this path.
+      # The freqtrade_entrypoint.py script reads it on container start and
+      # exports FREQTRADE__EXCHANGE__KEY / FREQTRADE__EXCHANGE__SECRET so the
+      # placeholders in config.json get overridden at runtime.
       - COINBASE_KEY_FILE=${COINBASE_KEY_FILE:-/run/secrets/trading-bot/coinbase.json}
-      # Fallback for the legacy env-var auth path (PEM secret with literal \n's).
+      # Fallback for the legacy env-var auth path (skipped when the JSON file is present).
       - COINBASE_API_KEY=${COINBASE_API_KEY:-}
       - COINBASE_API_SECRET=${COINBASE_API_SECRET:-}
+      # FREQTRADE__SECTION__KEY env vars override config.json at startup.
+      # All secrets live in .env; config.json stays commit-safe with sentinels.
+      - FREQTRADE__API_SERVER__USERNAME=${FREQTRADE_API_USER:-freqtrader}
+      - FREQTRADE__API_SERVER__PASSWORD=${FREQTRADE_API_PASS:?FREQTRADE_API_PASS required}
+      - FREQTRADE__API_SERVER__JWT_SECRET_KEY=${FREQTRADE_JWT_SECRET:?FREQTRADE_JWT_SECRET required}
+      - FREQTRADE__API_SERVER__WS_TOKEN=${FREQTRADE_WS_TOKEN:?FREQTRADE_WS_TOKEN required}
+      - FREQTRADE__DB_URL=postgresql+psycopg2://${POSTGRES_USER:-tradebot}:${POSTGRES_PASSWORD:-tradebot-change-me}@postgres:5432/freqtrade
     deploy:
       resources:
         reservations:
@@ -86,10 +97,13 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
+    # Override the image's default entrypoint (which is the freqtrade binary)
+    # so we can inject Coinbase credentials from secrets/coinbase.json into
+    # FREQTRADE__EXCHANGE__KEY / __SECRET env vars before exec'ing freqtrade.
+    entrypoint: ["python3", "/freqtrade/scripts/freqtrade_entrypoint.py"]
     command: >
       trade
       --logfile /freqtrade/user_data/logs/freqtrade.log
-      --db-url postgresql+psycopg2://${POSTGRES_USER:-tradebot}:${POSTGRES_PASSWORD:-tradebot-change-me}@postgres:5432/freqtrade
       --config /freqtrade/user_data/config.json
       --strategy FreqAIMeanRevV1
 
