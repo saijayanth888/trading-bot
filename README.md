@@ -225,18 +225,28 @@ Scripts under `scripts/`:
 ```bash
 cp .env.example .env
 # edit .env — at minimum:
-#   COINBASE_API_KEY / COINBASE_API_SECRET   (only required to go live)
-#   ANTHROPIC_API_KEY                         (sentiment engine)
 #   SLACK_WEBHOOK_URL                         (alerts)
+#   PERPLEXITY_API_KEY                        (news fetcher; Ollama scores locally)
+#   POSTGRES_PASSWORD                         (anything strong)
 #   INFLUX_TOKEN, INFLUX_ADMIN_PASSWORD       (metrics + Grafana)
 #   GRAFANA_ADMIN_PASSWORD
 ```
 
-Edit `user_data/config.json` to set:
+**Coinbase API key** (only needed when you flip out of dry-run):
+
+1. https://www.coinbase.com/settings/api → **New API Key**
+2. Grant **View** + **Trade** on the portfolio you want the bot to use
+3. Set an **IP allowlist** to your Spark host's outbound IP
+4. Coinbase emits a JSON download — save it as **`secrets/coinbase.json`**
+
+That's it. Compose mounts `./secrets` read-only into the container and the
+SDK loads `coinbase.json` natively via `RESTClient(key_file=...)`. No need
+to escape PEM newlines inside `.env`.
+
+Edit `user_data/config.json` for the UI login + JWT secrets:
 
 | Field | Value |
 |---|---|
-| `exchange.key` / `exchange.secret` | Coinbase Advanced Trade keys |
 | `api_server.username` / `password` | UI login |
 | `api_server.jwt_secret_key` | `openssl rand -hex 32` |
 | `api_server.ws_token` | `openssl rand -hex 16` |

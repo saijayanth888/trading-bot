@@ -51,17 +51,22 @@ python3 - <<'PY' >> "$LOG" 2>&1 || log "step 2 FAILED — order cancellation err
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "user_data"))
 def main():
-    api_key = os.environ.get("COINBASE_API_KEY")
-    api_secret = os.environ.get("COINBASE_API_SECRET")
-    if not api_key or not api_secret:
-        print("[stop] COINBASE_API_KEY/SECRET missing — skipping cancel step")
-        return
     try:
         from coinbase.rest import RESTClient
     except ImportError:
         print("[stop] coinbase-advanced-py not installed — cannot cancel orders")
         return
-    client = RESTClient(api_key=api_key, api_secret=api_secret)
+    key_file = os.environ.get("COINBASE_KEY_FILE", "").strip()
+    if key_file and os.path.exists(key_file):
+        print(f"[stop] using key file {key_file}")
+        client = RESTClient(key_file=key_file)
+    else:
+        api_key = os.environ.get("COINBASE_API_KEY", "").strip()
+        api_secret = os.environ.get("COINBASE_API_SECRET", "").strip()
+        if not api_key or not api_secret:
+            print("[stop] COINBASE_KEY_FILE or API_KEY/SECRET missing — skip cancel")
+            return
+        client = RESTClient(api_key=api_key, api_secret=api_secret)
     try:
         resp = client.list_orders(order_status="OPEN")
         orders = getattr(resp, "orders", None) or (

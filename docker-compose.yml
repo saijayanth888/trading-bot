@@ -40,6 +40,9 @@ services:
         condition: service_started
     volumes:
       - ./user_data:/freqtrade/user_data
+      # Drop your Coinbase JSON key here (e.g. ./secrets/coinbase.json).
+      # Read-only so the container cannot rewrite it.
+      - ./secrets:/run/secrets/trading-bot:ro
     ports:
       - "8080:8080"
     extra_hosts:
@@ -64,6 +67,10 @@ services:
       - INFLUX_TOKEN=${INFLUX_TOKEN:-trading-token}
       - INFLUX_ORG=${INFLUX_ORG:-trading-bot}
       - INFLUX_BUCKET=${INFLUX_BUCKET:-trading}
+      # Recommended: drop the JSON key Coinbase emits at ./secrets/coinbase.json.
+      # The compose mount above exposes it inside the container at this path.
+      - COINBASE_KEY_FILE=${COINBASE_KEY_FILE:-/run/secrets/trading-bot/coinbase.json}
+      # Fallback for the legacy env-var auth path (PEM secret with literal \n's).
       - COINBASE_API_KEY=${COINBASE_API_KEY:-}
       - COINBASE_API_SECRET=${COINBASE_API_SECRET:-}
     deploy:

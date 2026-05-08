@@ -98,6 +98,10 @@ class ExecutionConfig:
     poll_interval_sec: float = 1.0
     log_path: str = "user_data/logs/execution.log"
     dry_run: bool = True
+    # Auth — prefer the JSON key file Coinbase emits from the
+    # CDP / Advanced Trade portal. The SDK loads it natively and
+    # avoids us juggling a multi-line PEM private key inside .env.
+    key_file_env: str = "COINBASE_KEY_FILE"
     api_key_env: str = "COINBASE_API_KEY"
     api_secret_env: str = "COINBASE_API_SECRET"
 
@@ -198,12 +202,30 @@ class ExecutionEngine:
                 "coinbase-advanced-py SDK is required for live execution; "
                 f"`pip install coinbase-advanced-py`. Original error: {exc}"
             ) from exc
-        api_key = os.environ.get(self.cfg.api_key_env)
-        api_secret = os.environ.get(self.cfg.api_secret_env)
+
+        # Preferred path: JSON key file Coinbase downloads from the CDP /
+        # Advanced Trade portal. Looks like:
+        #   { "name": "organizations/.../apiKeys/...",
+        #     "privateKey": "-----BEGIN EC PRIVATE KEY-----\n..." }
+        key_file = os.environ.get(self.cfg.key_file_env, "").strip()
+        if key_file:
+            if not os.path.exists(key_file):
+                raise RuntimeError(
+                    f"Coinbase key file {key_file} (from {self.cfg.key_file_env}) "
+                    f"does not exist."
+                )
+            self._client = RESTClient(key_file=key_file)
+            return self._client
+
+        # Fallback: env-var pair. The PEM private key needs literal newlines
+        # so set it via `printf "%b\n" "$KEY"` or use a multi-line .env.
+        api_key = os.environ.get(self.cfg.api_key_env, "").strip()
+        api_secret = os.environ.get(self.cfg.api_secret_env, "").strip()
         if not api_key or not api_secret:
             raise RuntimeError(
-                f"Coinbase credentials missing — set "
-                f"{self.cfg.api_key_env} / {self.cfg.api_secret_env} env vars."
+                f"Coinbase credentials missing — set {self.cfg.key_file_env} "
+                f"(recommended) or {self.cfg.api_key_env} / "
+                f"{self.cfg.api_secret_env} env vars."
             )
         self._client = RESTClient(api_key=api_key, api_secret=api_secret)
         return self._client

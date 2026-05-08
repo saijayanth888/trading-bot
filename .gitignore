@@ -21,6 +21,10 @@ env/
 credentials.json
 .go_live_state*
 .trading-bot/
+# secrets/ tree — keep README + .gitkeep, drop real key files
+secrets/*
+!secrets/README.md
+!secrets/.gitkeep
 
 # --- Runtime / generated state -------------------------------------------
 user_data/data/onchain.db
