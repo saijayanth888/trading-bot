@@ -77,6 +77,7 @@ FREQTRADE_USER = os.environ.get("FREQTRADE_API_USER", "freqtrader")
 FREQTRADE_PASS = os.environ.get("FREQTRADE_API_PASS", "")
 
 PORT = int(os.environ.get("HERMES_MCP_PORT", "8089"))
+HOST = os.environ.get("HERMES_MCP_HOST", "0.0.0.0")
 HERMES_MCP_KEY = os.environ.get("HERMES_MCP_KEY", "").strip()
 
 # Block writes from the SQL passthrough tool — only SELECT and CTE allowed.
@@ -200,7 +201,7 @@ async def _ft_get(path: str) -> Any:
 # MCP server
 # ---------------------------------------------------------------------------
 
-mcp = FastMCP("trading-bot")
+mcp = FastMCP("trading-bot", host=HOST, port=PORT)
 
 
 # ----- Trade data ----------------------------------------------------------
@@ -567,35 +568,13 @@ def _check_auth() -> None:
 if __name__ == "__main__":
     _check_auth()
     log.info(
-        "starting hermes-mcp on port=%d trading_bot_root=%s freqtrade=%s",
-        PORT, ROOT_DIR, FREQTRADE_API,
+        "starting hermes-mcp on %s:%d transport=%s trading_bot_root=%s freqtrade=%s",
+        HOST, PORT,
+        os.environ.get("HERMES_MCP_TRANSPORT", "sse"),
+        ROOT_DIR, FREQTRADE_API,
     )
-    # FastMCP transport — uses stdio by default, but can serve over SSE/HTTP
+    # FastMCP picks up host/port from the constructor (mcp v1.2+). The
+    # transport is selected at run-time: stdio for direct-pipe parents,
+    # sse / streamable-http for network access.
     transport = os.environ.get("HERMES_MCP_TRANSPORT", "sse")
-    if transport == "stdio":
-        mcp.run()
-    else:
-        # SSE / HTTP transport for network access
-        import uvicorn
-        from mcp.server.sse import SseServerTransport
-        # FastMCP has a built-in `run_sse` helper in recent versions; fall back
-        # to the lower-level handler path for older mcp packages.
-        if hasattr(mcp, "run_sse_async"):
-            asyncio.run(mcp.run_sse_async(host="0.0.0.0", port=PORT))
-        else:
-            from starlette.applications import Starlette
-            from starlette.routing import Route, Mount
-            sse = SseServerTransport("/messages/")
-            async def handle_sse(request):
-                async with sse.connect_sse(
-                    request.scope, request.receive, request._send
-                ) as streams:
-                    await mcp._mcp_server.run(
-                        streams[0], streams[1],
-                        mcp._mcp_server.create_initialization_options(),
-                    )
-            app = Starlette(routes=[
-                Route("/sse", endpoint=handle_sse),
-                Mount("/messages/", app=sse.handle_post_message),
-            ])
-            uvicorn.run(app, host="0.0.0.0", port=PORT)
+    mcp.run(transport=transport)
