@@ -135,6 +135,16 @@
         <div id="mcp-body">Loading…</div>
       </section>
 
+      <!-- ─── Per-pair sparklines (5m close prices, last 24h) ────────── -->
+      <section class="ops-card wide-card" id="card-sparklines" data-status="ok">
+        <div class="card-head">
+          <h3>Pair sparklines · <span class="muted" style="font-size:11px;">5m closes, last 24h · refreshes every 60s</span></h3>
+        </div>
+        <div id="sparklines" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;">
+          <div class="muted" style="grid-column:1/-1;font-size:12px;">Loading…</div>
+        </div>
+      </section>
+
       <!-- ─── Trades + risk ───────────────────────────────────────────── -->
       <section class="ops-card wide-card" id="card-trades" data-status="ok">
         <div class="card-head">

@@ -32,7 +32,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from . import ops_db, ops_probes
-from .data_sources import _ensure_jwt
+from .data_sources import _ensure_jwt, fetch_freqtrade_candles
 
 logger = logging.getLogger(__name__)
 
@@ -323,6 +323,60 @@ async def pause(request: Request):
         raise HTTPException(status_code=code if code >= 400 else 502,
                             detail=err or f"freqtrade {code}: {payload}")
     return _envelope("ok", data={"freqtrade_response": payload, "reason": note})
+
+
+# --------------------------------------------------------------------------
+# /api/ops/sparklines — per-pair last-N close prices for tiny inline charts
+# --------------------------------------------------------------------------
+
+DEFAULT_PAIRS = [p.strip() for p in os.environ.get(
+    "DASHBOARD_PAIRS", "BTC/USD,ETH/USD,SOL/USD,ADA/USD",
+).split(",") if p.strip()]
+
+
+@router.get("/sparklines")
+async def sparklines(timeframe: str = "5m", limit: int = 60):
+    """Per-pair compact close-price arrays + 24h % change.
+
+    Used by the Ops trades panel to render small inline price sparklines.
+    Reuses freqtrade's /api/v1/pair_candles so we don't add a second data
+    pipe. ``limit`` capped at 200 so payloads stay small.
+    """
+    limit = max(10, min(200, int(limit)))
+    if timeframe not in ("1m", "5m", "15m", "1h", "6h"):
+        timeframe = "5m"
+
+    async def _one(pair: str):
+        df = await fetch_freqtrade_candles(pair, timeframe=timeframe, limit=limit)
+        if df is None or df.empty:
+            return pair, {"closes": [], "current": None, "pct_24h": None}
+        closes = [float(x) for x in df["close"].tolist()]
+        current = closes[-1]
+        # 24h % change: walk back enough candles for 24h
+        per_day = {"1m": 1440, "5m": 288, "15m": 96, "1h": 24, "6h": 4}.get(timeframe, 288)
+        ref_idx = max(0, len(closes) - per_day - 1)
+        ref = closes[ref_idx] if ref_idx < len(closes) else closes[0]
+        pct = ((current - ref) / ref * 100.0) if ref else None
+        return pair, {"closes": closes, "current": current, "pct_24h": pct}
+
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*[_one(p) for p in DEFAULT_PAIRS], return_exceptions=False),
+            timeout=ENDPOINT_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        return _envelope("down", error="sparklines fetch timed out")
+    except Exception as exc:
+        logger.exception("sparklines failed")
+        return _envelope("down", error=str(exc))
+
+    data = {pair: payload for pair, payload in results}
+    has_any = any(p.get("closes") for p in data.values())
+    return _envelope(
+        "ok" if has_any else "degraded",
+        data={"pairs": data, "timeframe": timeframe, "limit": limit},
+        error=None if has_any else "freqtrade returned no candle data",
+    )
 
 
 # --------------------------------------------------------------------------

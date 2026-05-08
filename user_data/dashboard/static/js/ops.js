@@ -14,6 +14,7 @@ const REFRESH_MS = {
   sentiment:  30000,
   mcp:        15000,
   trades:      5000,
+  sparklines: 60000,  // 5m candles only change every 5 min; refresh once a min
 };
 
 const REGIME_ARROW = {
@@ -265,6 +266,90 @@ async function refreshTrades() {
   body.innerHTML = html;
 }
 
+// ─── Sparklines (per-pair tiny price chart on canvas) ──────────────
+function drawSparkline(canvas, closes, color = "#4cc38a", colorDown = "#ff6b6b") {
+  if (!canvas || !closes || closes.length < 2) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  if (canvas.width !== W * dpr) { canvas.width = W * dpr; canvas.height = H * dpr; }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  const lo = Math.min(...closes), hi = Math.max(...closes);
+  const range = (hi - lo) || 1;
+  const x = i => (i / (closes.length - 1)) * (W - 2) + 1;
+  const y = v => H - 1 - ((v - lo) / range) * (H - 2);
+
+  // Determine direction by last vs first
+  const up = closes[closes.length - 1] >= closes[0];
+  const stroke = up ? color : colorDown;
+
+  // Filled area
+  ctx.beginPath();
+  ctx.moveTo(x(0), y(closes[0]));
+  for (let i = 1; i < closes.length; i++) ctx.lineTo(x(i), y(closes[i]));
+  ctx.lineTo(x(closes.length - 1), H); ctx.lineTo(x(0), H); ctx.closePath();
+  ctx.fillStyle = stroke + "33";  // 20% alpha
+  ctx.fill();
+
+  // Stroke line
+  ctx.beginPath();
+  ctx.moveTo(x(0), y(closes[0]));
+  for (let i = 1; i < closes.length; i++) ctx.lineTo(x(i), y(closes[i]));
+  ctx.strokeStyle = stroke; ctx.lineWidth = 1.4;
+  ctx.stroke();
+}
+
+async function refreshSparklines() {
+  const r = await jsonFetch("/api/ops/sparklines?timeframe=5m&limit=288");
+  const env = r.body;
+  if (env.status === "down" || !env.data) return;
+  const pairs = env.data.pairs || {};
+  const host = document.getElementById("sparklines");
+  if (!host) return;
+
+  // Build / re-build the row of cards
+  const labels = Object.keys(pairs);
+  if (host.dataset.built !== labels.join(",")) {
+    host.dataset.built = labels.join(",");
+    host.replaceChildren();
+    for (const p of labels) {
+      const card = document.createElement("div");
+      card.style.cssText = "background:#0a0f24;border:1px solid #1f2748;border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:2px;min-width:0;";
+      card.innerHTML =
+        `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;">` +
+        `<span style="font-size:12px;font-weight:600;">${esc(p)}</span>` +
+        `<span class="muted" style="font-size:10px;" data-spark-pct>—</span>` +
+        `</div>` +
+        `<div style="font-size:18px;font-variant-numeric:tabular-nums;" data-spark-price>—</div>` +
+        `<canvas data-spark-canvas style="width:100%;height:36px;display:block;"></canvas>`;
+      card.dataset.pair = p;
+      host.appendChild(card);
+    }
+  }
+
+  for (const card of host.children) {
+    const p = card.dataset.pair;
+    const v = pairs[p] || {};
+    const priceEl = card.querySelector("[data-spark-price]");
+    const pctEl = card.querySelector("[data-spark-pct]");
+    const canvas = card.querySelector("[data-spark-canvas]");
+    priceEl.textContent = v.current !== null && v.current !== undefined
+      ? "$" + Number(v.current).toLocaleString(undefined, {maximumFractionDigits: 4})
+      : "—";
+    if (v.pct_24h !== null && v.pct_24h !== undefined) {
+      const cls = v.pct_24h > 0 ? "ok" : v.pct_24h < 0 ? "bad" : "muted";
+      pctEl.className = cls;
+      pctEl.style.fontSize = "10px";
+      pctEl.textContent = fmtPct(v.pct_24h) + " 24h";
+    } else {
+      pctEl.textContent = "—";
+    }
+    drawSparkline(canvas, v.closes || []);
+  }
+}
+
 // ─── Pause / Resume ─────────────────────────────────────────────────
 async function pauseClicked() {
   const btn = document.getElementById("btn-pause");
@@ -417,11 +502,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
   refreshRegime().then(refreshSentiment);
   refreshServices(); refreshTraining(); refreshMcp(); refreshTrades();
-  refreshRegimeConfig();
+  refreshRegimeConfig(); refreshSparklines();
 
   setInterval(() => { refreshRegime().then(refreshSentiment); }, REFRESH_MS.regime);
   setInterval(refreshServices, REFRESH_MS.services);
   setInterval(refreshTraining, REFRESH_MS.training);
   setInterval(refreshMcp,      REFRESH_MS.mcp);
   setInterval(refreshTrades,   REFRESH_MS.trades);
+  setInterval(refreshSparklines, REFRESH_MS.sparklines);
 });
