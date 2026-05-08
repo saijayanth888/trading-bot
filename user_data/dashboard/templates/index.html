@@ -24,6 +24,9 @@
         <option value="15m">15m</option>
         <option value="1h">1h</option>
       </select>
+      <span id="mode-badge" class="mode-pill mode-paper" title="Trading mode">
+        🧪 PAPER
+      </span>
       <span id="ws-indicator" class="ws-pill ws-off" title="WebSocket status">
         ◉ offline
       </span>
@@ -64,10 +67,23 @@
       <div class="card">
         <h3>Now</h3>
         <div class="kv"><span>Regime</span><b id="state-regime">—</b></div>
+        <div class="meter" title="Regime confidence">
+          <div id="meter-regime" class="bar bar-blue"></div>
+        </div>
         <div class="kv"><span>Sentiment</span><b id="state-sentiment">—</b></div>
+        <div class="meter" title="Sentiment score (−1 = bearish, +1 = bullish)">
+          <div class="zero-tick"></div>
+          <div id="meter-sentiment" class="bar bar-amber bar-bipolar"></div>
+        </div>
         <div class="kv"><span>Meta signal</span><b id="state-meta">—</b></div>
+        <div class="meter" title="Meta-agent confidence">
+          <div id="meter-meta" class="bar bar-green"></div>
+        </div>
         <div class="kv"><span>TFT (up / flat / down)</span><b id="state-tft">—</b></div>
         <div class="kv"><span>TFT confidence</span><b id="state-tft-conf">—</b></div>
+        <div class="meter" title="TFT quantile-spread confidence">
+          <div id="meter-tft" class="bar bar-violet"></div>
+        </div>
       </div>
 
       <div class="card">

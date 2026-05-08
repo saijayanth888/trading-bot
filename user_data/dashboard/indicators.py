@@ -47,8 +47,26 @@ def macd(
     return macd_line, signal_line, hist
 
 
+def ema(close: pd.Series, period: int) -> pd.Series:
+    """Standard exponential moving average."""
+    return close.ewm(span=period, adjust=False, min_periods=period).mean()
+
+
+def vwap_session(df: pd.DataFrame) -> pd.Series:
+    """
+    Rolling 24h VWAP (typical price · volume / volume), reset every UTC day.
+    Best-effort if `volume` is missing — falls back to NaN-filled series.
+    """
+    if "volume" not in df.columns or "high" not in df.columns or "low" not in df.columns:
+        return pd.Series(index=df.index, dtype=float)
+    typical = (df["high"] + df["low"] + df["close"]) / 3.0
+    pv = (typical * df["volume"]).cumsum()
+    vv = df["volume"].cumsum().replace(0, pd.NA)
+    return (pv / vv).astype(float)
+
+
 def attach_all(df: pd.DataFrame) -> pd.DataFrame:
-    """Add RSI/BB/MACD columns onto a candles dataframe (close column)."""
+    """Add RSI / BB / MACD / EMA(20,50) / VWAP columns onto a candles dataframe."""
     if "close" not in df.columns:
         return df
     df = df.copy()
@@ -61,4 +79,7 @@ def attach_all(df: pd.DataFrame) -> pd.DataFrame:
     df["macd"] = macd_line
     df["macd_signal"] = signal_line
     df["macd_hist"] = hist
+    df["ema20"] = ema(df["close"], 20)
+    df["ema50"] = ema(df["close"], 50)
+    df["vwap"] = vwap_session(df)
     return df

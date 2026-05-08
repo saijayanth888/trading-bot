@@ -27,6 +27,13 @@
     macd:        $("chart-macd"),
     regime:      $("regime-ribbon"),
     wsIndicator: $("ws-indicator"),
+    modeBadge:   $("mode-badge"),
+    meters: {
+      regime:    $("meter-regime"),
+      sentiment: $("meter-sentiment"),
+      meta:      $("meter-meta"),
+      tft:       $("meter-tft"),
+    },
     state: {
       regime:        $("state-regime"),
       sentiment:     $("state-sentiment"),
@@ -114,6 +121,10 @@
   const bbUpperSeries = mainChart.addLineSeries({ color: "rgba(79,141,247,0.7)", lineWidth: 1 });
   const bbMidSeries   = mainChart.addLineSeries({ color: "rgba(79,141,247,0.55)", lineStyle: 1, lineWidth: 1 });
   const bbLowerSeries = mainChart.addLineSeries({ color: "rgba(79,141,247,0.7)", lineWidth: 1 });
+  // Trend overlays
+  const ema20Series = mainChart.addLineSeries({ color: "#f59e0b", lineWidth: 1.5, lastValueVisible: true, title: "EMA20" });
+  const ema50Series = mainChart.addLineSeries({ color: "#8b5cf6", lineWidth: 1.5, lastValueVisible: true, title: "EMA50" });
+  const vwapSeries  = mainChart.addLineSeries({ color: "#22d3ee", lineWidth: 1.5, lineStyle: 2, lastValueVisible: true, title: "VWAP" });
   // Volume on a thin overlay scale at the bottom
   const volumeSeries = mainChart.addHistogramSeries({
     priceFormat: { type: "volume" },
@@ -194,6 +205,9 @@
     bbUpperSeries.setData(candleData.indicators.bb_upper || []);
     bbMidSeries.setData(candleData.indicators.bb_mid || []);
     bbLowerSeries.setData(candleData.indicators.bb_lower || []);
+    ema20Series.setData(candleData.indicators.ema20 || []);
+    ema50Series.setData(candleData.indicators.ema50 || []);
+    vwapSeries.setData(candleData.indicators.vwap || []);
     candleSeries.setMarkers(tradeData.markers || []);
 
     // RSI + MACD subcharts
@@ -310,15 +324,40 @@
     return `${sign}$${v.toFixed(2)}`;
   }
 
+  function setBar(bar, fraction, opts = {}) {
+    if (!bar) return;
+    const f = Math.max(0, Math.min(1, Number(fraction) || 0));
+    bar.style.width = `${(f * 100).toFixed(1)}%`;
+  }
+
+  function setBipolarBar(bar, value, opts = {}) {
+    // value in [-1, 1] — render from the zero tick outward
+    if (!bar) return;
+    const v = Math.max(-1, Math.min(1, Number(value) || 0));
+    if (v >= 0) {
+      bar.style.left = "50%";
+      bar.style.width = `${(v * 50).toFixed(1)}%`;
+      bar.style.background = "linear-gradient(90deg, rgba(34,197,94,0.4), rgba(34,197,94,1.0))";
+    } else {
+      bar.style.left = `${(50 + v * 50).toFixed(1)}%`;
+      bar.style.width = `${(-v * 50).toFixed(1)}%`;
+      bar.style.background = "linear-gradient(90deg, rgba(239,68,68,1.0), rgba(239,68,68,0.4))";
+    }
+  }
+
   function applyState(state) {
     if (!state || state.error) return;
     const s = els.state;
     s.regime.textContent = state.regime
       ? `${REGIME_LABELS[state.regime] || state.regime} (${fmtPct(state.regime_confidence)})`
       : "—";
+    setBar(els.meters.regime, state.regime_confidence);
+
     s.sentiment.textContent = state.sentiment_score == null
       ? "—"
       : `${fmt(state.sentiment_score, 2)} @ ${fmtPct(state.sentiment_confidence)}`;
+    setBipolarBar(els.meters.sentiment, state.sentiment_score);
+
     if (state.meta_signal == null) {
       s.meta.textContent = "—";
     } else {
@@ -326,10 +365,13 @@
       const arrow = ms > 0 ? "↑" : (ms < 0 ? "↓" : "·");
       s.meta.textContent = `${arrow} ${ms} @ ${fmtPct(state.meta_confidence)}`;
     }
+    setBar(els.meters.meta, state.meta_confidence);
+
     s.tft.textContent = state.tft && state.tft.up != null
       ? `${fmt(state.tft.up, 2)} / ${fmt(state.tft.flat, 2)} / ${fmt(state.tft.down, 2)}`
       : "—";
     s.tftConf.textContent = state.tft ? fmtPct(state.tft.confidence) : "—";
+    setBar(els.meters.tft, state.tft && state.tft.confidence);
 
     s.netflow.textContent = state.onchain ? fmt(state.onchain.netflow_z) : "—";
     s.mvrv.textContent    = state.onchain ? fmt(state.onchain.mvrv) : "—";
@@ -449,9 +491,28 @@
   els.pair.addEventListener("change", () => loadPair(currentPair(), currentTimeframe()));
   els.tf.addEventListener("change",   () => loadPair(currentPair(), currentTimeframe()));
 
+  function applyMode(m) {
+    const node = els.modeBadge;
+    if (!node || !m) return;
+    node.classList.remove("mode-paper", "mode-live", "mode-paused");
+    if (m.mode === "live") {
+      node.classList.add("mode-live");
+      node.textContent = "🔴 LIVE";
+    } else if (m.mode === "paused") {
+      node.classList.add("mode-paused");
+      node.textContent = "⏸ PAUSED";
+    } else {
+      node.classList.add("mode-paper");
+      node.textContent = "🧪 PAPER";
+    }
+    node.title = `state=${m.state} dry_run=${m.dry_run}`;
+  }
+
   // First load — hit /api/state right away so the sidebar has data even if
   // the WS handshake takes a moment.
   getJson("/api/state").then(applyState).catch(() => {});
+  getJson("/api/mode").then(applyMode).catch(() => {});
+  setInterval(() => getJson("/api/mode").then(applyMode).catch(() => {}), 60_000);
   loadPair(currentPair(), currentTimeframe());
   connectWs();
 })();

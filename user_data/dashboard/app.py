@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
@@ -89,6 +90,38 @@ async def api_pairs() -> dict:
     return {"pairs": DEFAULT_PAIRS, "timeframe": DEFAULT_TIMEFRAME}
 
 
+@app.get("/api/mode")
+async def api_mode() -> dict[str, Any]:
+    """Return the freqtrade run mode (paper / live / paused) for the topbar badge."""
+    out = {"mode": "unknown", "state": "unknown", "dry_run": None}
+    async with httpx.AsyncClient() as client:
+        from .data_sources import _ensure_jwt
+        token = await _ensure_jwt(client)
+        if token is None:
+            return out
+        try:
+            r = await client.get(
+                f"{os.environ.get('FREQTRADE_API_URL', 'http://freqtrade:8080')}/api/v1/show_config",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=3.0,
+            )
+            if r.status_code == 200:
+                cfg = r.json()
+                state = str(cfg.get("state", "unknown")).lower()
+                dry = bool(cfg.get("dry_run", True))
+                out["state"] = state
+                out["dry_run"] = dry
+                if state in ("paused", "stopped"):
+                    out["mode"] = "paused"
+                elif dry:
+                    out["mode"] = "paper"
+                else:
+                    out["mode"] = "live"
+        except Exception as exc:
+            logger.debug("mode probe failed: %s", exc)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Candles + indicators + regime + per-pair state
 # ---------------------------------------------------------------------------
@@ -138,6 +171,9 @@ async def api_candles(
             "macd": macd_line,
             "macd_signal": macd_signal,
             "macd_hist": macd_hist,
+            "ema20": _line_series(df, "ema20"),
+            "ema50": _line_series(df, "ema50"),
+            "vwap": _line_series(df, "vwap"),
         },
         "regime_segments": regime,
         "pair_state": state,
