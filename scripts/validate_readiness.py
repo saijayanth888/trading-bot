@@ -26,14 +26,20 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import sqlite3
+import os
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-DEFAULT_DB = Path(__file__).resolve().parents[1] / "user_data" / "data" / "onchain.db"
+import psycopg
+from psycopg.rows import dict_row
+
+DEFAULT_DSN = os.environ.get(
+    "DATABASE_URL",
+    "postgresql://tradebot:tradebot-change-me@localhost:5433/tradebot",
+)
 
 # Annualisation factor for crypto (24/7 markets). 365 because crypto
 # doesn't take weekends off — using 252 underestimates volatility.
@@ -87,26 +93,37 @@ class ReadinessReport:
 
 
 def _load_closed_trades(
-    db_path: Path, window_days: int | None,
+    dsn: str, window_days: int | None,
 ) -> tuple[list[dict], str | None, str | None]:
-    if not db_path.exists():
-        raise SystemExit(f"trade journal not found at {db_path}")
     where = "closed_at IS NOT NULL"
     params: list[Any] = []
     window_start: str | None = None
     window_end: str | None = None
     if window_days is not None and window_days > 0:
         cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
-        where += " AND closed_at >= ?"
-        params.append(cutoff.isoformat())
+        where += " AND closed_at >= %s"
+        params.append(cutoff)
         window_start = cutoff.isoformat()
     sql = (
         f"SELECT closed_at, pnl, pnl_pct, stake "
         f"FROM trade_journal WHERE {where} ORDER BY closed_at ASC"
     )
-    with sqlite3.connect(str(db_path)) as conn:
-        conn.row_factory = sqlite3.Row
-        rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+    try:
+        with psycopg.connect(dsn, connect_timeout=5) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(sql, tuple(params))
+                rows = list(cur.fetchall())
+    except Exception as exc:
+        raise SystemExit(f"could not query trade journal: {exc}") from exc
+
+    # Normalise datetimes to ISO strings so the rest of the script can treat
+    # them as strings (and JSON-serialise them in --json mode).
+    for r in rows:
+        for k in ("closed_at",):
+            v = r.get(k)
+            if isinstance(v, datetime):
+                r[k] = v.astimezone(timezone.utc).isoformat()
+
     if rows:
         window_end = rows[-1]["closed_at"]
         if window_start is None:
@@ -177,7 +194,7 @@ def _annualised_sharpe(daily_pcts: list[float]) -> float:
 
 
 def evaluate_readiness(
-    db_path: Path,
+    dsn: str,
     *,
     window_days: int | None = None,
     sharpe_min: float = 1.5,
@@ -186,7 +203,7 @@ def evaluate_readiness(
     win_rate_min: float = 0.55,
     trades_min: int = 200,
 ) -> ReadinessReport:
-    rows, win_start, win_end = _load_closed_trades(db_path, window_days)
+    rows, win_start, win_end = _load_closed_trades(dsn, window_days)
     n = len(rows)
     daily = _daily_pnl_pct(rows)
     sharpe = _annualised_sharpe(daily)
@@ -238,8 +255,8 @@ def _print_report(report: ReadinessReport) -> None:
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--db", type=Path, default=DEFAULT_DB,
-                   help="Path to onchain.db (default user_data/data/onchain.db)")
+    p.add_argument("--dsn", default=DEFAULT_DSN,
+                   help="PostgreSQL DSN (default: $DATABASE_URL or compose default)")
     p.add_argument("--window-days", type=int, default=None,
                    help="Restrict evaluation to the last N days (default: all-time)")
     p.add_argument("--sharpe-min", type=float, default=1.5)
@@ -251,7 +268,7 @@ def main() -> int:
     args = p.parse_args()
 
     report = evaluate_readiness(
-        args.db, window_days=args.window_days,
+        args.dsn, window_days=args.window_days,
         sharpe_min=args.sharpe_min, drawdown_max=args.drawdown_max,
         profit_factor_min=args.profit_factor_min,
         win_rate_min=args.win_rate_min, trades_min=args.trades_min,

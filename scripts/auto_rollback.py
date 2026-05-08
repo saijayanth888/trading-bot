@@ -27,19 +27,24 @@ import json
 import logging
 import math
 import os
-import sqlite3
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import psycopg
+from psycopg.rows import dict_row
+
 ROOT = Path(__file__).resolve().parents[1]
-DB_PATH = ROOT / "user_data" / "data" / "onchain.db"
 CONFIG_PATH = ROOT / "user_data" / "config.json"
 STATE_DIR = Path(os.environ.get("HOME", "/tmp")) / ".trading-bot"
 STATE_FILE = STATE_DIR / "auto_rollback.json"
 EMERGENCY_STOP = ROOT / "scripts" / "emergency_stop.sh"
+DSN = os.environ.get(
+    "DATABASE_URL",
+    "postgresql://tradebot:tradebot-change-me@localhost:5433/tradebot",
+)
 
 logger = logging.getLogger("auto_rollback")
 logging.basicConfig(
@@ -75,25 +80,24 @@ def _save_state(state: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _query_trades(start_iso: str) -> list[dict]:
-    if not DB_PATH.exists():
-        return []
+def _query_trades(start_dt: datetime) -> list[dict]:
     try:
-        with sqlite3.connect(str(DB_PATH)) as c:
-            c.row_factory = sqlite3.Row
-            rows = c.execute(
-                "SELECT closed_at, pnl, pnl_pct, stake "
-                "FROM trade_journal "
-                "WHERE closed_at IS NOT NULL AND closed_at >= ? "
-                "ORDER BY closed_at ASC",
-                (start_iso,),
-            ).fetchall()
-    except sqlite3.OperationalError as exc:
-        # Table not created yet (bot hasn't logged a trade) — treat as empty.
-        if "no such table" in str(exc).lower():
-            return []
-        raise
-    return [dict(r) for r in rows]
+        with psycopg.connect(DSN, connect_timeout=5) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    "SELECT closed_at, pnl, pnl_pct, stake "
+                    "FROM trade_journal "
+                    "WHERE closed_at IS NOT NULL AND closed_at >= %s "
+                    "ORDER BY closed_at ASC",
+                    (start_dt,),
+                )
+                return list(cur.fetchall())
+    except psycopg.errors.UndefinedTable:
+        # Schema not initialised yet (bot hasn't booted) — treat as empty.
+        return []
+    except Exception as exc:
+        logger.debug("auto_rollback query failed: %s", exc)
+        return []
 
 
 def _starting_equity_proxy(rows: list[dict], default: float = 10_000.0) -> float:
@@ -109,7 +113,7 @@ def _starting_equity_proxy(rows: list[dict], default: float = 10_000.0) -> float
 
 def daily_loss_pct(now_utc: datetime) -> tuple[float, int]:
     """Returns (loss_fraction, n_trades) for today's UTC day."""
-    day_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    day_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
     rows = _query_trades(day_start)
     if not rows:
         return 0.0, 0
@@ -120,14 +124,17 @@ def daily_loss_pct(now_utc: datetime) -> tuple[float, int]:
 
 def weekly_sharpe(now_utc: datetime) -> tuple[float, int, int]:
     """Returns (sharpe_annualised, n_days, n_trades) over the last 7 UTC days."""
-    cutoff = (now_utc - timedelta(days=7)).isoformat()
+    cutoff = now_utc - timedelta(days=7)
     rows = _query_trades(cutoff)
     if not rows:
         return 0.0, 0, 0
     by_day: dict[str, float] = {}
     for r in rows:
-        ts = r.get("closed_at") or ""
-        day = ts[:10] if ts else "0000-00-00"
+        ts = r.get("closed_at")
+        if isinstance(ts, datetime):
+            day = ts.astimezone(timezone.utc).strftime("%Y-%m-%d")
+        else:
+            day = (str(ts or ""))[:10] or "0000-00-00"
         by_day[day] = by_day.get(day, 0.0) + float(r.get("pnl_pct") or 0.0)
     daily = list(by_day.values())
     if len(daily) < 2:

@@ -5,12 +5,14 @@
 #
 # Or rebake the image (see Dockerfile in this directory).
 
-anthropic>=0.40.0
 hmmlearn>=0.3.2
 stable-baselines3>=2.4.0
 gymnasium>=0.29
 influxdb-client>=1.40
 requests>=2.31
+psycopg[binary,pool]>=3.2
+psycopg2-binary>=2.9     # for freqtrade's SQLAlchemy driver
+aiohttp>=3.9
 # torch is already in the freqtradeorg/freqtrade:stable_freqaitorch image,
 # pinned for reference only:
 # torch>=2.4

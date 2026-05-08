@@ -22,9 +22,9 @@ from __future__ import annotations
 
 import logging
 import os
-import sqlite3
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -32,13 +32,14 @@ import numpy as np
 import pandas as pd
 import requests
 
+from . import db
+
 # ---------------------------------------------------------------------------
 # Paths and constants
 # ---------------------------------------------------------------------------
 
 _HERE = Path(__file__).resolve()
 _USER_DATA = _HERE.parent.parent              # .../user_data
-DB_PATH = _USER_DATA / "data" / "onchain.db"
 LOG_PATH = _USER_DATA / "logs" / "onchain.log"
 
 POLL_INTERVAL_S = 300                          # 5 minutes
@@ -46,7 +47,6 @@ HTTP_TIMEOUT_S = 15
 WHALE_MIN_USD = 1_000_000
 HISTORY_DAYS = 30                              # rows returned by get_features
 
-DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 # ---------------------------------------------------------------------------
@@ -74,51 +74,12 @@ WHALE_ALERT_API_KEY = os.getenv("WHALE_ALERT_API_KEY", "").strip()
 GLASSNODE_API_KEY = os.getenv("GLASSNODE_API_KEY", "").strip()
 
 # ---------------------------------------------------------------------------
-# SQLite
+# Database (schema in user_data/data/schema.sql, run by db.ensure_schema())
 # ---------------------------------------------------------------------------
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS exchange_netflow (
-    asset    TEXT NOT NULL,
-    ts       INTEGER NOT NULL,
-    netflow  REAL NOT NULL,
-    PRIMARY KEY (asset, ts)
-);
-CREATE INDEX IF NOT EXISTS ix_netflow_asset_ts ON exchange_netflow(asset, ts);
 
-CREATE TABLE IF NOT EXISTS whale_transactions (
-    id              TEXT PRIMARY KEY,
-    ts              INTEGER NOT NULL,
-    symbol          TEXT NOT NULL,
-    amount_usd      REAL NOT NULL,
-    from_owner_type TEXT,
-    to_owner_type   TEXT
-);
-CREATE INDEX IF NOT EXISTS ix_whale_symbol_ts ON whale_transactions(symbol, ts);
-
-CREATE TABLE IF NOT EXISTS mvrv_ratio (
-    asset    TEXT NOT NULL,
-    ts       INTEGER NOT NULL,
-    value    REAL NOT NULL,
-    PRIMARY KEY (asset, ts)
-);
-CREATE INDEX IF NOT EXISTS ix_mvrv_asset_ts ON mvrv_ratio(asset, ts);
-"""
-
-
-def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(DB_PATH), timeout=10, isolation_level=None)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    return conn
-
-
-def _init_db() -> None:
-    with _connect() as conn:
-        conn.executescript(_SCHEMA)
-
-
-_init_db()
+def _ts_to_dt(ts: int) -> datetime:
+    return datetime.fromtimestamp(int(ts), tz=timezone.utc)
 
 # ---------------------------------------------------------------------------
 # HTTP with exponential backoff
@@ -331,23 +292,37 @@ class OnChainSignals:
         for asset in ("BTC", "ETH"):
             mvrv_rows.extend(_fetch_glassnode_mvrv(asset))
 
-        with _connect() as conn:
-            if netflow_rows:
-                conn.executemany(
-                    "INSERT OR REPLACE INTO exchange_netflow VALUES (?, ?, ?)",
-                    netflow_rows,
-                )
-            if whales:
-                conn.executemany(
-                    "INSERT OR REPLACE INTO whale_transactions "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    whales,
-                )
-            if mvrv_rows:
-                conn.executemany(
-                    "INSERT OR REPLACE INTO mvrv_ratio VALUES (?, ?, ?)",
-                    mvrv_rows,
-                )
+        try:
+            with db.cursor() as cur:
+                if netflow_rows:
+                    cur.executemany(
+                        "INSERT INTO exchange_netflow (asset, ts, netflow) "
+                        "VALUES (%s, %s, %s) "
+                        "ON CONFLICT (asset, ts) DO UPDATE SET netflow = EXCLUDED.netflow",
+                        [(a, _ts_to_dt(t), float(v)) for (a, t, v) in netflow_rows],
+                    )
+                if whales:
+                    cur.executemany(
+                        "INSERT INTO whale_transactions "
+                        "(id, ts, symbol, amount_usd, from_owner_type, to_owner_type) "
+                        "VALUES (%s, %s, %s, %s, %s, %s) "
+                        "ON CONFLICT (id, ts) DO UPDATE SET "
+                        "  symbol = EXCLUDED.symbol, "
+                        "  amount_usd = EXCLUDED.amount_usd, "
+                        "  from_owner_type = EXCLUDED.from_owner_type, "
+                        "  to_owner_type = EXCLUDED.to_owner_type",
+                        [(wid, _ts_to_dt(t), sym, float(amt), fo, to_)
+                         for (wid, t, sym, amt, fo, to_) in whales],
+                    )
+                if mvrv_rows:
+                    cur.executemany(
+                        "INSERT INTO mvrv_ratio (asset, ts, value) "
+                        "VALUES (%s, %s, %s) "
+                        "ON CONFLICT (asset, ts) DO UPDATE SET value = EXCLUDED.value",
+                        [(a, _ts_to_dt(t), float(v)) for (a, t, v) in mvrv_rows],
+                    )
+        except Exception as exc:
+            logger.warning("postgres write failed (will retry next poll): %s", exc)
         self.last_poll_ts = time.time()
         logger.info(
             "poll cycle done: netflow=%d whale=%d mvrv=%d",
@@ -385,34 +360,44 @@ def get_features(pair: str, timeframe: str) -> pd.DataFrame:
     OnChainSignals.instance().start()                 # lazy start
 
     asset = pair.split("/")[0].upper()
-    cutoff = int(time.time()) - HISTORY_DAYS * 86_400
+    cutoff = datetime.now(timezone.utc) - timedelta(days=HISTORY_DAYS)
 
-    with _connect() as conn:
-        netflow = pd.read_sql_query(
+    try:
+        netflow_rows = db.fetch_all(
             "SELECT ts, netflow FROM exchange_netflow "
-            "WHERE asset=? AND ts>=? ORDER BY ts",
-            conn, params=(asset, cutoff),
+            "WHERE asset=%s AND ts>=%s ORDER BY ts",
+            (asset, cutoff),
         )
-        mvrv = pd.read_sql_query(
+        mvrv_rows = db.fetch_all(
             "SELECT ts, value FROM mvrv_ratio "
-            "WHERE asset=? AND ts>=? ORDER BY ts",
-            conn, params=(asset, cutoff),
+            "WHERE asset=%s AND ts>=%s ORDER BY ts",
+            (asset, cutoff),
         )
-        whales = pd.read_sql_query(
+        whale_rows = db.fetch_all(
             "SELECT ts, amount_usd FROM whale_transactions "
-            "WHERE symbol=? AND ts>=? ORDER BY ts",
-            conn, params=(asset, cutoff),
+            "WHERE symbol=%s AND ts>=%s ORDER BY ts",
+            (asset, cutoff),
         )
+    except Exception as exc:
+        logger.warning("get_features db error: %s", exc)
+        return _empty_features()
+
+    netflow = pd.DataFrame(netflow_rows)
+    mvrv = pd.DataFrame(mvrv_rows)
+    whales = pd.DataFrame(whale_rows)
 
     if netflow.empty and mvrv.empty and whales.empty:
         return _empty_features()
 
-    bounds = [df["ts"] for df in (netflow, mvrv, whales) if not df.empty]
-    min_ts = int(min(b.min() for b in bounds))
-    max_ts = int(max(b.max() for b in bounds))
+    bounds = [
+        pd.to_datetime(df["ts"], utc=True)
+        for df in (netflow, mvrv, whales) if not df.empty
+    ]
+    min_ts = min(b.min() for b in bounds)
+    max_ts = max(b.max() for b in bounds)
     grid = pd.date_range(
-        pd.Timestamp(min_ts, unit="s", tz="UTC").floor("1h"),
-        pd.Timestamp(max_ts, unit="s", tz="UTC").ceil("1h"),
+        pd.Timestamp(min_ts).floor("1h"),
+        pd.Timestamp(max_ts).ceil("1h"),
         freq="1h",
         tz="UTC",
     )
@@ -421,8 +406,9 @@ def get_features(pair: str, timeframe: str) -> pd.DataFrame:
 
     # ---- exchange netflow z-score over a rolling 7d window ----
     if not netflow.empty:
-        s = (netflow.assign(date=pd.to_datetime(netflow["ts"], unit="s", utc=True))
+        s = (netflow.assign(date=pd.to_datetime(netflow["ts"], utc=True))
                     .set_index("date")["netflow"]
+                    .astype(float)
                     .reindex(grid, method="ffill"))
         roll_mean = s.rolling("7D", min_periods=12).mean()
         roll_std = s.rolling("7D", min_periods=12).std().replace(0, np.nan)
@@ -432,8 +418,9 @@ def get_features(pair: str, timeframe: str) -> pd.DataFrame:
 
     # ---- MVRV ratio (centred around 1.0) ----
     if not mvrv.empty:
-        s = (mvrv.assign(date=pd.to_datetime(mvrv["ts"], unit="s", utc=True))
+        s = (mvrv.assign(date=pd.to_datetime(mvrv["ts"], utc=True))
                   .set_index("date")["value"]
+                  .astype(float)
                   .reindex(grid, method="ffill"))
         out["%-onchain_mvrv"] = s.fillna(1.0)
     else:
@@ -443,7 +430,7 @@ def get_features(pair: str, timeframe: str) -> pd.DataFrame:
     if not whales.empty:
         whales = whales.copy()
         whales["bucket"] = (
-            pd.to_datetime(whales["ts"], unit="s", utc=True).dt.floor("1h")
+            pd.to_datetime(whales["ts"], utc=True).dt.floor("1h")
         )
         agg = whales.groupby("bucket").agg(
             count=("amount_usd", "size"),

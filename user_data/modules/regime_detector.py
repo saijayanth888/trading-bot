@@ -29,10 +29,9 @@ from __future__ import annotations
 import json
 import logging
 import math
-import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
@@ -41,17 +40,18 @@ import numpy as np
 import pandas as pd
 import requests
 
+from . import db
+
 # ---------------------------------------------------------------------------
 # Paths & constants
 # ---------------------------------------------------------------------------
 
 _HERE = Path(__file__).resolve()
 _USER_DATA = _HERE.parent.parent
-DB_PATH = _USER_DATA / "data" / "onchain.db"
 LOG_PATH = _USER_DATA / "logs" / "regime.log"
 MODEL_PATH = _USER_DATA / "data" / "regime_hmm.json"
-DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 REFIT_INTERVAL_S = 24 * 3600                     # 24h
 PREDICT_INTERVAL_S = 5 * 60                      # 5 min
@@ -84,46 +84,12 @@ if not logger.handlers:
     logger.propagate = False
 
 # ---------------------------------------------------------------------------
-# SQLite
+# Database — schema lives in user_data/data/schema.sql
 # ---------------------------------------------------------------------------
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS regime_log (
-    ts                     INTEGER PRIMARY KEY,
-    regime                 TEXT    NOT NULL,
-    probability            REAL    NOT NULL,
-    state                  INTEGER NOT NULL,
-    state_means            TEXT,
-    transition_matrix      TEXT,
-    regime_duration_hours  REAL,
-    state_probabilities    TEXT
-);
-CREATE INDEX IF NOT EXISTS ix_regime_ts ON regime_log(ts);
 
-CREATE TABLE IF NOT EXISTS regime_model_meta (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    fitted_at       INTEGER NOT NULL,
-    n_samples       INTEGER NOT NULL,
-    log_likelihood  REAL,
-    state_to_label  TEXT,
-    feature_names   TEXT
-);
-"""
-
-
-def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(DB_PATH), timeout=10, isolation_level=None)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    return conn
-
-
-def _init_db() -> None:
-    with _connect() as conn:
-        conn.executescript(_SCHEMA)
-
-
-_init_db()
+def _ts_to_dt(ts: int | float) -> datetime:
+    return datetime.fromtimestamp(int(ts), tz=timezone.utc)
 
 # ---------------------------------------------------------------------------
 # HTTP with retry
@@ -708,17 +674,19 @@ class RegimeDetector:
             self._fitted_at = int(time.time())
             self._persist()
 
-        with _connect() as conn:
-            conn.execute(
+        try:
+            db.execute_one(
                 "INSERT INTO regime_model_meta "
                 "(fitted_at, n_samples, log_likelihood, state_to_label, feature_names) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "VALUES (%s, %s, %s, %s::jsonb, %s::jsonb)",
                 (
-                    self._fitted_at, len(train), ll,
+                    _ts_to_dt(self._fitted_at), len(train), ll,
                     json.dumps({str(k): v for k, v in mapping.items()}),
                     json.dumps(list(train.columns)),
                 ),
             )
+        except Exception as exc:
+            logger.warning("regime_model_meta write failed: %s", exc)
 
         preds = predict_regime(model, train, mapping)
         self._persist_predictions_bulk(preds, model, mapping)
@@ -771,20 +739,32 @@ class RegimeDetector:
             for i in range(model.n_components)
         }
 
-        with _connect() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO regime_log "
-                "(ts, regime, probability, state, state_means, transition_matrix, "
-                " regime_duration_hours, state_probabilities) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        try:
+            db.execute_one(
+                """
+                INSERT INTO regime_log
+                    (ts, regime, probability, state, state_means, transition_matrix,
+                     regime_duration_hours, state_probabilities)
+                VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s::jsonb)
+                ON CONFLICT (ts) DO UPDATE SET
+                    regime                = EXCLUDED.regime,
+                    probability           = EXCLUDED.probability,
+                    state                 = EXCLUDED.state,
+                    state_means           = EXCLUDED.state_means,
+                    transition_matrix     = EXCLUDED.transition_matrix,
+                    regime_duration_hours = EXCLUDED.regime_duration_hours,
+                    state_probabilities   = EXCLUDED.state_probabilities
+                """,
                 (
-                    ts, regime, prob, state,
+                    _ts_to_dt(ts), regime, prob, state,
                     json.dumps(state_means.tolist()),
                     json.dumps(model.transmat_.tolist()),
                     duration_h,
                     json.dumps(state_probs),
                 ),
             )
+        except Exception as exc:
+            logger.warning("regime_log write failed: %s", exc)
         self.last_predict_ts = time.time()
         logger.info(
             "predict: regime=%s prob=%.2f duration=%.0fh", regime, prob, duration_h,
@@ -824,13 +804,12 @@ class RegimeDetector:
 
         rows: list[tuple] = []
         for i, (idx, row) in enumerate(preds.iterrows()):
-            ts = int(idx.timestamp())
             state_probs = {
                 mapping[j]: float(row.get(f"prob_state_{j}", 0.0))
                 for j in range(model.n_components)
             }
             rows.append((
-                ts,
+                _ts_to_dt(idx.timestamp()),
                 str(row["regime"]),
                 float(row["regime_probability"]),
                 int(row["state"]),
@@ -839,15 +818,28 @@ class RegimeDetector:
                 float(duration[i]),
                 json.dumps(state_probs),
             ))
-        with _connect() as conn:
-            conn.executemany(
-                "INSERT OR REPLACE INTO regime_log "
-                "(ts, regime, probability, state, state_means, transition_matrix, "
-                " regime_duration_hours, state_probabilities) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                rows,
-            )
-        logger.info("persisted %d historical regime rows", len(rows))
+        try:
+            with db.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO regime_log
+                        (ts, regime, probability, state, state_means, transition_matrix,
+                         regime_duration_hours, state_probabilities)
+                    VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s::jsonb)
+                    ON CONFLICT (ts) DO UPDATE SET
+                        regime                = EXCLUDED.regime,
+                        probability           = EXCLUDED.probability,
+                        state                 = EXCLUDED.state,
+                        state_means           = EXCLUDED.state_means,
+                        transition_matrix     = EXCLUDED.transition_matrix,
+                        regime_duration_hours = EXCLUDED.regime_duration_hours,
+                        state_probabilities   = EXCLUDED.state_probabilities
+                    """,
+                    rows,
+                )
+            logger.info("persisted %d historical regime rows", len(rows))
+        except Exception as exc:
+            logger.warning("regime_log bulk write failed: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -878,19 +870,24 @@ def get_regime_features(pair: str = "BTC/USD") -> pd.DataFrame:
     """
     RegimeDetector.instance().start()                      # lazy start
 
-    cutoff = int(time.time()) - TRAIN_WINDOW_DAYS * 86_400
-    with _connect() as conn:
-        rows = pd.read_sql_query(
+    cutoff = datetime.now(timezone.utc) - timedelta(days=TRAIN_WINDOW_DAYS)
+    try:
+        raw = db.fetch_all(
             "SELECT ts, regime, probability, regime_duration_hours, "
             "       state_probabilities "
-            "FROM regime_log WHERE ts>=? ORDER BY ts",
-            conn, params=(cutoff,),
+            "FROM regime_log WHERE ts >= %s ORDER BY ts",
+            (cutoff,),
         )
-    if rows.empty:
+    except Exception as exc:
+        logger.warning("get_regime_features db error: %s", exc)
         return _empty_features()
 
+    if not raw:
+        return _empty_features()
+
+    rows = pd.DataFrame(raw)
     idx = pd.DatetimeIndex(
-        pd.to_datetime(rows["ts"], unit="s", utc=True), name="date",
+        pd.to_datetime(rows["ts"], utc=True), name="date",
     )
     out = pd.DataFrame(index=idx)
     regime_arr = rows["regime"].astype(str).values
@@ -899,11 +896,20 @@ def get_regime_features(pair: str = "BTC/USD") -> pd.DataFrame:
         out[f"%-regime_is_{label}"] = (regime_arr == label).astype(float)
 
     out["%-regime_probability"] = rows["probability"].astype(float).values
-    out["%-regime_duration_h"] = rows["regime_duration_hours"].astype(float).values
+    out["%-regime_duration_h"] = rows["regime_duration_hours"].astype(float).fillna(0.0).values
 
-    state_probs_series = rows["state_probabilities"].apply(
-        lambda s: json.loads(s) if isinstance(s, str) and s else {}
-    )
+    # JSONB columns come back as native dicts from psycopg
+    def _as_dict(v):
+        if isinstance(v, dict):
+            return v
+        if isinstance(v, str) and v:
+            try:
+                return json.loads(v)
+            except Exception:
+                return {}
+        return {}
+
+    state_probs_series = rows["state_probabilities"].apply(_as_dict)
     for label in REGIME_LABELS:
         out[f"%-regime_prob_{label}"] = state_probs_series.apply(
             lambda d, lbl=label: float(d.get(lbl, 0.0))

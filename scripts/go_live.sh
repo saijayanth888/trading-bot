@@ -135,22 +135,27 @@ print(f"[config] tradable_balance_ratio={ratio}  dry_run={dry_run}")
 PY
 }
 
-# Returns the PnL over the last N days from the trade journal.
+# Returns the PnL over the last N days from the trade journal (Postgres).
 window_pnl() {
     local days="$1"
-    python3 - "$ROOT_DIR/user_data/data/onchain.db" "$days" <<'PY'
-import sqlite3, sys
+    python3 - "$days" <<'PY'
+import os, sys
 from datetime import datetime, timedelta, timezone
-db, days = sys.argv[1], int(sys.argv[2])
-cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+days = int(sys.argv[1])
+dsn = os.environ.get("DATABASE_URL",
+    "postgresql://tradebot:tradebot-change-me@localhost:5433/tradebot")
+cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 try:
-    with sqlite3.connect(db) as c:
-        row = c.execute(
-            "SELECT COALESCE(SUM(pnl),0) FROM trade_journal "
-            "WHERE closed_at IS NOT NULL AND closed_at >= ?",
-            (cutoff,),
-        ).fetchone()
-        print(f"{float(row[0]):.6f}")
+    import psycopg
+    with psycopg.connect(dsn, connect_timeout=5) as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(SUM(pnl),0) FROM trade_journal "
+                "WHERE closed_at IS NOT NULL AND closed_at >= %s",
+                (cutoff,),
+            )
+            row = cur.fetchone()
+            print(f"{float(row[0]):.6f}")
 except Exception as exc:
     print("0.000000")
     print(f"# error: {exc}", file=sys.stderr)

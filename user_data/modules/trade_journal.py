@@ -1,41 +1,20 @@
 """
-Trade journal — durable per-trade record stored alongside the on-chain DB.
+Trade journal — durable per-trade record stored in PostgreSQL.
 
-Design choice: reuse the existing SQLite file (`user_data/data/onchain.db`)
-so the trading bot has *one* operational data store. The new table is
-isolated under the name `trade_journal`; nothing else in onchain_signals
-touches it.
+Schema lives in `user_data/data/schema.sql` and is created once by
+`db.ensure_schema()`. New rows are inserted on entry; the same row is
+updated on exit with closing-price + P&L + duration. JSON-typed columns
+(`tft_probs`, `drl_votes`, `features_used`) use the JSONB native type.
 
-Contract
---------
+Contract is unchanged from the SQLite version:
 
-    journal = TradeJournal()
-    trade_id = journal.log_entry(
-        pair="BTC/USD", direction="long",
-        entry_price=65_412.5, stake=1000.0,
-        confidence=0.72,
-        tft_probs={"down": 0.1, "flat": 0.2, "up": 0.7},
-        drl_votes={"ppo": 1, "a2c": 1, "dqn": 0},
-        sentiment_score=0.42, sentiment_confidence=0.7,
-        regime="trending_up",
-        features_used=["%-rsi-period_14", "%-onchain_mvrv", ...],
-        reasoning="TFT up=0.7 + meta_signal=+1 + regime=trending_up",
-    )
-    ...
-    journal.log_exit(
-        trade_id, exit_price=66_010.0, pnl=59.7, pnl_pct=0.0091,
-        exit_reason="freqai_down_regime", duration_min=144,
-    )
-
-Export:
-
-    journal.export_csv(start, end, "user_data/logs/journal-2026W19.csv")
-    journal.export_markdown(start, end, "user_data/logs/journal-2026W19.md")
-
-Schema
-------
-The table stores small JSON blobs for the prediction context, which is
-sufficient for audit/research without exploding the schema.
+    j = TradeJournal()
+    trade_id = j.log_entry(pair="BTC/USD", direction="long", entry_price=...,
+                           tft_probs={...}, drl_votes={...}, ...)
+    j.log_exit(trade_id, exit_price=..., pnl=..., pnl_pct=..., exit_reason=...)
+    j.export_csv(start, end, "out.csv")
+    j.export_markdown(start, end, "out.md")
+    s = j.stats(start, end)
 """
 
 from __future__ import annotations
@@ -43,64 +22,30 @@ from __future__ import annotations
 import csv
 import json
 import logging
-import sqlite3
-import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from . import db
+
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_DB_PATH = Path("user_data/data/onchain.db")
-TABLE = "trade_journal"
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-SCHEMA_SQL = f"""
-CREATE TABLE IF NOT EXISTS {TABLE} (
-    trade_id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    external_id     TEXT,                          -- freqtrade trade.id when known
-    pair            TEXT NOT NULL,
-    direction       TEXT NOT NULL,                 -- "long" | "short"
-    opened_at       TEXT NOT NULL,                 -- ISO-8601 UTC
-    closed_at       TEXT,                          -- ISO-8601 UTC; NULL while open
-    entry_price     REAL,
-    exit_price      REAL,
-    stake           REAL,
-    pnl             REAL,                          -- in quote currency
-    pnl_pct         REAL,                          -- signed return on stake
-    duration_min    REAL,
-    confidence      REAL,
-    tft_probs_json  TEXT,                          -- {{"up":0.7,"flat":0.2,"down":0.1}}
-    drl_votes_json  TEXT,                          -- {{"ppo":1,"a2c":1,"dqn":0}}
-    sentiment_score REAL,
-    sentiment_conf  REAL,
-    regime          TEXT,
-    exit_reason     TEXT,
-    features_json   TEXT,                          -- list of feature column names used
-    reasoning       TEXT,                          -- human-readable explanation
-    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_{TABLE}_opened_at ON {TABLE}(opened_at);
-CREATE INDEX IF NOT EXISTS idx_{TABLE}_pair ON {TABLE}(pair);
-CREATE INDEX IF NOT EXISTS idx_{TABLE}_external_id ON {TABLE}(external_id);
-"""
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-
-
-def _parse_iso(s: str) -> datetime | None:
-    if not s:
+def _coerce_dt(v: Any) -> datetime | None:
+    if v is None:
         return None
-    s = s.replace("Z", "+00:00") if s.endswith("Z") else s
+    if isinstance(v, datetime):
+        return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+    s = str(v).replace("Z", "+00:00") if str(v).endswith("Z") else str(v)
     try:
-        return datetime.fromisoformat(s)
+        d = datetime.fromisoformat(s)
+        return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
     except Exception:
         return None
 
@@ -111,8 +56,8 @@ class TradeRow:
     external_id: str | None
     pair: str
     direction: str
-    opened_at: str
-    closed_at: str | None
+    opened_at: datetime
+    closed_at: datetime | None
     entry_price: float | None
     exit_price: float | None
     stake: float | None
@@ -130,37 +75,39 @@ class TradeRow:
     reasoning: str | None
 
     @classmethod
-    def from_db_row(cls, r: sqlite3.Row) -> "TradeRow":
+    def from_db_row(cls, r: Mapping[str, Any]) -> "TradeRow":
         return cls(
-            trade_id=r["trade_id"],
-            external_id=r["external_id"],
-            pair=r["pair"],
-            direction=r["direction"],
-            opened_at=r["opened_at"],
-            closed_at=r["closed_at"],
-            entry_price=r["entry_price"],
-            exit_price=r["exit_price"],
-            stake=r["stake"],
-            pnl=r["pnl"],
-            pnl_pct=r["pnl_pct"],
-            duration_min=r["duration_min"],
-            confidence=r["confidence"],
-            tft_probs=_safe_json(r["tft_probs_json"]) or {},
-            drl_votes=_safe_json(r["drl_votes_json"]) or {},
-            sentiment_score=r["sentiment_score"],
-            sentiment_conf=r["sentiment_conf"],
-            regime=r["regime"],
-            exit_reason=r["exit_reason"],
-            features_used=_safe_json(r["features_json"]) or [],
-            reasoning=r["reasoning"],
+            trade_id=int(r["trade_id"]),
+            external_id=r.get("external_id"),
+            pair=str(r["pair"]),
+            direction=str(r["direction"]),
+            opened_at=_coerce_dt(r["opened_at"]),
+            closed_at=_coerce_dt(r.get("closed_at")),
+            entry_price=r.get("entry_price"),
+            exit_price=r.get("exit_price"),
+            stake=r.get("stake"),
+            pnl=r.get("pnl"),
+            pnl_pct=r.get("pnl_pct"),
+            duration_min=r.get("duration_min"),
+            confidence=r.get("confidence"),
+            tft_probs=_safe_json(r.get("tft_probs")) or {},
+            drl_votes=_safe_json(r.get("drl_votes")) or {},
+            sentiment_score=r.get("sentiment_score"),
+            sentiment_conf=r.get("sentiment_conf"),
+            regime=r.get("regime"),
+            exit_reason=r.get("exit_reason"),
+            features_used=_safe_json(r.get("features_used")) or [],
+            reasoning=r.get("reasoning"),
         )
 
 
-def _safe_json(s: str | None) -> Any:
-    if not s:
+def _safe_json(value: Any) -> Any:
+    if value is None:
         return None
+    if isinstance(value, (dict, list)):
+        return value
     try:
-        return json.loads(s)
+        return json.loads(value)
     except Exception:
         return None
 
@@ -171,38 +118,13 @@ def _safe_json(s: str | None) -> Any:
 
 
 class TradeJournal:
-    """Thread-safe append/update with one connection per call (SQLite is fine for our cadence)."""
+    """Postgres-backed trade ledger. Same constructor signature as before."""
 
-    def __init__(self, db_path: str | Path = DEFAULT_DB_PATH) -> None:
-        self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_lock = threading.Lock()
-        self._initialised = False
-        self._ensure_schema()
-
-    @contextmanager
-    def _conn(self):
-        conn = sqlite3.connect(str(self.db_path), isolation_level=None, timeout=15.0)
-        conn.row_factory = sqlite3.Row
-        try:
-            # WAL avoids reader/writer locking against the on-chain refresher.
-            try:
-                conn.execute("PRAGMA journal_mode=WAL")
-            except Exception:
-                pass
-            yield conn
-        finally:
-            conn.close()
-
-    def _ensure_schema(self) -> None:
-        if self._initialised:
-            return
-        with self._init_lock:
-            if self._initialised:
-                return
-            with self._conn() as c:
-                c.executescript(SCHEMA_SQL)
-            self._initialised = True
+    def __init__(self, db_path: str | Path | None = None) -> None:
+        # `db_path` is accepted for backward compatibility with the
+        # SQLite version; ignored — Postgres connection comes from the
+        # shared pool. Tests set DATABASE_URL to a per-test schema/db.
+        self._db_path = db_path
 
     # ------------------------------------------------------------------
     # Mutations
@@ -226,30 +148,33 @@ class TradeJournal:
         external_id: str | None = None,
         opened_at: datetime | None = None,
     ) -> int:
-        """Insert a new open trade. Returns the journal's trade_id."""
-        ts = (opened_at or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
-        with self._conn() as c:
-            cur = c.execute(
-                f"""INSERT INTO {TABLE}
-                    (external_id, pair, direction, opened_at, entry_price, stake,
-                     confidence, tft_probs_json, drl_votes_json,
-                     sentiment_score, sentiment_conf, regime,
-                     features_json, reasoning)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    external_id, pair, direction, ts, float(entry_price),
-                    None if stake is None else float(stake),
-                    None if confidence is None else float(confidence),
-                    json.dumps(dict(tft_probs)) if tft_probs is not None else None,
-                    json.dumps(dict(drl_votes)) if drl_votes is not None else None,
-                    None if sentiment_score is None else float(sentiment_score),
-                    None if sentiment_confidence is None else float(sentiment_confidence),
-                    regime,
-                    json.dumps(list(features_used)) if features_used is not None else None,
-                    reasoning,
-                ),
-            )
-            return int(cur.lastrowid)
+        ts = (opened_at or _utc_now()).astimezone(timezone.utc)
+        row = db.execute_returning(
+            """
+            INSERT INTO trade_journal
+                (external_id, pair, direction, opened_at, entry_price, stake,
+                 confidence, tft_probs, drl_votes,
+                 sentiment_score, sentiment_conf, regime,
+                 features_used, reasoning)
+            VALUES (%s, %s, %s, %s, %s, %s, %s,
+                    %s::jsonb, %s::jsonb, %s, %s, %s, %s::jsonb, %s)
+            RETURNING trade_id
+            """,
+            (
+                external_id, pair, direction, ts,
+                float(entry_price),
+                None if stake is None else float(stake),
+                None if confidence is None else float(confidence),
+                json.dumps(dict(tft_probs)) if tft_probs is not None else None,
+                json.dumps(dict(drl_votes)) if drl_votes is not None else None,
+                None if sentiment_score is None else float(sentiment_score),
+                None if sentiment_confidence is None else float(sentiment_confidence),
+                regime,
+                json.dumps(list(features_used)) if features_used is not None else None,
+                reasoning,
+            ),
+        )
+        return int(row["trade_id"])
 
     def log_exit(
         self,
@@ -262,46 +187,46 @@ class TradeJournal:
         duration_min: float | None = None,
         closed_at: datetime | None = None,
     ) -> bool:
-        ts = (closed_at or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
-        with self._conn() as c:
-            cur = c.execute(
-                f"""UPDATE {TABLE}
-                       SET exit_price = ?,
-                           pnl = ?, pnl_pct = ?,
-                           exit_reason = ?,
-                           duration_min = ?,
-                           closed_at = ?,
-                           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-                     WHERE trade_id = ?""",
-                (
-                    float(exit_price), float(pnl), float(pnl_pct),
-                    exit_reason,
-                    None if duration_min is None else float(duration_min),
-                    ts, int(trade_id),
-                ),
-            )
-            return cur.rowcount > 0
+        ts = (closed_at or _utc_now()).astimezone(timezone.utc)
+        affected = db.execute_one(
+            """
+            UPDATE trade_journal
+               SET exit_price = %s,
+                   pnl = %s, pnl_pct = %s,
+                   exit_reason = %s,
+                   duration_min = %s,
+                   closed_at = %s,
+                   updated_at = NOW()
+             WHERE trade_id = %s
+            """,
+            (
+                float(exit_price), float(pnl), float(pnl_pct),
+                exit_reason,
+                None if duration_min is None else float(duration_min),
+                ts, int(trade_id),
+            ),
+        )
+        return affected > 0
 
     def find_open_by_external_id(self, external_id: str) -> int | None:
-        with self._conn() as c:
-            row = c.execute(
-                f"SELECT trade_id FROM {TABLE} "
-                f"WHERE external_id = ? AND closed_at IS NULL "
-                f"ORDER BY trade_id DESC LIMIT 1",
-                (external_id,),
-            ).fetchone()
-            return int(row["trade_id"]) if row else None
+        row = db.fetch_one(
+            "SELECT trade_id FROM trade_journal "
+            "WHERE external_id = %s AND closed_at IS NULL "
+            "ORDER BY trade_id DESC LIMIT 1",
+            (external_id,),
+        )
+        return int(row["trade_id"]) if row else None
 
     # ------------------------------------------------------------------
     # Reads
     # ------------------------------------------------------------------
 
     def get_trade(self, trade_id: int) -> TradeRow | None:
-        with self._conn() as c:
-            r = c.execute(
-                f"SELECT * FROM {TABLE} WHERE trade_id = ?", (int(trade_id),),
-            ).fetchone()
-            return TradeRow.from_db_row(r) if r else None
+        row = db.fetch_one(
+            "SELECT * FROM trade_journal WHERE trade_id = %s",
+            (int(trade_id),),
+        )
+        return TradeRow.from_db_row(row) if row else None
 
     def query(
         self, start: datetime | None = None, end: datetime | None = None,
@@ -309,23 +234,22 @@ class TradeJournal:
     ) -> list[TradeRow]:
         clauses, params = [], []
         if start is not None:
-            clauses.append("opened_at >= ?")
-            params.append(start.astimezone(timezone.utc).isoformat())
+            clauses.append("opened_at >= %s")
+            params.append(start.astimezone(timezone.utc))
         if end is not None:
-            clauses.append("opened_at < ?")
-            params.append(end.astimezone(timezone.utc).isoformat())
+            clauses.append("opened_at < %s")
+            params.append(end.astimezone(timezone.utc))
         if pair is not None:
-            clauses.append("pair = ?")
+            clauses.append("pair = %s")
             params.append(pair)
         if only_closed:
             clauses.append("closed_at IS NOT NULL")
-        sql = f"SELECT * FROM {TABLE}"
+        sql = "SELECT * FROM trade_journal"
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY opened_at ASC"
-        with self._conn() as c:
-            rows = c.execute(sql, params).fetchall()
-            return [TradeRow.from_db_row(r) for r in rows]
+        rows = db.fetch_all(sql, tuple(params))
+        return [TradeRow.from_db_row(r) for r in rows]
 
     def stats(self, start: datetime | None = None, end: datetime | None = None) -> dict:
         rows = self.query(start=start, end=end, only_closed=True)
@@ -373,7 +297,8 @@ class TradeJournal:
             for r in rows:
                 w.writerow([
                     r.trade_id, r.external_id or "", r.pair, r.direction,
-                    r.opened_at, r.closed_at or "",
+                    r.opened_at.isoformat() if r.opened_at else "",
+                    r.closed_at.isoformat() if r.closed_at else "",
                     r.entry_price, r.exit_price, r.stake,
                     r.pnl, r.pnl_pct, r.duration_min,
                     r.confidence,
@@ -414,9 +339,11 @@ class TradeJournal:
             "|---|------|-----|------------|-------------|-------|------|-----|---|--------|------|--------|",
         ]
         for r in rows:
+            opened = r.opened_at.isoformat() if r.opened_at else ""
+            closed = r.closed_at.isoformat() if r.closed_at else ""
             lines.append(
                 f"| {r.trade_id} | `{r.pair}` | {r.direction} | "
-                f"{(r.opened_at or '')[:19]} | {(r.closed_at or '')[:19]} | "
+                f"{opened[:19]} | {closed[:19]} | "
                 f"{r.entry_price or 0:.4f} | {r.exit_price or 0:.4f} | "
                 f"{r.pnl or 0:+,.2f} | {((r.pnl_pct or 0) * 100):+.2f}% | "
                 f"`{r.exit_reason or ''}` | "

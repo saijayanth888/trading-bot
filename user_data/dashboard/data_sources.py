@@ -20,7 +20,6 @@ import asyncio
 import json
 import logging
 import os
-import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -28,14 +27,27 @@ from typing import Any
 import httpx
 import pandas as pd
 
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+    _HAVE_PG = True
+except Exception:
+    psycopg = None
+    dict_row = None
+    _HAVE_PG = False
+
 logger = logging.getLogger(__name__)
 
 USER_DATA_ROOT = Path(os.environ.get(
     "USER_DATA_ROOT",
     str(Path(__file__).resolve().parent.parent),
 ))
-JOURNAL_DB = USER_DATA_ROOT / "data" / "onchain.db"
 EVOLUTION_LOG = USER_DATA_ROOT / "logs" / "evolution.json"
+
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL",
+    "postgresql://tradebot:tradebot-change-me@localhost:5433/tradebot",
+)
 
 FREQTRADE_API = os.environ.get("FREQTRADE_API_URL", "http://freqtrade:8080")
 FREQTRADE_USER = os.environ.get("FREQTRADE_API_USER", "freqtrader")
@@ -191,15 +203,27 @@ async def fetch_coinbase_candles(
 # ---------------------------------------------------------------------------
 
 
-def _journal_conn() -> sqlite3.Connection | None:
-    if not JOURNAL_DB.exists():
-        return None
+def _journal_query(sql: str, params: tuple = ()) -> list[dict]:
+    if not _HAVE_PG:
+        return []
     try:
-        c = sqlite3.connect(str(JOURNAL_DB), isolation_level=None, timeout=5.0)
-        c.row_factory = sqlite3.Row
-        return c
-    except Exception:
+        with psycopg.connect(DATABASE_URL, connect_timeout=3) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(sql, params)
+                return cur.fetchall()
+    except Exception as exc:
+        logger.debug("journal query failed: %s", exc)
+        return []
+
+
+def _to_unix_dt(v) -> int | None:
+    if v is None:
         return None
+    if isinstance(v, datetime):
+        if v.tzinfo is None:
+            v = v.replace(tzinfo=timezone.utc)
+        return int(v.timestamp())
+    return _to_unix(str(v))
 
 
 def fetch_trade_markers(pair: str, since: datetime | None = None) -> list[dict]:
@@ -209,30 +233,21 @@ def fetch_trade_markers(pair: str, since: datetime | None = None) -> list[dict]:
           "color": "#26a69a"|"#ef5350", "shape": "arrowUp"|"arrowDown",
           "text": "+$12.3"}, ...]
     """
-    c = _journal_conn()
-    if c is None:
-        return []
+    sql = (
+        "SELECT opened_at, closed_at, entry_price, exit_price, pnl, pair, "
+        "exit_reason, confidence "
+        "FROM trade_journal WHERE pair = %s "
+    )
+    params: list[Any] = [pair]
+    if since is not None:
+        sql += "AND opened_at >= %s "
+        params.append(since.astimezone(timezone.utc))
+    sql += "ORDER BY opened_at ASC"
+    rows = _journal_query(sql, tuple(params))
     out: list[dict] = []
-    try:
-        sql = (
-            "SELECT opened_at, closed_at, entry_price, exit_price, pnl, pair, "
-            "exit_reason, confidence "
-            "FROM trade_journal WHERE pair = ? "
-        )
-        params: list[Any] = [pair]
-        if since is not None:
-            sql += "AND opened_at >= ? "
-            params.append(since.astimezone(timezone.utc).isoformat())
-        sql += "ORDER BY opened_at ASC"
-        rows = c.execute(sql, params).fetchall()
-    except sqlite3.OperationalError:
-        return []
-    finally:
-        c.close()
-
     for r in rows:
-        opened = _to_unix(r["opened_at"])
-        if opened is not None and r["entry_price"] is not None:
+        opened = _to_unix_dt(r.get("opened_at"))
+        if opened is not None and r.get("entry_price") is not None:
             out.append({
                 "time": opened,
                 "position": "belowBar",
@@ -240,9 +255,9 @@ def fetch_trade_markers(pair: str, since: datetime | None = None) -> list[dict]:
                 "shape": "arrowUp",
                 "text": f"BUY {float(r['entry_price']):.4f}",
             })
-        closed = _to_unix(r["closed_at"]) if r["closed_at"] else None
-        if closed is not None and r["exit_price"] is not None:
-            pnl = float(r["pnl"] or 0)
+        closed = _to_unix_dt(r.get("closed_at"))
+        if closed is not None and r.get("exit_price") is not None:
+            pnl = float(r.get("pnl") or 0)
             out.append({
                 "time": closed,
                 "position": "aboveBar",
@@ -255,39 +270,30 @@ def fetch_trade_markers(pair: str, since: datetime | None = None) -> list[dict]:
 
 
 def fetch_recent_trades(limit: int = 20) -> list[dict]:
-    c = _journal_conn()
-    if c is None:
-        return []
-    try:
-        rows = c.execute(
-            "SELECT pair, opened_at, closed_at, entry_price, exit_price, pnl, "
-            "pnl_pct, exit_reason, confidence, regime "
-            "FROM trade_journal "
-            "ORDER BY opened_at DESC LIMIT ?",
-            (int(limit),),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        return []
-    finally:
-        c.close()
-    return [dict(r) for r in rows]
+    rows = _journal_query(
+        "SELECT pair, opened_at, closed_at, entry_price, exit_price, pnl, "
+        "pnl_pct, exit_reason, confidence, regime "
+        "FROM trade_journal "
+        "ORDER BY opened_at DESC LIMIT %s",
+        (int(limit),),
+    )
+    # Normalise datetimes to ISO strings so the JSON encoder is happy.
+    for r in rows:
+        for k in ("opened_at", "closed_at"):
+            v = r.get(k)
+            if isinstance(v, datetime):
+                r[k] = v.astimezone(timezone.utc).isoformat()
+    return rows
 
 
 def fetch_daily_pnl() -> dict[str, float]:
     """Returns {date: pnl_quote, ...} for the last 14 days."""
-    c = _journal_conn()
-    if c is None:
-        return {}
-    try:
-        rows = c.execute(
-            "SELECT substr(closed_at, 1, 10) AS day, SUM(pnl) AS pnl "
-            "FROM trade_journal WHERE closed_at IS NOT NULL "
-            "GROUP BY day ORDER BY day DESC LIMIT 14"
-        ).fetchall()
-    except sqlite3.OperationalError:
-        return {}
-    finally:
-        c.close()
+    rows = _journal_query(
+        "SELECT to_char(closed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, "
+        "       COALESCE(SUM(pnl), 0) AS pnl "
+        "FROM trade_journal WHERE closed_at IS NOT NULL "
+        "GROUP BY day ORDER BY day DESC LIMIT 14"
+    )
     return {r["day"]: float(r["pnl"] or 0) for r in rows}
 
 

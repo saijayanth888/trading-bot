@@ -1,4 +1,31 @@
 services:
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: tradebot-postgres
+    restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 2g
+    shm_size: 256m
+    # Port 5433 to avoid conflicting with ModelForge's 5432 instance.
+    ports:
+      - "5433:5432"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-tradebot}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-tradebot-change-me}
+      - POSTGRES_DB=${POSTGRES_DB:-tradebot}
+      - TIMESCALEDB_TELEMETRY=off
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # init.d runs once on first startup — creates the freqtrade DB and
+      # enables the timescaledb extension on both DBs.
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tradebot} -d ${POSTGRES_DB:-tradebot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
   freqtrade:
     image: freqtradeorg/freqtrade:stable_freqaitorch
     container_name: freqtrade
@@ -7,7 +34,10 @@ services:
     memswap_limit: 16g
     shm_size: 2g
     depends_on:
-      - influxdb
+      postgres:
+        condition: service_healthy
+      influxdb:
+        condition: service_started
     volumes:
       - ./user_data:/freqtrade/user_data
     ports:
@@ -25,6 +55,11 @@ services:
       - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
       - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.1:8b}
       - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
+      - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY:-}
+      - PERPLEXITY_MODEL=${PERPLEXITY_MODEL:-sonar}
+      - PERPLEXITY_RECENCY=${PERPLEXITY_RECENCY:-hour}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-tradebot}:${POSTGRES_PASSWORD:-tradebot-change-me}@postgres:5432/${POSTGRES_DB:-tradebot}
+      - FREQTRADE_DB_URL=postgresql://${POSTGRES_USER:-tradebot}:${POSTGRES_PASSWORD:-tradebot-change-me}@postgres:5432/freqtrade
       - INFLUX_URL=http://influxdb:8086
       - INFLUX_TOKEN=${INFLUX_TOKEN:-trading-token}
       - INFLUX_ORG=${INFLUX_ORG:-trading-bot}
@@ -47,7 +82,7 @@ services:
     command: >
       trade
       --logfile /freqtrade/user_data/logs/freqtrade.log
-      --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite
+      --db-url postgresql+psycopg2://${POSTGRES_USER:-tradebot}:${POSTGRES_PASSWORD:-tradebot-change-me}@postgres:5432/freqtrade
       --config /freqtrade/user_data/config.json
       --strategy FreqAIMeanRevV1
 
@@ -82,7 +117,10 @@ services:
     container_name: dashboard
     restart: unless-stopped
     depends_on:
-      - freqtrade
+      postgres:
+        condition: service_healthy
+      freqtrade:
+        condition: service_started
     ports:
       - "8081:8081"
     volumes:
@@ -94,6 +132,7 @@ services:
       - DASHBOARD_PAIRS=${DASHBOARD_PAIRS:-BTC/USD,ETH/USD,SOL/USD}
       - DASHBOARD_TIMEFRAME=${DASHBOARD_TIMEFRAME:-5m}
       - DASHBOARD_WS_INTERVAL_SEC=${DASHBOARD_WS_INTERVAL_SEC:-30}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-tradebot}:${POSTGRES_PASSWORD:-tradebot-change-me}@postgres:5432/${POSTGRES_DB:-tradebot}
       # Reach freqtrade by service name on the compose network
       - FREQTRADE_API_URL=http://freqtrade:8080
       - FREQTRADE_API_USER=${FREQTRADE_API_USER:-freqtrader}
@@ -135,6 +174,7 @@ services:
       start_period: 30s
 
 volumes:
+  postgres_data:
   influxdb_data:
   influxdb_config:
   grafana_data:

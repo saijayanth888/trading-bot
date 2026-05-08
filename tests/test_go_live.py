@@ -32,26 +32,29 @@ def _info(msg: str) -> None: print(f"  [i] {msg}")
 def _hr() -> None: print("=" * 64)
 
 
-def _create_journal_schema(db: Path) -> None:
-    """Replicates trade_journal.SCHEMA_SQL minimal columns we need here."""
+def _truncate_journal() -> bool:
     sys.path.insert(0, str(ROOT / "user_data"))
-    from modules.trade_journal import TradeJournal
-    TradeJournal(db_path=db)            # creates the table if missing
+    try:
+        from modules import db as _db
+        with _db.cursor() as cur:
+            cur.execute("TRUNCATE TABLE trade_journal RESTART IDENTITY")
+        return True
+    except Exception as exc:
+        print(f"  [-] SKIP: Postgres unreachable ({exc})")
+        return False
 
 
-def _seed_passing(db: Path, n_trades: int = 250) -> None:
+def _seed_passing(n_trades: int = 250) -> None:
     """Seed `n_trades` closed trades that comfortably clear all 5 thresholds."""
     sys.path.insert(0, str(ROOT / "user_data"))
     from modules.trade_journal import TradeJournal
-    j = TradeJournal(db_path=db)
+    j = TradeJournal()
     base = datetime.now(timezone.utc) - timedelta(days=60)
     rng_seed = 1
     for i in range(n_trades):
-        # Deterministic pattern: 65% wins of +0.8%, 35% losses of -0.5%
-        # (Sharpe positive, dd small, pf ≈ 2.97, win rate 65%)
         is_win = (i * 7 + rng_seed) % 20 < 13     # 65% wins
         pnl_pct = 0.008 if is_win else -0.005
-        pnl = pnl_pct * 1000.0                    # stake = 1000
+        pnl = pnl_pct * 1000.0
         opened = base + timedelta(hours=i * 4)
         closed = opened + timedelta(hours=2)
         jid = j.log_entry(
@@ -67,11 +70,11 @@ def _seed_passing(db: Path, n_trades: int = 250) -> None:
         )
 
 
-def _seed_failing(db: Path, n_trades: int = 50) -> None:
+def _seed_failing(n_trades: int = 50) -> None:
     """Few trades + bad win rate → multiple FAILs."""
     sys.path.insert(0, str(ROOT / "user_data"))
     from modules.trade_journal import TradeJournal
-    j = TradeJournal(db_path=db)
+    j = TradeJournal()
     base = datetime.now(timezone.utc) - timedelta(days=20)
     for i in range(n_trades):
         is_win = (i % 5) < 2                      # 40% wins
@@ -99,51 +102,38 @@ def _run(cmd: list[str], **env_extra) -> subprocess.CompletedProcess:
 
 def test_validate_pass_and_fail() -> None:
     print("\n[1+2/7] validate_readiness.py — pass + fail journals")
-    with tempfile.TemporaryDirectory() as td:
-        db_pass = Path(td) / "pass.db"
-        db_fail = Path(td) / "fail.db"
-        _create_journal_schema(db_pass)
-        _create_journal_schema(db_fail)
-        _seed_passing(db_pass)
-        _seed_failing(db_fail)
+    if not _truncate_journal():
+        return
+    _seed_passing()
+    r_pass = _run([sys.executable, str(SCRIPTS / "validate_readiness.py")])
+    if r_pass.returncode != 0:
+        print(r_pass.stdout)
+        print(r_pass.stderr, file=sys.stderr)
+    assert r_pass.returncode == 0, f"pass case must return 0 (got {r_pass.returncode})"
+    assert "READY" in r_pass.stdout
+    _ok("pass journal → exit 0 (READY)")
 
-        r_pass = _run([
-            sys.executable, str(SCRIPTS / "validate_readiness.py"),
-            "--db", str(db_pass),
-        ])
-        if r_pass.returncode != 0:
-            print(r_pass.stdout)
-            print(r_pass.stderr, file=sys.stderr)
-        assert r_pass.returncode == 0, f"pass case must return 0 (got {r_pass.returncode})"
-        assert "READY" in r_pass.stdout
-        _ok("pass journal → exit 0 (READY)")
-
-        r_fail = _run([
-            sys.executable, str(SCRIPTS / "validate_readiness.py"),
-            "--db", str(db_fail),
-        ])
-        assert r_fail.returncode != 0, "fail case must return non-zero"
-        assert "FAIL" in r_fail.stdout
-        assert "NOT READY" in r_fail.stdout
-        _ok(f"fail journal → exit {r_fail.returncode} (NOT READY)")
+    _truncate_journal()
+    _seed_failing()
+    r_fail = _run([sys.executable, str(SCRIPTS / "validate_readiness.py")])
+    assert r_fail.returncode != 0, "fail case must return non-zero"
+    assert "FAIL" in r_fail.stdout
+    assert "NOT READY" in r_fail.stdout
+    _ok(f"fail journal → exit {r_fail.returncode} (NOT READY)")
 
 
 def test_validate_json() -> None:
     print("\n[3/7] validate_readiness.py --json")
-    with tempfile.TemporaryDirectory() as td:
-        db = Path(td) / "j.db"
-        _create_journal_schema(db)
-        _seed_passing(db)
-        r = _run([
-            sys.executable, str(SCRIPTS / "validate_readiness.py"),
-            "--db", str(db), "--json",
-        ])
-        assert r.returncode == 0
-        report = json.loads(r.stdout)
-        assert report["all_passed"] is True
-        names = [c["name"] for c in report["checks"]]
-        assert names == ["sharpe", "max_drawdown", "profit_factor", "win_rate", "total_trades"]
-        _ok(f"--json emitted {len(report['checks'])} checks; all_passed={report['all_passed']}")
+    if not _truncate_journal():
+        return
+    _seed_passing()
+    r = _run([sys.executable, str(SCRIPTS / "validate_readiness.py"), "--json"])
+    assert r.returncode == 0
+    report = json.loads(r.stdout)
+    assert report["all_passed"] is True
+    names = [c["name"] for c in report["checks"]]
+    assert names == ["sharpe", "max_drawdown", "profit_factor", "win_rate", "total_trades"]
+    _ok(f"--json emitted {len(report['checks'])} checks; all_passed={report['all_passed']}")
 
 
 def test_auto_rollback_dry() -> None:

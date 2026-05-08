@@ -91,15 +91,24 @@ PY
 log "step 3/4: writing state snapshot to ${SNAPSHOT_DIR}"
 {
     cp -f "$CONFIG" "${SNAPSHOT_DIR}/config.json" 2>/dev/null || true
-    python3 - "${ROOT_DIR}/user_data/data/onchain.db" "${SNAPSHOT_DIR}/journal.csv" <<'PY' || true
-import sqlite3, csv, sys
-db, out = sys.argv[1], sys.argv[2]
+    python3 - "${SNAPSHOT_DIR}/journal.csv" <<'PY' || true
+import csv, os, sys
+out = sys.argv[1]
+dsn = os.environ.get("DATABASE_URL",
+    "postgresql://tradebot:tradebot-change-me@localhost:5433/tradebot")
 try:
-    with sqlite3.connect(db) as c:
-        c.row_factory = sqlite3.Row
-        rows = c.execute(
-            "SELECT * FROM trade_journal ORDER BY opened_at DESC LIMIT 500"
-        ).fetchall()
+    import psycopg
+    from psycopg.rows import dict_row
+except Exception as exc:
+    print(f"[snap] psycopg missing: {exc}")
+    sys.exit(0)
+try:
+    with psycopg.connect(dsn, connect_timeout=5) as c:
+        with c.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT * FROM trade_journal ORDER BY opened_at DESC LIMIT 500"
+            )
+            rows = list(cur.fetchall())
     if rows:
         with open(out, "w", newline="") as f:
             w = csv.writer(f)

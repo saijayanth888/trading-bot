@@ -160,5 +160,6 @@
         "api_key_env": "COINBASE_API_KEY",
         "api_secret_env": "COINBASE_API_SECRET"
     },
-    "logfile": "user_data/logs/freqtrade.log"
+    "logfile": "user_data/logs/freqtrade.log",
+    "db_url": "postgresql+psycopg2://tradebot:tradebot-change-me@postgres:5432/freqtrade"
 }

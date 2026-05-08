@@ -33,24 +33,27 @@ graduated go-live automation.
 
 ```
 trading-bot/
-├── docker-compose.yml          # freqtrade + influxdb + grafana + dashboard
+├── docker-compose.yml          # postgres + freqtrade + influxdb + grafana + dashboard
 ├── start.sh                    # one-shot up
 ├── requirements-extra.txt      # extra pip deps for the freqtrade container
 ├── README.md
 ├── .env.example                # template — copy to .env and fill in keys
 ├── grafana/                    # provisioned datasource + dashboards
+├── postgres/init/              # init.d scripts run on the postgres container's first boot
 ├── scripts/                    # operational scripts (validate / go-live / backup …)
 ├── tests/                      # pure-python smoke tests for every layer
 └── user_data/                  # mounted into the freqtrade container
     ├── config.json             # bot config + risk_management + execution blocks
+    ├── data/schema.sql         # PostgreSQL + TimescaleDB schema (hypertables)
     ├── strategies/
     │   └── FreqAIMeanRevV1.py  # entry/exit, regime gating, meta-agent wiring
     ├── freqaimodels/           # custom PyTorch FreqAI model
     │   ├── tft_architecture.py # TFT (VSN, GRN, multi-head attention, quantile head)
     │   └── TFTModel.py         # FreqAI BasePyTorchClassifier wrapper
     ├── modules/                # signal modules + AI layers
+    │   ├── db.py               # shared psycopg3 pool + schema migrations
     │   ├── onchain_signals.py
-    │   ├── sentiment_engine.py
+    │   ├── sentiment_engine.py # Perplexity (news) + Ollama (scorer)
     │   ├── sentiment_prompts.py
     │   ├── regime_detector.py
     │   ├── trading_env.py      # gym env for the DRL ensemble
@@ -61,7 +64,7 @@ trading-bot/
     │   ├── risk_governor.py    # 7-rule pre-trade gate + Kelly sizing
     │   ├── execution_engine.py # Coinbase limit-only order wrapper
     │   ├── slack_alerts.py
-    │   ├── trade_journal.py    # SQLite trade ledger
+    │   ├── trade_journal.py    # PostgreSQL trade ledger
     │   └── metrics_writer.py   # InfluxDB writer for Grafana
     ├── scripts/
     │   └── train_drl.py        # cron-friendly DRL retrain entry point
@@ -80,7 +83,7 @@ Three independent signal sources merge into the candle dataframe via
 | Module | Source | Cadence | Columns produced |
 |---|---|---|---|
 | `onchain_signals.py` | CryptoQuant + Whale Alert + Glassnode | 5 min refresh | `%-onchain_netflow_z`, `%-onchain_mvrv`, `%-onchain_whale_count_1h`, `%-onchain_whale_volume_1h` |
-| `sentiment_engine.py` | Anthropic Claude + Ollama (LLM dual-pass) | 15 min | `%-sentiment_score`, `%-sentiment_confidence`, `%-sentiment_bullish/bearish/agreement` |
+| `sentiment_engine.py` | Perplexity Sonar (news) + Ollama Llama (scorer) | 15 min | `%-sentiment_score`, `%-sentiment_confidence`, `%-sentiment_bullish/bearish/agreement` |
 | `regime_detector.py` | HMM over multi-timeframe returns | 1 h | `regime_label`, `regime_confidence`, `%-regime_is_*` (one-hot), `%-regime_prob_*` |
 
 Each module fails open: if its API is down or unconfigured, neutral
@@ -250,10 +253,16 @@ This starts:
 
 | Service | Port | What it does |
 |---|---|---|
+| `postgres` | 5433 | PostgreSQL + TimescaleDB (`tradebot` + `freqtrade` DBs) |
 | `freqtrade` | 8080 | trading bot (FreqAI + TFT + DRL + risk + execution) |
-| `influxdb` | 8086 | time-series store for Grafana panels |
+| `influxdb` | 8086 | time-series metrics store consumed by Grafana |
 | `grafana` | 3000 | observability dashboards (auto-provisioned) |
 | `dashboard` | 8081 | TradingView-style live trade dashboard |
+
+> **Note**: port `5433` (not `5432`) avoids conflicting with another local
+> Postgres instance (e.g. ModelForge). Internal compose-network traffic still
+> uses port `5432` — the host-mapped 5433 is only relevant when connecting
+> from the Spark itself.
 
 ### 4. Paper-trade until ready
 

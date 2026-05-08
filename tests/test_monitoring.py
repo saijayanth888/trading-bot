@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import sys
 import tempfile
 import time
@@ -159,18 +158,32 @@ def test_slack_dedup_and_dry_run() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _truncate_journal() -> bool:
+    """Wipe trade_journal between sections. Returns False if Postgres unreachable."""
+    try:
+        from modules import db as _db
+        with _db.cursor() as cur:
+            cur.execute("TRUNCATE TABLE trade_journal RESTART IDENTITY")
+        return True
+    except Exception as exc:
+        print(f"  [-] SKIP: Postgres unreachable ({exc}); set DATABASE_URL")
+        return False
+
+
 def test_journal_roundtrip() -> None:
     print("\n[4/8] Journal: entry → exit round-trip + CSV export")
+    if not _truncate_journal():
+        return
     with tempfile.TemporaryDirectory() as td:
-        db = Path(td) / "onchain.db"
-        j = TradeJournal(db_path=db)
+        j = TradeJournal()
 
         # Schema in place
-        with sqlite3.connect(str(db)) as c:
-            tables = {r[0] for r in c.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )}
-            assert "trade_journal" in tables
+        from modules import db as _db
+        with _db.cursor() as cur:
+            cur.execute(
+                "SELECT to_regclass('public.trade_journal') IS NOT NULL"
+            )
+            assert cur.fetchone()["?column?"]
 
         jid = j.log_entry(
             pair="BTC/USD", direction="long", entry_price=65_000.0, stake=1000.0,
@@ -215,9 +228,10 @@ def test_journal_roundtrip() -> None:
 
 def test_journal_markdown_and_stats() -> None:
     print("\n[5/8] Journal: markdown export + stats math")
+    if not _truncate_journal():
+        return
     with tempfile.TemporaryDirectory() as td:
-        db = Path(td) / "onchain.db"
-        j = TradeJournal(db_path=db)
+        j = TradeJournal()
         # Mix of wins/losses
         for i, (pnl, pct) in enumerate([(50, 0.05), (-20, -0.02), (30, 0.03), (-10, -0.01)]):
             jid = j.log_entry(
@@ -241,20 +255,20 @@ def test_journal_markdown_and_stats() -> None:
 
 def test_journal_query_filters() -> None:
     print("\n[6/8] Journal: query filters (date + pair)")
-    with tempfile.TemporaryDirectory() as td:
-        db = Path(td) / "onchain.db"
-        j = TradeJournal(db_path=db)
-        now = datetime.now(timezone.utc)
-        for delta_days, pair in ((-3, "BTC/USD"), (-1, "ETH/USD"), (0, "BTC/USD")):
-            j.log_entry(
-                pair=pair, direction="long",
-                entry_price=100, opened_at=now + timedelta(days=delta_days),
-            )
-        rows_btc = j.query(pair="BTC/USD")
-        rows_recent = j.query(start=now - timedelta(days=2))
-        assert len(rows_btc) == 2 and all(r.pair == "BTC/USD" for r in rows_btc)
-        assert len(rows_recent) == 2
-        _ok(f"pair filter → {len(rows_btc)} BTC; date filter → {len(rows_recent)} recent")
+    if not _truncate_journal():
+        return
+    j = TradeJournal()
+    now = datetime.now(timezone.utc)
+    for delta_days, pair in ((-3, "BTC/USD"), (-1, "ETH/USD"), (0, "BTC/USD")):
+        j.log_entry(
+            pair=pair, direction="long",
+            entry_price=100, opened_at=now + timedelta(days=delta_days),
+        )
+    rows_btc = j.query(pair="BTC/USD")
+    rows_recent = j.query(start=now - timedelta(days=2))
+    assert len(rows_btc) == 2 and all(r.pair == "BTC/USD" for r in rows_btc)
+    assert len(rows_recent) == 2
+    _ok(f"pair filter → {len(rows_btc)} BTC; date filter → {len(rows_recent)} recent")
 
 
 # ---------------------------------------------------------------------------
