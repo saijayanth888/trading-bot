@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b1020" />
+  <title>Trading bot</title>
+  <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='25' font-size='28'>📈</text></svg>" />
+  <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js" defer></script>
+  <link rel="stylesheet" href="/static/css/app.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">📈 Trading bot</div>
+    <div class="controls">
+      <select id="pair-select" aria-label="Pair">
+        {% for p in pairs %}
+        <option value="{{ p }}">{{ p }}</option>
+        {% endfor %}
+      </select>
+      <select id="timeframe-select" aria-label="Timeframe">
+        <option value="1m">1m</option>
+        <option value="5m" selected>5m</option>
+        <option value="15m">15m</option>
+        <option value="1h">1h</option>
+      </select>
+      <span id="ws-indicator" class="ws-pill ws-off" title="WebSocket status">
+        ◉ offline
+      </span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="charts" aria-label="Charts">
+      <div class="card chart-card">
+        <div class="card-head">
+          <h2 id="chart-title">— / —</h2>
+          <div class="meta" id="chart-meta"></div>
+        </div>
+        <div id="chart-main" class="chart"></div>
+        <div class="legend">
+          <span class="dot dot-bb"></span> Bollinger Bands
+          <span class="dot dot-vol"></span> Volume
+        </div>
+      </div>
+
+      <div class="card sub-card">
+        <div class="card-head"><h3>RSI (14)</h3></div>
+        <div id="chart-rsi" class="chart subchart"></div>
+      </div>
+
+      <div class="card sub-card">
+        <div class="card-head"><h3>MACD (12, 26, 9)</h3></div>
+        <div id="chart-macd" class="chart subchart"></div>
+      </div>
+
+      <div class="card sub-card">
+        <div class="card-head"><h3>Regime</h3></div>
+        <div id="regime-ribbon" class="regime-ribbon" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <aside class="sidebar" aria-label="Sidebar">
+      <div class="card">
+        <h3>Now</h3>
+        <div class="kv"><span>Regime</span><b id="state-regime">—</b></div>
+        <div class="kv"><span>Sentiment</span><b id="state-sentiment">—</b></div>
+        <div class="kv"><span>Meta signal</span><b id="state-meta">—</b></div>
+        <div class="kv"><span>TFT (up / flat / down)</span><b id="state-tft">—</b></div>
+        <div class="kv"><span>TFT confidence</span><b id="state-tft-conf">—</b></div>
+      </div>
+
+      <div class="card">
+        <h3>On-chain</h3>
+        <div class="kv"><span>Net-flow z</span><b id="state-netflow">—</b></div>
+        <div class="kv"><span>MVRV</span><b id="state-mvrv">—</b></div>
+        <div class="kv"><span>Whale count (1h)</span><b id="state-whale">—</b></div>
+      </div>
+
+      <div class="card">
+        <h3>Open positions</h3>
+        <div id="positions" class="positions"></div>
+      </div>
+
+      <div class="card">
+        <h3>P&amp;L</h3>
+        <div class="kv"><span>Today (UTC)</span><b id="state-daily-pnl">—</b></div>
+        <div id="pnl-history" class="pnl-history"></div>
+      </div>
+
+      <div class="card">
+        <h3>Champion</h3>
+        <div class="kv"><span>Generation</span><b id="state-gen">—</b></div>
+        <div class="kv"><span>Member ID</span><b id="state-champ">—</b></div>
+        <div class="kv"><span>Fitness</span><b id="state-champ-fit">—</b></div>
+        <div class="kv"><span>Runner-up</span><b id="state-runner">—</b></div>
+      </div>
+
+      <div class="card">
+        <h3>Recent trades</h3>
+        <div id="recent-trades" class="recent"></div>
+      </div>
+    </aside>
+  </main>
+
+  <script>
+    window.DASHBOARD_CONFIG = {
+      defaultTimeframe: "{{ default_timeframe }}",
+      wsPushInterval: {{ ws_push_interval }}
+    };
+  </script>
+  <script src="/static/js/app.js" defer></script>
+</body>
+</html>

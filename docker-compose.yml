@@ -1,0 +1,140 @@
+services:
+  freqtrade:
+    image: freqtradeorg/freqtrade:stable_freqaitorch
+    container_name: freqtrade
+    restart: unless-stopped
+    mem_limit: 16g
+    memswap_limit: 16g
+    shm_size: 2g
+    depends_on:
+      - influxdb
+    volumes:
+      - ./user_data:/freqtrade/user_data
+    ports:
+      - "8080:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - CRYPTOQUANT_API_KEY=${CRYPTOQUANT_API_KEY:-}
+      - WHALE_ALERT_API_KEY=${WHALE_ALERT_API_KEY:-}
+      - GLASSNODE_API_KEY=${GLASSNODE_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-sonnet-4-20250514}
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.1:8b}
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
+      - INFLUX_URL=http://influxdb:8086
+      - INFLUX_TOKEN=${INFLUX_TOKEN:-trading-token}
+      - INFLUX_ORG=${INFLUX_ORG:-trading-bot}
+      - INFLUX_BUCKET=${INFLUX_BUCKET:-trading}
+      - COINBASE_API_KEY=${COINBASE_API_KEY:-}
+      - COINBASE_API_SECRET=${COINBASE_API_SECRET:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:8080/api/v1/ping || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    command: >
+      trade
+      --logfile /freqtrade/user_data/logs/freqtrade.log
+      --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite
+      --config /freqtrade/user_data/config.json
+      --strategy FreqAIMeanRevV1
+
+  influxdb:
+    image: influxdb:2.7
+    container_name: influxdb
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+      - influxdb_config:/etc/influxdb2
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=${INFLUX_ADMIN_USER:-admin}
+      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUX_ADMIN_PASSWORD:-changeme-please}
+      - DOCKER_INFLUXDB_INIT_ORG=${INFLUX_ORG:-trading-bot}
+      - DOCKER_INFLUXDB_INIT_BUCKET=${INFLUX_BUCKET:-trading}
+      - DOCKER_INFLUXDB_INIT_RETENTION=${INFLUX_RETENTION:-90d}
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUX_TOKEN:-trading-token}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8086/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  dashboard:
+    build:
+      context: ./user_data/dashboard
+      dockerfile: Dockerfile
+    container_name: dashboard
+    restart: unless-stopped
+    depends_on:
+      - freqtrade
+    ports:
+      - "8081:8081"
+    volumes:
+      # Mount the same user_data the bot writes into so the dashboard reads
+      # the live trade_journal SQLite + evolution.json.
+      - ./user_data:/freqtrade/user_data:ro
+    environment:
+      - USER_DATA_ROOT=/freqtrade/user_data
+      - DASHBOARD_PAIRS=${DASHBOARD_PAIRS:-BTC/USD,ETH/USD,SOL/USD}
+      - DASHBOARD_TIMEFRAME=${DASHBOARD_TIMEFRAME:-5m}
+      - DASHBOARD_WS_INTERVAL_SEC=${DASHBOARD_WS_INTERVAL_SEC:-30}
+      # Reach freqtrade by service name on the compose network
+      - FREQTRADE_API_URL=http://freqtrade:8080
+      - FREQTRADE_API_USER=${FREQTRADE_API_USER:-freqtrader}
+      - FREQTRADE_API_PASS=${FREQTRADE_API_PASS:-}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request,sys;sys.exit(0 if urllib.request.urlopen(\"http://127.0.0.1:8081/api/pairs\", timeout=3).status==200 else 1)'"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    depends_on:
+      - influxdb
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-changeme-please}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_INSTALL_PLUGINS=
+      - INFLUX_URL=http://influxdb:8086
+      - INFLUX_TOKEN=${INFLUX_TOKEN:-trading-token}
+      - INFLUX_ORG=${INFLUX_ORG:-trading-bot}
+      - INFLUX_BUCKET=${INFLUX_BUCKET:-trading}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  influxdb_data:
+  influxdb_config:
+  grafana_data:

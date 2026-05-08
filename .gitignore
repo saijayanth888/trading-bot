@@ -1,0 +1,67 @@
+# --- Python ---------------------------------------------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- Secrets --------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+.go_live_state*
+.trading-bot/
+
+# --- Runtime / generated state -------------------------------------------
+user_data/data/onchain.db
+user_data/data/onchain.db-journal
+user_data/data/onchain.db-wal
+user_data/data/onchain.db-shm
+user_data/tradesv3.sqlite
+user_data/tradesv3.sqlite-shm
+user_data/tradesv3.sqlite-wal
+
+# --- Logs -----------------------------------------------------------------
+user_data/logs/*.log
+user_data/logs/*.log.*
+user_data/logs/evolution.json
+!user_data/logs/.gitkeep
+
+# --- Trained model weights -----------------------------------------------
+# These are reproducible from training runs; don't bloat the repo.
+user_data/models/**
+!user_data/models/.gitkeep
+user_data/freqai/**
+user_data/freqai_data/**
+user_data/freqaimodels/__pycache__/
+
+# --- Snapshots / backups -------------------------------------------------
+user_data/snapshots/**
+backups/
+
+# --- Docker volumes (compose creates them locally) ----------------------
+influxdb_data/
+influxdb_config/
+grafana_data/
+
+# --- Tests / coverage ----------------------------------------------------
+.coverage
+htmlcov/
+.tox/
+
+# --- Editors -------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store

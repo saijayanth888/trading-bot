@@ -1,0 +1,17 @@
+# Extra Python packages required by the modules under user_data/modules/.
+# Install inside the running container:
+#
+#   docker compose exec freqtrade pip install -r /freqtrade/user_data/../requirements-extra.txt
+#
+# Or rebake the image (see Dockerfile in this directory).
+
+anthropic>=0.40.0
+hmmlearn>=0.3.2
+stable-baselines3>=2.4.0
+gymnasium>=0.29
+influxdb-client>=1.40
+requests>=2.31
+# torch is already in the freqtradeorg/freqtrade:stable_freqaitorch image,
+# pinned for reference only:
+# torch>=2.4
+

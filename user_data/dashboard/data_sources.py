@@ -1,0 +1,406 @@
+"""
+Data fetchers for the dashboard.
+
+Three sources, each with graceful degradation:
+
+  1. Freqtrade REST API (port 8080) — live candles + analyzed columns
+     (regime_label, up/flat/down, meta_signal, tft_confidence). Requires
+     `FREQTRADE_API_USER` / `FREQTRADE_API_PASS`.
+  2. trade_journal SQLite (`user_data/data/onchain.db`) — trade markers,
+     daily P&L, recent trade history.
+  3. evolution.json (`user_data/logs/evolution.json`) — current champion ID.
+
+When the freqtrade API is unreachable the candle endpoint falls back to
+public CCXT/Coinbase fetches so the chart still renders.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import sqlite3
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+import httpx
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+USER_DATA_ROOT = Path(os.environ.get(
+    "USER_DATA_ROOT",
+    str(Path(__file__).resolve().parent.parent),
+))
+JOURNAL_DB = USER_DATA_ROOT / "data" / "onchain.db"
+EVOLUTION_LOG = USER_DATA_ROOT / "logs" / "evolution.json"
+
+FREQTRADE_API = os.environ.get("FREQTRADE_API_URL", "http://freqtrade:8080")
+FREQTRADE_USER = os.environ.get("FREQTRADE_API_USER", "freqtrader")
+FREQTRADE_PASS = os.environ.get("FREQTRADE_API_PASS", "")
+
+# Public Coinbase Advanced Trade public-data endpoint, used only as a
+# fallback when freqtrade is unreachable. Public, no auth needed.
+COINBASE_PUBLIC = "https://api.exchange.coinbase.com"
+
+
+# ---------------------------------------------------------------------------
+# Freqtrade API
+# ---------------------------------------------------------------------------
+
+
+_jwt_lock = asyncio.Lock()
+_jwt_token: str | None = None
+_jwt_expires_at: datetime | None = None
+
+
+async def _ensure_jwt(client: httpx.AsyncClient) -> str | None:
+    """Login once, cache the JWT until ~9 minutes have passed."""
+    global _jwt_token, _jwt_expires_at
+    async with _jwt_lock:
+        if _jwt_token and _jwt_expires_at and datetime.now(timezone.utc) < _jwt_expires_at:
+            return _jwt_token
+        if not FREQTRADE_PASS:
+            return None
+        try:
+            resp = await client.post(
+                f"{FREQTRADE_API}/api/v1/token/login",
+                auth=(FREQTRADE_USER, FREQTRADE_PASS), timeout=5.0,
+            )
+            if resp.status_code != 200:
+                logger.warning("freqtrade login failed status=%s", resp.status_code)
+                return None
+            payload = resp.json()
+            _jwt_token = payload.get("access_token")
+            _jwt_expires_at = datetime.now(timezone.utc) + timedelta(minutes=9)
+            return _jwt_token
+        except Exception as exc:
+            logger.warning("freqtrade login exception: %s", exc)
+            return None
+
+
+async def fetch_freqtrade_candles(
+    pair: str, timeframe: str = "5m", limit: int = 500,
+) -> pd.DataFrame | None:
+    """Pull pair_candles (candles + analyzed columns) from freqtrade."""
+    async with httpx.AsyncClient() as client:
+        token = await _ensure_jwt(client)
+        if token is None:
+            return None
+        try:
+            resp = await client.get(
+                f"{FREQTRADE_API}/api/v1/pair_candles",
+                params={"pair": pair, "timeframe": timeframe, "limit": limit},
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10.0,
+            )
+            if resp.status_code != 200:
+                logger.warning(
+                    "pair_candles %s status=%s body=%s",
+                    pair, resp.status_code, resp.text[:200],
+                )
+                return None
+            payload = resp.json()
+        except Exception as exc:
+            logger.warning("pair_candles fetch failed: %s", exc)
+            return None
+
+    cols = payload.get("columns") or []
+    rows = payload.get("data") or []
+    if not cols or not rows:
+        return None
+    df = pd.DataFrame(rows, columns=cols)
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
+    return df
+
+
+async def fetch_freqtrade_status() -> dict[str, Any]:
+    """Open-trade summary + balance from freqtrade."""
+    out: dict[str, Any] = {"open_trades": [], "balance": None}
+    async with httpx.AsyncClient() as client:
+        token = await _ensure_jwt(client)
+        if token is None:
+            return out
+        try:
+            r1 = await client.get(
+                f"{FREQTRADE_API}/api/v1/status",
+                headers={"Authorization": f"Bearer {token}"}, timeout=5.0,
+            )
+            if r1.status_code == 200:
+                out["open_trades"] = r1.json() or []
+            r2 = await client.get(
+                f"{FREQTRADE_API}/api/v1/balance",
+                headers={"Authorization": f"Bearer {token}"}, timeout=5.0,
+            )
+            if r2.status_code == 200:
+                out["balance"] = r2.json()
+        except Exception as exc:
+            logger.debug("freqtrade status fetch failed: %s", exc)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Coinbase public fallback
+# ---------------------------------------------------------------------------
+
+
+_TF_TO_GRAN = {
+    "1m": 60, "5m": 300, "15m": 900, "1h": 3600, "6h": 21600, "1d": 86400,
+}
+
+
+async def fetch_coinbase_candles(
+    pair: str, timeframe: str = "5m", limit: int = 300,
+) -> pd.DataFrame | None:
+    """Public Coinbase candles — used when freqtrade is unavailable."""
+    product = pair.replace("/", "-").upper()
+    gran = _TF_TO_GRAN.get(timeframe, 300)
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(seconds=gran * limit)
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                f"{COINBASE_PUBLIC}/products/{product}/candles",
+                params={
+                    "granularity": gran,
+                    "start": start.isoformat(),
+                    "end": end.isoformat(),
+                },
+                timeout=10.0,
+            )
+            if r.status_code != 200:
+                return None
+            rows = r.json()
+    except Exception as exc:
+        logger.debug("coinbase candle fetch failed: %s", exc)
+        return None
+    if not rows:
+        return None
+    # rows: [time, low, high, open, close, volume]
+    df = pd.DataFrame(rows, columns=["time", "low", "high", "open", "close", "volume"])
+    df["date"] = pd.to_datetime(df["time"], unit="s", utc=True)
+    df = df.sort_values("date").reset_index(drop=True)
+    return df[["date", "open", "high", "low", "close", "volume"]]
+
+
+# ---------------------------------------------------------------------------
+# Trade journal — markers + recent trades
+# ---------------------------------------------------------------------------
+
+
+def _journal_conn() -> sqlite3.Connection | None:
+    if not JOURNAL_DB.exists():
+        return None
+    try:
+        c = sqlite3.connect(str(JOURNAL_DB), isolation_level=None, timeout=5.0)
+        c.row_factory = sqlite3.Row
+        return c
+    except Exception:
+        return None
+
+
+def fetch_trade_markers(pair: str, since: datetime | None = None) -> list[dict]:
+    """
+    Return a list suitable for `series.setMarkers(...)`:
+        [{"time": unix_seconds, "position": "belowBar"|"aboveBar",
+          "color": "#26a69a"|"#ef5350", "shape": "arrowUp"|"arrowDown",
+          "text": "+$12.3"}, ...]
+    """
+    c = _journal_conn()
+    if c is None:
+        return []
+    out: list[dict] = []
+    try:
+        sql = (
+            "SELECT opened_at, closed_at, entry_price, exit_price, pnl, pair, "
+            "exit_reason, confidence "
+            "FROM trade_journal WHERE pair = ? "
+        )
+        params: list[Any] = [pair]
+        if since is not None:
+            sql += "AND opened_at >= ? "
+            params.append(since.astimezone(timezone.utc).isoformat())
+        sql += "ORDER BY opened_at ASC"
+        rows = c.execute(sql, params).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    finally:
+        c.close()
+
+    for r in rows:
+        opened = _to_unix(r["opened_at"])
+        if opened is not None and r["entry_price"] is not None:
+            out.append({
+                "time": opened,
+                "position": "belowBar",
+                "color": "#22c55e",        # green entry
+                "shape": "arrowUp",
+                "text": f"BUY {float(r['entry_price']):.4f}",
+            })
+        closed = _to_unix(r["closed_at"]) if r["closed_at"] else None
+        if closed is not None and r["exit_price"] is not None:
+            pnl = float(r["pnl"] or 0)
+            out.append({
+                "time": closed,
+                "position": "aboveBar",
+                "color": "#ef4444" if pnl < 0 else "#16a34a",
+                "shape": "arrowDown",
+                "text": f"SELL {float(r['exit_price']):.4f}  ({pnl:+.2f})",
+            })
+    out.sort(key=lambda m: m["time"])
+    return out
+
+
+def fetch_recent_trades(limit: int = 20) -> list[dict]:
+    c = _journal_conn()
+    if c is None:
+        return []
+    try:
+        rows = c.execute(
+            "SELECT pair, opened_at, closed_at, entry_price, exit_price, pnl, "
+            "pnl_pct, exit_reason, confidence, regime "
+            "FROM trade_journal "
+            "ORDER BY opened_at DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    finally:
+        c.close()
+    return [dict(r) for r in rows]
+
+
+def fetch_daily_pnl() -> dict[str, float]:
+    """Returns {date: pnl_quote, ...} for the last 14 days."""
+    c = _journal_conn()
+    if c is None:
+        return {}
+    try:
+        rows = c.execute(
+            "SELECT substr(closed_at, 1, 10) AS day, SUM(pnl) AS pnl "
+            "FROM trade_journal WHERE closed_at IS NOT NULL "
+            "GROUP BY day ORDER BY day DESC LIMIT 14"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    finally:
+        c.close()
+    return {r["day"]: float(r["pnl"] or 0) for r in rows}
+
+
+def _to_unix(iso: str | None) -> int | None:
+    if not iso:
+        return None
+    try:
+        s = iso.replace("Z", "+00:00") if iso.endswith("Z") else iso
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Evolution snapshot — champion ID for the sidebar
+# ---------------------------------------------------------------------------
+
+
+def fetch_champion() -> dict[str, Any]:
+    if not EVOLUTION_LOG.exists():
+        return {}
+    try:
+        history = json.loads(EVOLUTION_LOG.read_text())
+        if not history:
+            return {}
+        last = history[-1]
+        champ_id = last.get("champion")
+        runner_up_id = last.get("runner_up")
+        alive = last.get("alive", []) or []
+        champ = next((m for m in alive if m.get("member_id") == champ_id), None)
+        return {
+            "generation": last.get("generation"),
+            "champion_id": champ_id,
+            "runner_up_id": runner_up_id,
+            "champion_fitness": (
+                float(champ.get("fitness", 0.0)) if champ else None
+            ),
+        }
+    except Exception:
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# Regime / sentiment / on-chain — derived from the freqtrade-analyzed columns
+# ---------------------------------------------------------------------------
+
+
+def regime_segments_from_df(df: pd.DataFrame, time_col: str = "date") -> list[dict]:
+    """
+    Compress the per-candle `regime_label` column into a sparse list of
+    contiguous segments suitable for chart background shading:
+
+        [{"start": unix_s, "end": unix_s, "label": "trending_up"}, ...]
+    """
+    if df is None or df.empty or "regime_label" not in df.columns:
+        return []
+    if time_col not in df.columns:
+        return []
+    s = df[[time_col, "regime_label"]].dropna().reset_index(drop=True)
+    if s.empty:
+        return []
+    times = pd.to_datetime(s[time_col], utc=True).astype("int64") // 10**9
+    labels = s["regime_label"].astype(str).tolist()
+    out: list[dict] = []
+    cur_label = labels[0]
+    cur_start = int(times.iloc[0])
+    for i in range(1, len(labels)):
+        if labels[i] != cur_label:
+            out.append({
+                "start": cur_start,
+                "end": int(times.iloc[i]),
+                "label": cur_label,
+            })
+            cur_label = labels[i]
+            cur_start = int(times.iloc[i])
+    out.append({
+        "start": cur_start,
+        "end": int(times.iloc[-1]),
+        "label": cur_label,
+    })
+    return out
+
+
+def latest_state_from_df(df: pd.DataFrame) -> dict[str, Any]:
+    """Pull last-row regime / sentiment / on-chain / TFT signal for the sidebar."""
+    out: dict[str, Any] = {}
+    if df is None or df.empty:
+        return out
+    last = df.iloc[-1]
+    for src, dst in (
+        ("regime_label", "regime"),
+        ("regime_confidence", "regime_confidence"),
+        ("%-sentiment_score", "sentiment_score"),
+        ("%-sentiment_confidence", "sentiment_confidence"),
+        ("%-onchain_netflow_z", "onchain_netflow_z"),
+        ("%-onchain_mvrv", "onchain_mvrv"),
+        ("%-onchain_whale_count_1h", "onchain_whale_count"),
+        ("up", "tft_up"),
+        ("flat", "tft_flat"),
+        ("down", "tft_down"),
+        ("tft_confidence", "tft_confidence"),
+        ("meta_signal", "meta_signal"),
+        ("meta_confidence", "meta_confidence"),
+    ):
+        if src in df.columns:
+            v = last.get(src, None)
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                continue
+            try:
+                out[dst] = float(v) if not isinstance(v, str) else str(v)
+            except Exception:
+                out[dst] = str(v)
+    return out
