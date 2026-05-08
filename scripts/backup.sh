@@ -88,6 +88,41 @@ if [[ ${#EXISTING[@]} -eq 0 ]] && [[ "${DUMP_PG:-0}" -eq 0 ]]; then
     exit 0
 fi
 
+# Snapshot Hermes Agent state (config + secrets + chat sessions + cron jobs +
+# kanban + skills) into user_data/data/hermes-state.tar.gz so it ends up in
+# the same archive as the file-based artefacts. Excludes hermes-agent/ (1.8 GB
+# of source code, reinstallable from upstream) and the bin/ + logs/ dirs.
+HERMES_HOME="${HERMES_HOME:-${HOME}/.hermes}"
+HERMES_SNAPSHOT="${ROOT_DIR}/user_data/data/hermes-state.tar.gz"
+if [[ -d "$HERMES_HOME" ]]; then
+    log "snapshotting hermes state from ${HERMES_HOME} → ${HERMES_SNAPSHOT}"
+    HERMES_INCLUDES=(
+        "config.yaml"
+        ".env"
+        "state.db" "state.db-wal" "state.db-shm"
+        "sessions"
+        "kanban.db"
+        "state-snapshots"
+        "skills"
+        "cron/jobs.json"
+        "webhook_subscriptions.json"
+    )
+    HERMES_EXISTING=()
+    for h in "${HERMES_INCLUDES[@]}"; do
+        [[ -e "${HERMES_HOME}/${h}" ]] && HERMES_EXISTING+=("$h")
+    done
+    if [[ ${#HERMES_EXISTING[@]} -gt 0 ]]; then
+        ( cd "$HERMES_HOME" && tar -czf "$HERMES_SNAPSHOT" "${HERMES_EXISTING[@]}" ) \
+            && log "hermes snapshot ok ($(du -h "$HERMES_SNAPSHOT" | cut -f1))" \
+            && EXISTING+=("user_data/data/hermes-state.tar.gz") \
+            || { log "hermes snapshot failed (rc=$?)"; rm -f "$HERMES_SNAPSHOT"; }
+    else
+        log "no hermes state files found — skipping hermes snapshot"
+    fi
+else
+    log "no \$HERMES_HOME at ${HERMES_HOME} — skipping hermes snapshot"
+fi
+
 # Dump the Postgres tradebot database into user_data/data/pg_tradebot.dump
 # so it ends up in the same archive as the file-based artefacts.
 if [[ "${DUMP_PG:-0}" -eq 1 ]]; then

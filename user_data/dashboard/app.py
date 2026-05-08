@@ -42,6 +42,7 @@ from .data_sources import (
     regime_segments_from_df,
 )
 from .indicators import attach_all
+from . import ops_routes
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -60,6 +61,10 @@ WS_PUSH_INTERVAL = float(os.environ.get("DASHBOARD_WS_INTERVAL_SEC", "30"))
 
 app = FastAPI(title="Trading bot dashboard", docs_url="/api/docs")
 app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
+
+# Ops tab — registers /ops (HTML) + /api/ops/* (REST envelope endpoints)
+ops_routes.make_html_route(app)
+app.include_router(ops_routes.router)
 
 
 # ---------------------------------------------------------------------------

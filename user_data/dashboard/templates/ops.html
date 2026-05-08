@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b1020" />
+  <title>Trading bot — Ops</title>
+  <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='25' font-size='28'>🎛️</text></svg>" />
+  <link rel="stylesheet" href="/static/css/app.css" />
+  <style>
+    /* ── Ops-tab specific styles (kept here so the global app.css stays untouched) ── */
+    .ops-grid {
+      display: grid;
+      gap: 16px;
+      padding: 16px;
+      max-width: 1400px;
+      margin: 0 auto;
+      grid-template-columns: repeat(12, 1fr);
+      grid-auto-rows: auto;
+    }
+    .ops-card {
+      background: #0f1530;
+      border: 1px solid #1f2748;
+      border-radius: 10px;
+      padding: 14px 16px;
+      box-shadow: 0 1px 0 #0a0f24 inset;
+    }
+    .ops-card[data-status="degraded"] { border-color: #c9a227; box-shadow: 0 0 0 1px #c9a227 inset; }
+    .ops-card[data-status="down"]     { border-color: #c0392b; box-shadow: 0 0 0 1px #c0392b inset; }
+
+    .hero { grid-column: span 12; padding: 22px 24px; position: relative; min-height: 140px; }
+    .hero[data-regime="trending_up"]    { background: linear-gradient(135deg, #0f3320 0%, #0f1530 100%); border-color: #1f6f3f; }
+    .hero[data-regime="trending_down"]  { background: linear-gradient(135deg, #36100f 0%, #0f1530 100%); border-color: #8b2d2a; }
+    .hero[data-regime="mean_reverting"] { background: linear-gradient(135deg, #3a2c0a 0%, #0f1530 100%); border-color: #c9a227; }
+    .hero[data-regime="high_volatility"]{ background: linear-gradient(135deg, #2a1240 0%, #0f1530 100%); border-color: #7a3aa8; }
+    .hero h1     { margin: 0 0 8px 0; font-size: 28px; letter-spacing: 0.5px; }
+    .hero .meta  { font-size: 14px; opacity: 0.85; }
+    .hero .arrow { font-size: 22px; vertical-align: -2px; margin-left: 4px; }
+
+    .small-card { grid-column: span 4; }
+    @media (max-width: 1100px) { .small-card { grid-column: span 6; } }
+    @media (max-width: 700px)  { .small-card { grid-column: span 12; } }
+
+    .wide-card { grid-column: span 12; }
+
+    .card-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
+    .card-head h3 { margin: 0; font-size: 15px; font-weight: 600; }
+    .card-head .age { font-size: 11px; opacity: 0.6; font-variant-numeric: tabular-nums; }
+
+    .row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13px; }
+    .row .label { opacity: 0.7; }
+    .row .value { font-variant-numeric: tabular-nums; }
+
+    .ok    { color: #4cc38a; }
+    .warn  { color: #f7c948; }
+    .bad   { color: #ff6b6b; }
+    .muted { color: #7a86b8; }
+
+    .progress { height: 6px; background: #1f2748; border-radius: 3px; overflow: hidden; margin-top: 4px; }
+    .progress > div { height: 100%; background: #4cc38a; transition: width 250ms ease; }
+
+    .controls-bar {
+      grid-column: span 12;
+      display: flex;
+      gap: 12px;
+      justify-content: flex-end;
+      padding-top: 4px;
+    }
+    .btn {
+      background: #1f2748; color: #e8ecf8; border: 1px solid #2c386a;
+      border-radius: 8px; padding: 10px 18px; font: inherit; cursor: pointer;
+      transition: background 120ms ease;
+    }
+    .btn:hover { background: #2c386a; }
+    .btn.primary { background: #c0392b; border-color: #d0493b; }
+    .btn.primary:hover { background: #d0493b; }
+    .btn.success { background: #1f6f3f; border-color: #2f8f4f; }
+    .btn.success:hover { background: #2f8f4f; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    table.tape { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+    table.tape th, table.tape td { padding: 4px 8px; text-align: left; border-bottom: 1px solid #1f2748; }
+    table.tape th { font-weight: 600; opacity: 0.7; }
+
+    .modal-back { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 100; }
+    .modal-back.open { display: flex; }
+    .modal { background: #0f1530; border: 1px solid #2c386a; border-radius: 10px; padding: 22px; width: 90%; max-width: 480px; }
+    .modal h3 { margin-top: 0; }
+    .modal input { width: 100%; padding: 8px; background: #060a1c; color: #e8ecf8; border: 1px solid #2c386a; border-radius: 6px; font: inherit; }
+    .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">🎛️ Ops</div>
+    <div class="controls">
+      <a href="/" class="mode-pill" style="text-decoration:none;">📈 Charts</a>
+      <span id="last-refresh" class="mode-pill" title="Last refresh">— —</span>
+    </div>
+  </header>
+
+  <main>
+    <div class="ops-grid">
+
+      <!-- ─── HERO: regime + sentiment ─────────────────────────────────── -->
+      <section class="ops-card hero" id="hero" data-regime="" data-status="ok">
+        <h1 id="hero-regime">Loading regime…</h1>
+        <div class="meta" id="hero-meta">—</div>
+      </section>
+
+      <!-- ─── Services ────────────────────────────────────────────────── -->
+      <section class="ops-card small-card" id="card-services" data-status="ok">
+        <div class="card-head">
+          <h3>Services</h3>
+          <span class="age" id="services-age">—</span>
+        </div>
+        <div id="services-body">Loading…</div>
+      </section>
+
+      <!-- ─── Training ────────────────────────────────────────────────── -->
+      <section class="ops-card small-card" id="card-training" data-status="ok">
+        <div class="card-head">
+          <h3>Training</h3>
+          <span class="age" id="training-age">—</span>
+        </div>
+        <div id="training-body">Loading…</div>
+      </section>
+
+      <!-- ─── MCP ─────────────────────────────────────────────────────── -->
+      <section class="ops-card small-card" id="card-mcp" data-status="ok">
+        <div class="card-head">
+          <h3>MCP wire</h3>
+          <span class="age" id="mcp-age">—</span>
+        </div>
+        <div id="mcp-body">Loading…</div>
+      </section>
+
+      <!-- ─── Trades + risk ───────────────────────────────────────────── -->
+      <section class="ops-card wide-card" id="card-trades" data-status="ok">
+        <div class="card-head">
+          <h3>Trades + risk</h3>
+          <span class="age" id="trades-age">—</span>
+        </div>
+        <div id="trades-body">Loading…</div>
+      </section>
+
+      <!-- ─── Controls ────────────────────────────────────────────────── -->
+      <div class="controls-bar">
+        <button id="btn-pause"  class="btn primary">⏸ Pause Trading</button>
+        <button id="btn-resume" class="btn success">▶ Resume Trading…</button>
+      </div>
+
+    </div>
+  </main>
+
+  <!-- ─── Resume confirm modal ──────────────────────────────────────── -->
+  <div class="modal-back" id="resume-modal">
+    <div class="modal">
+      <h3>Resume trading?</h3>
+      <p class="muted" id="resume-context">Loading current state…</p>
+      <p>Type <strong>RESUME</strong> to confirm:</p>
+      <input id="resume-input" type="text" autocomplete="off" />
+      <div class="modal-actions">
+        <button class="btn" id="resume-cancel">Cancel</button>
+        <button class="btn success" id="resume-confirm" disabled>Confirm Resume</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/ops.js" defer></script>
+</body>
+</html>

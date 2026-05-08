@@ -157,6 +157,10 @@ services:
         condition: service_started
     ports:
       - "8081:8081"
+    extra_hosts:
+      # Lets the Ops tab probe host services (ollama 11434, hermes-mcp 8089,
+      # hermes-dashboard 9119) from inside the container.
+      - "host.docker.internal:host-gateway"
     volumes:
       # Mount the same user_data the bot writes into so the dashboard reads
       # the live trade_journal SQLite + evolution.json.
