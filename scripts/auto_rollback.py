@@ -41,10 +41,21 @@ CONFIG_PATH = ROOT / "user_data" / "config.json"
 STATE_DIR = Path(os.environ.get("HOME", "/tmp")) / ".trading-bot"
 STATE_FILE = STATE_DIR / "auto_rollback.json"
 EMERGENCY_STOP = ROOT / "scripts" / "emergency_stop.sh"
-DSN = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://tradebot:tradebot-change-me@localhost:5433/tradebot",
-)
+def _resolve_dsn() -> str:
+    """URL-encode-safe DSN — copy of user_data/modules/db.py:_resolve_dsn."""
+    from urllib.parse import quote_plus
+    explicit = os.environ.get("DATABASE_URL", "").strip()
+    if explicit:
+        return explicit
+    user = os.environ.get("POSTGRES_USER", "tradebot")
+    password = os.environ.get("POSTGRES_PASSWORD", "tradebot-change-me")
+    host = os.environ.get("POSTGRES_HOST", "localhost")
+    port = os.environ.get("POSTGRES_PORT", "5433")
+    db = os.environ.get("POSTGRES_DB", "tradebot")
+    return f"postgresql://{quote_plus(user)}:{quote_plus(password)}@{host}:{port}/{db}"
+
+
+DSN = _resolve_dsn()
 
 logger = logging.getLogger("auto_rollback")
 logging.basicConfig(

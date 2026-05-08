@@ -6,7 +6,7 @@ Three sources, each with graceful degradation:
   1. Freqtrade REST API (port 8080) — live candles + analyzed columns
      (regime_label, up/flat/down, meta_signal, tft_confidence). Requires
      `FREQTRADE_API_USER` / `FREQTRADE_API_PASS`.
-  2. trade_journal SQLite (`user_data/data/onchain.db`) — trade markers,
+  2. trade_journal in PostgreSQL — trade markers,
      daily P&L, recent trade history.
   3. evolution.json (`user_data/logs/evolution.json`) — current champion ID.
 
@@ -44,10 +44,25 @@ USER_DATA_ROOT = Path(os.environ.get(
 ))
 EVOLUTION_LOG = USER_DATA_ROOT / "logs" / "evolution.json"
 
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://tradebot:tradebot-change-me@localhost:5433/tradebot",
-)
+
+def _resolve_dsn() -> str:
+    """Same DSN-build pattern as user_data/modules/db.py — URL-encodes the password."""
+    from urllib.parse import quote_plus
+    explicit = os.environ.get("DATABASE_URL", "").strip()
+    if explicit:
+        return explicit
+    user = os.environ.get("POSTGRES_USER", "tradebot")
+    password = os.environ.get("POSTGRES_PASSWORD", "tradebot-change-me")
+    host = os.environ.get("POSTGRES_HOST", "postgres")
+    port = os.environ.get("POSTGRES_PORT", "5432")
+    db = os.environ.get("POSTGRES_DB", "tradebot")
+    return (
+        f"postgresql://{quote_plus(user)}:{quote_plus(password)}"
+        f"@{host}:{port}/{db}"
+    )
+
+
+DATABASE_URL = _resolve_dsn()
 
 FREQTRADE_API = os.environ.get("FREQTRADE_API_URL", "http://freqtrade:8080")
 FREQTRADE_USER = os.environ.get("FREQTRADE_API_USER", "freqtrader")

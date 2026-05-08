@@ -31,6 +31,7 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Sequence
+from urllib.parse import quote_plus
 
 import psycopg
 from psycopg.rows import dict_row
@@ -38,7 +39,6 @@ from psycopg_pool import ConnectionPool
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DSN = "postgresql://tradebot:tradebot-change-me@localhost:5433/tradebot"
 SCHEMA_FILE = Path(__file__).resolve().parent.parent / "data" / "schema.sql"
 
 _pool: ConnectionPool | None = None
@@ -48,7 +48,30 @@ _schema_lock = threading.Lock()
 
 
 def dsn() -> str:
-    return os.environ.get("DATABASE_URL", DEFAULT_DSN)
+    """
+    Resolve the Postgres DSN.
+
+    Order of precedence:
+      1. DATABASE_URL (explicit override; caller is responsible for any
+         URL-encoding in the password segment).
+      2. POSTGRES_* parts assembled with `urllib.parse.quote_plus` on the
+         password — this is what makes special chars like '@' work.
+
+    Inside docker-compose the network host is `postgres` on 5432; from the
+    Spark host it's `localhost` on 5433.
+    """
+    explicit = os.environ.get("DATABASE_URL", "").strip()
+    if explicit:
+        return explicit
+    user = os.environ.get("POSTGRES_USER", "tradebot")
+    password = os.environ.get("POSTGRES_PASSWORD", "tradebot-change-me")
+    host = os.environ.get("POSTGRES_HOST", "postgres")
+    port = os.environ.get("POSTGRES_PORT", "5432")
+    db = os.environ.get("POSTGRES_DB", "tradebot")
+    return (
+        f"postgresql://{quote_plus(user)}:{quote_plus(password)}"
+        f"@{host}:{port}/{db}"
+    )
 
 
 def pool() -> ConnectionPool:

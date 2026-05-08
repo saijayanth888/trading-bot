@@ -83,7 +83,14 @@ services:
       - FREQTRADE__API_SERVER__PASSWORD=${FREQTRADE_API_PASS:?FREQTRADE_API_PASS required}
       - FREQTRADE__API_SERVER__JWT_SECRET_KEY=${FREQTRADE_JWT_SECRET:?FREQTRADE_JWT_SECRET required}
       - FREQTRADE__API_SERVER__WS_TOKEN=${FREQTRADE_WS_TOKEN:?FREQTRADE_WS_TOKEN required}
-      - FREQTRADE__DB_URL=postgresql+psycopg2://${POSTGRES_USER:-tradebot}:${POSTGRES_PASSWORD:-tradebot-change-me}@postgres:5432/freqtrade
+      # FREQTRADE__DB_URL + DATABASE_URL are built by freqtrade_entrypoint.py
+      # from POSTGRES_USER/PASSWORD/DB with URL-encoding, so special chars
+      # like '@' in the password don't corrupt the DSN.
+      - POSTGRES_USER=${POSTGRES_USER:-tradebot}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
+      - POSTGRES_DB=${POSTGRES_DB:-tradebot}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
     deploy:
       resources:
         reservations:
@@ -153,7 +160,12 @@ services:
       - DASHBOARD_PAIRS=${DASHBOARD_PAIRS:-BTC/USD,ETH/USD,SOL/USD}
       - DASHBOARD_TIMEFRAME=${DASHBOARD_TIMEFRAME:-5m}
       - DASHBOARD_WS_INTERVAL_SEC=${DASHBOARD_WS_INTERVAL_SEC:-30}
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-tradebot}:${POSTGRES_PASSWORD:-tradebot-change-me}@postgres:5432/${POSTGRES_DB:-tradebot}
+      # Pass parts; data_sources._resolve_dsn() URL-encodes the password.
+      - POSTGRES_USER=${POSTGRES_USER:-tradebot}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
+      - POSTGRES_DB=${POSTGRES_DB:-tradebot}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
       # Reach freqtrade by service name on the compose network
       - FREQTRADE_API_URL=http://freqtrade:8080
       - FREQTRADE_API_USER=${FREQTRADE_API_USER:-freqtrader}

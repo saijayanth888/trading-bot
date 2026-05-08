@@ -13,7 +13,7 @@ source only — the others continue to work.
     WHALE_ALERT_API_KEY
     GLASSNODE_API_KEY
 
-Data is cached in ``user_data/data/onchain.db`` (SQLite).  A daemon thread
+Data is cached in PostgreSQL (TimescaleDB hypertables on `ts`).  A daemon thread
 refreshes every five minutes and is started lazily on the first call to
 ``get_features``.
 """

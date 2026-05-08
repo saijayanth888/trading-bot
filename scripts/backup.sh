@@ -34,17 +34,16 @@ case "$MODE" in
     daily)
         DEST_DIR="${DEST_ROOT}/daily"
         KEEP=30
-        # Small, focused snapshot — model checkpoints, config, journal DB,
-        # evolution log, scheduler state. Skip caches and large parquet
-        # data so the daily turnaround is fast.
+        # Small, focused snapshot. Trade journal + on-chain + sentiment
+        # + regime tables now live in Postgres → use pg_dump.
         SOURCES=(
             "user_data/config.json"
-            "user_data/data/onchain.db"
             "user_data/data/regime_hmm.json"
             "user_data/freqaimodels"
             "user_data/models"
             "user_data/logs/evolution.json"
         )
+        DUMP_PG=1
         ;;
     weekly)
         DEST_DIR="${DEST_ROOT}/weekly"
@@ -52,6 +51,7 @@ case "$MODE" in
         # Everything under user_data — minus pycache and freqai cache so
         # the archive doesn't balloon with reproducible-from-source content.
         SOURCES=("user_data")
+        DUMP_PG=1
         ;;
     *)
         echo "usage: $0 {daily|weekly}" >&2
@@ -83,9 +83,31 @@ for s in "${SOURCES[@]}"; do
     fi
 done
 
-if [[ ${#EXISTING[@]} -eq 0 ]]; then
+if [[ ${#EXISTING[@]} -eq 0 ]] && [[ "${DUMP_PG:-0}" -eq 0 ]]; then
     log "no sources exist — nothing to back up"
     exit 0
+fi
+
+# Dump the Postgres tradebot database into user_data/data/pg_tradebot.dump
+# so it ends up in the same archive as the file-based artefacts.
+if [[ "${DUMP_PG:-0}" -eq 1 ]]; then
+    PG_DUMP_PATH="${ROOT_DIR}/user_data/data/pg_tradebot.dump"
+    log "dumping postgres tradebot db → ${PG_DUMP_PATH}"
+    if docker compose -f "${ROOT_DIR}/docker-compose.yml" ps -q postgres 2>/dev/null | grep -q .; then
+        docker compose -f "${ROOT_DIR}/docker-compose.yml" exec -T postgres \
+            pg_dump -U "${POSTGRES_USER:-tradebot}" -d "${POSTGRES_DB:-tradebot}" -Fc \
+            > "$PG_DUMP_PATH" 2>>"$LOG"
+        rc=$?
+        if [[ $rc -eq 0 ]] && [[ -s "$PG_DUMP_PATH" ]]; then
+            log "pg_dump ok ($(du -h "$PG_DUMP_PATH" | cut -f1))"
+            EXISTING+=("user_data/data/pg_tradebot.dump")
+        else
+            log "pg_dump failed (rc=$rc) — continuing with file sources only"
+            rm -f "$PG_DUMP_PATH"
+        fi
+    else
+        log "postgres container not running — skipping pg_dump"
+    fi
 fi
 
 # tar from the project root so paths in the archive are stable.

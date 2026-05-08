@@ -2,7 +2,7 @@
 """
 Validate that paper-trading results clear the go-live bar.
 
-Reads the closed-trade history from `user_data/data/onchain.db`
+Reads the closed-trade history from PostgreSQL
 (the trade_journal table created by trade_journal.py) and checks:
 
     sharpe_ratio  > 1.5     (annualised, daily-binned)
@@ -36,10 +36,21 @@ from typing import Any
 import psycopg
 from psycopg.rows import dict_row
 
-DEFAULT_DSN = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://tradebot:tradebot-change-me@localhost:5433/tradebot",
-)
+def _resolve_dsn() -> str:
+    """URL-encode-safe DSN — same pattern as user_data/modules/db.py."""
+    from urllib.parse import quote_plus
+    explicit = os.environ.get("DATABASE_URL", "").strip()
+    if explicit:
+        return explicit
+    user = os.environ.get("POSTGRES_USER", "tradebot")
+    password = os.environ.get("POSTGRES_PASSWORD", "tradebot-change-me")
+    host = os.environ.get("POSTGRES_HOST", "localhost")
+    port = os.environ.get("POSTGRES_PORT", "5433")
+    db = os.environ.get("POSTGRES_DB", "tradebot")
+    return f"postgresql://{quote_plus(user)}:{quote_plus(password)}@{host}:{port}/{db}"
+
+
+DEFAULT_DSN = _resolve_dsn()
 
 # Annualisation factor for crypto (24/7 markets). 365 because crypto
 # doesn't take weekends off — using 252 underestimates volatility.

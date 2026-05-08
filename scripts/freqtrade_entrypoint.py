@@ -22,6 +22,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from urllib.parse import quote_plus
 
 KEY_FILE = Path(os.environ.get(
     "COINBASE_KEY_FILE",
@@ -58,9 +59,42 @@ def _load_coinbase_secrets(env: dict[str, str]) -> None:
          f"(name='{name[:32]}...', priv_pem_len={len(priv)})")
 
 
+def _build_freqtrade_db_url(env: dict[str, str]) -> None:
+    """
+    Construct FREQTRADE__DB_URL from POSTGRES_* env vars with URL-encoding
+    on user + password. Avoids the trap of `@` (or any URL-unsafe char) in
+    POSTGRES_PASSWORD silently corrupting the DSN.
+
+    Caller can still set FREQTRADE__DB_URL explicitly; if it's already set
+    we leave it alone.
+    """
+    if env.get("FREQTRADE__DB_URL"):
+        _log(f"FREQTRADE__DB_URL already set, leaving alone")
+        return
+    user = env.get("POSTGRES_USER", "tradebot")
+    password = env.get("POSTGRES_PASSWORD", "tradebot-change-me")
+    host = env.get("POSTGRES_HOST", "postgres")
+    port = env.get("POSTGRES_PORT", "5432")
+    db_url = (
+        f"postgresql+psycopg2://{quote_plus(user)}:{quote_plus(password)}"
+        f"@{host}:{port}/freqtrade"
+    )
+    env["FREQTRADE__DB_URL"] = db_url
+    # Mirror to DATABASE_URL too so any application-side code that uses it
+    # gets the URL-encoded version (the dashboard data_sources, scripts,
+    # modules/db.py all key off DATABASE_URL when set).
+    env.setdefault(
+        "DATABASE_URL",
+        f"postgresql://{quote_plus(user)}:{quote_plus(password)}"
+        f"@{host}:{port}/{env.get('POSTGRES_DB', 'tradebot')}",
+    )
+    _log(f"built FREQTRADE__DB_URL targeting {host}:{port}/freqtrade")
+
+
 def main() -> int:
     env = dict(os.environ)
     _load_coinbase_secrets(env)
+    _build_freqtrade_db_url(env)
 
     # If invoked with bare freqtrade args ("trade", "--config", ...), prepend
     # the binary name. If the user already passed it (or python -m freqtrade),
