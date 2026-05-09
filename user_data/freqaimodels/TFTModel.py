@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -201,7 +202,10 @@ class TFTModel(BasePyTorchClassifier):
         train_loader, val_loader = self._build_loaders(
             data_dictionary, n_features, n_classes,
         )
-        optimizer = self._train(model, train_loader, val_loader, n_classes)
+        optimizer = self._train(
+            model, train_loader, val_loader, n_classes,
+            pair=getattr(dk, "pair", None),
+        )
 
         wrapper = TFTTrainerWrapper(
             model=model,
@@ -400,12 +404,129 @@ class TFTModel(BasePyTorchClassifier):
     # Training loop with AdamW + cosine LR + AMP + early stop on val-Sharpe
     # ---------------------------------------------------------------
 
+    # ---------------------------------------------------------------
+    # Per-epoch resume checkpoints — survives mid-training restarts
+    # without paying the full cold-start cost again. State-dict-only
+    # so we never depend on the freqai pickle path being intact, and
+    # torch.load(weights_only=True) safely round-trips with no class
+    # imports needed (custom freqaimodels/ namespace would be unsafe).
+    # ---------------------------------------------------------------
+
+    _RESUME_VERSION = 1
+    _RESUME_MAX_AGE_HOURS = 4.0
+
+    def _resume_checkpoint_path(self, pair: str) -> Path:
+        identifier = self.freqai_info.get("identifier", "tft_v1")
+        base = Path("/freqtrade/user_data/models") / identifier / "checkpoints"
+        base.mkdir(parents=True, exist_ok=True)
+        safe = pair.replace("/", "_").replace("\\", "_")
+        return base / f"{safe}_resume.pt"
+
+    def _save_resume_checkpoint(
+        self,
+        model: nn.Module,
+        optimizer: torch.optim.Optimizer,
+        epoch: int,
+        best_val_metric: float,
+        pair: str | None,
+    ) -> None:
+        if not pair:
+            return
+        path = self._resume_checkpoint_path(pair)
+        tmp = path.with_suffix(".tmp")
+        underlying = getattr(model, "_orig_mod", model)
+        # Only basic types + tensors so torch.load(weights_only=True) is safe.
+        # Scheduler/scaler state intentionally omitted — they're deterministic
+        # functions of (optimizer, global_step) and rebuild cleanly on resume.
+        try:
+            torch.save(
+                {
+                    "version": self._RESUME_VERSION,
+                    "epoch": int(epoch),
+                    "best_val_metric": float(best_val_metric),
+                    "model_state_dict": underlying.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "saved_at": float(time.time()),
+                    "n_epochs_target": int(self.n_epochs),
+                    "model_arch": {
+                        "hidden_size": int(self.hidden_size),
+                        "n_heads": int(self.n_heads),
+                        "dropout": float(self.dropout),
+                        "var_dim": int(self.var_dim),
+                        "window_size": int(self.window_size),
+                    },
+                },
+                tmp,
+            )
+            tmp.replace(path)
+        except Exception as exc:
+            logger.warning("[%s] resume checkpoint save failed: %s", pair, exc)
+
+    def _load_resume_checkpoint(
+        self,
+        model: nn.Module,
+        optimizer: torch.optim.Optimizer,
+        pair: str | None,
+    ) -> tuple[int, float] | None:
+        if not pair:
+            return None
+        path = self._resume_checkpoint_path(pair)
+        if not path.exists():
+            return None
+        # weights_only=True restricts deserialization to tensors + primitive
+        # containers — no arbitrary-class unpickling, no code execution risk.
+        try:
+            ck = torch.load(path, map_location=self.device, weights_only=True)
+        except Exception as exc:
+            logger.warning("[%s] resume checkpoint load failed: %s", pair, exc)
+            return None
+        age_h = (time.time() - ck.get("saved_at", 0)) / 3600.0
+        if age_h > self._RESUME_MAX_AGE_HOURS:
+            logger.info(
+                "[%s] resume checkpoint stale (%.1fh > %.1fh) — discarding",
+                pair, age_h, self._RESUME_MAX_AGE_HOURS,
+            )
+            return None
+        arch = ck.get("model_arch", {}) or {}
+        if (arch.get("hidden_size") != self.hidden_size
+                or arch.get("window_size") != self.window_size
+                or arch.get("n_heads") != self.n_heads
+                or arch.get("var_dim") != self.var_dim):
+            logger.info("[%s] resume checkpoint architecture mismatch — discarding", pair)
+            return None
+        if ck.get("n_epochs_target") != self.n_epochs:
+            logger.info("[%s] n_epochs changed — discarding checkpoint", pair)
+            return None
+        try:
+            underlying = getattr(model, "_orig_mod", model)
+            underlying.load_state_dict(ck["model_state_dict"])
+            optimizer.load_state_dict(ck["optimizer_state_dict"])
+            start_epoch = int(ck.get("epoch", 0))
+            best_val = float(ck.get("best_val_metric", -float("inf")))
+            logger.info(
+                "[%s] resuming from epoch %d (saved %.1fh ago, best_val_sharpe=%.3f)",
+                pair, start_epoch, age_h, best_val,
+            )
+            return start_epoch, best_val
+        except Exception as exc:
+            logger.warning("[%s] resume restore failed: %s", pair, exc)
+            return None
+
+    def _clear_resume_checkpoint(self, pair: str | None) -> None:
+        if not pair:
+            return
+        try:
+            self._resume_checkpoint_path(pair).unlink(missing_ok=True)
+        except Exception:
+            pass
+
     def _train(
         self,
         model: nn.Module,
         train_loader: DataLoader,
         val_loader: DataLoader | None,
         n_classes: int,
+        pair: str | None = None,
     ) -> torch.optim.Optimizer:
         underlying = getattr(model, "_orig_mod", model)
         params = [p for p in model.parameters() if p.requires_grad]
@@ -434,8 +555,28 @@ class TFTModel(BasePyTorchClassifier):
         best_val_metric = -float("inf")
         patience_left = self.early_stopping_patience
         global_step = 0
+        start_epoch = 1
 
-        for epoch in range(1, self.n_epochs + 1):
+        # Resume from a recent checkpoint if one exists. On any failure
+        # we fall through to fresh training — never blocks the cold path.
+        resume = self._load_resume_checkpoint(model, optimizer, pair)
+        if resume is not None:
+            saved_epoch, saved_best = resume
+            start_epoch = saved_epoch + 1
+            best_val_metric = saved_best
+            global_step = (start_epoch - 1) * steps_per_epoch
+            if start_epoch > self.n_epochs:
+                logger.info(
+                    "[%s] checkpoint already at full epochs (%d) — skipping training",
+                    pair, saved_epoch,
+                )
+                self._clear_resume_checkpoint(pair)
+                return optimizer
+            # Fast-forward LR scheduler so lr matches the resumed step.
+            for _ in range(global_step):
+                scheduler.step()
+
+        for epoch in range(start_epoch, self.n_epochs + 1):
             _set_training_mode(model)
             running_loss = 0.0
             running_ce = 0.0
@@ -504,6 +645,15 @@ class TFTModel(BasePyTorchClassifier):
                         )
                         break
 
+            # Atomic per-epoch checkpoint — resumes pick up the last completed
+            # epoch, never a partial one. Save errors are logged, not raised.
+            self._save_resume_checkpoint(
+                model, optimizer, epoch, best_val_metric, pair,
+            )
+
+        # Training complete (full n_epochs or early stop) — drop the checkpoint
+        # so a fresh retrain in 24h won't accidentally resume from this run.
+        self._clear_resume_checkpoint(pair)
         return optimizer
 
     def _validate_sharpe(
