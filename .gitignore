@@ -35,6 +35,10 @@ user_data/tradesv3.sqlite
 user_data/tradesv3.sqlite-shm
 user_data/tradesv3.sqlite-wal
 
+# Historical candle data — downloaded by freqtrade on startup
+user_data/data/coinbase/*.feather
+user_data/data/coinbase/*.json
+
 # --- Logs -----------------------------------------------------------------
 user_data/logs/*.log
 user_data/logs/*.log.*
