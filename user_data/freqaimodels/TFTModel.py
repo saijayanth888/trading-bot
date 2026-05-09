@@ -72,20 +72,6 @@ from freqaimodels.tft_architecture import (   # noqa: E402
     pinball_loss,
 )
 
-# Defensive sys.modules aliases: torch.save's serializer for the
-# TFTTrainerWrapper instance saved inside fit() needs the class to be
-# reachable via its declared __module__ string. Whether freqai's resolver
-# imports this file as the bare "TFTModel" or as "freqaimodels.TFTModel"
-# varies between freqtrade releases, so we register both aliases pointing
-# at the currently-loaded module. Without this, the model save crashes
-# mid-training with:
-#     _PicklingError: Can't ... <class 'TFTModel.TFTTrainerWrapper'>:
-#         No module named 'TFTModel'
-# and freqai never writes pair_dictionary.json — so load_data() returns
-# None for every pair forever and the strategy gets null predictions.
-sys.modules.setdefault("TFTModel", sys.modules[__name__])
-sys.modules.setdefault("freqaimodels.TFTModel", sys.modules[__name__])
-
 logger = logging.getLogger(__name__)
 
 QUANTILE_LEVELS: tuple[float, ...] = (0.1, 0.5, 0.9)
@@ -557,3 +543,44 @@ class TFTModel(BasePyTorchClassifier):
         if pnl.std() == 0:
             return 0.0
         return float(pnl.mean() / pnl.std() * np.sqrt(252.0))
+
+
+# ---------------------------------------------------------------------------
+# Pickle / sys.modules registration for freqai's spec-loader
+# ---------------------------------------------------------------------------
+#
+# freqtrade's IResolver loads custom freqaimodels via:
+#     spec  = importlib.util.spec_from_file_location("TFTModel", path)
+#     mod   = importlib.util.module_from_spec(spec)
+#     spec.loader.exec_module(mod)
+# WITHOUT registering ``mod`` in ``sys.modules``. So at save() time
+# torch.save's serializer raises:
+#     Can't pickle <class 'TFTModel.TFTTrainerWrapper'>: No module named 'TFTModel'
+# because the wrapper's __module__ is "TFTModel" (file stem) and that
+# name isn't in sys.modules.
+#
+# Without the model save, freqai never writes pair_dictionary.json and
+# load_data() returns null predictions for every pair forever.
+#
+# Fix: at end-of-file (after all class definitions), build a proxy module
+# from the current globals() and register it as sys.modules["TFTModel"].
+#
+# IMPORTANT: do NOT change ``TFTModel.__module__`` — freqai's
+# IResolver._search_object validates the loaded class via
+#     obj.__module__ == module_name   # module_name = "TFTModel" (file stem)
+# Pinning __module__ to "freqaimodels.TFTModel" makes the resolver reject
+# the class entirely with "Impossible to load FreqaiModel 'TFTModel'."
+import sys as _sys
+import types as _types
+
+
+def _register_module_aliases() -> None:
+    if "TFTModel" not in _sys.modules:
+        proxy = _types.ModuleType("TFTModel")
+        for k, v in globals().items():
+            if not k.startswith("_"):
+                proxy.__dict__[k] = v
+        _sys.modules["TFTModel"] = proxy
+
+
+_register_module_aliases()

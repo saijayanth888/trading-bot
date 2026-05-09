@@ -576,12 +576,34 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         Reads ``trade_journal``, groups by pair, computes annualised Sharpe
         on daily P&L percentages. Pairs with no trades stay at None — the
         gate treats None as "no data → allow" (let the system bootstrap).
+
+        Side benefit: also re-reads config.json[capital_allocation] from
+        disk so an external rebalance (scripts/rebalance_capital.py) is
+        picked up within an hour without a freqtrade restart.
         """
         import time as _time
         now_ts = _time.time()
         if (now_ts - self._rolling_sharpe_refreshed_at) < 3600:
             return
         self._rolling_sharpe_refreshed_at = now_ts
+
+        # Re-read capital_allocation from disk (auto-rebalance support)
+        try:
+            import json as _json
+            cfg_path = "/freqtrade/user_data/config.json"
+            with open(cfg_path) as f:
+                fresh = _json.load(f).get("capital_allocation")
+            if fresh:
+                old_weights = (self._capital_allocation or {}).get("pair_weights") or {}
+                new_weights = fresh.get("pair_weights") or {}
+                if old_weights != new_weights:
+                    logger.info(
+                        "[strategy] capital_allocation reloaded from disk: %s → %s",
+                        old_weights, new_weights,
+                    )
+                self._capital_allocation = fresh
+        except Exception as exc:
+            logger.debug("[strategy] capital_allocation reload failed: %s", exc)
 
         try:
             sys.path.insert(0, str(_USER_DATA))
