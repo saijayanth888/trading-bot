@@ -147,6 +147,13 @@ async function refreshServices() {
 }
 
 // ─── Training ───────────────────────────────────────────────────────
+function fmtDur(s) {
+  if (s === null || s === undefined) return "—";
+  if (s < 60) return `${Math.round(s)}s`;
+  if (s < 3600) return `${Math.floor(s/60)}m ${Math.round(s%60)}s`;
+  return `${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`;
+}
+
 async function refreshTraining() {
   const r = await jsonFetch("/api/ops/training");
   const env = r.body;
@@ -157,28 +164,71 @@ async function refreshTraining() {
   const d = env.data;
   body.replaceChildren();
 
-  if (d.tft && d.tft.epoch !== undefined) {
-    const pct = d.tft.max_epoch ? (d.tft.epoch / d.tft.max_epoch * 100) : 0;
+  // ── TFT block: per-pair queue + current progress ──
+  if (d.tft) {
+    const t = d.tft;
+    const readyClass = t.pair_dict_ready ? "ok" : "warn";
+    const readyText = t.pair_dict_ready ? "READY (pair_dict written)" : "WARM-UP (pair_dict pending)";
+
+    // Header status line
     body.insertAdjacentHTML("beforeend",
-      `<div class="row"><span class="label">TFT epoch</span><span class="value">${esc(d.tft.epoch)}/${esc(d.tft.max_epoch || "?")}</span></div>` +
-      `<div class="progress"><div style="width:${esc(pct.toFixed(1))}%"></div></div>` +
-      `<div class="row"><span class="label muted">val_sharpe / loss</span><span class="value">${fmt(d.tft.val_sharpe, 2)} / ${fmt(d.tft.loss, 2)}</span></div>`
+      `<div class="row"><span class="label">freqai state</span>` +
+      `<span class="value ${readyClass}">${esc(readyText)}</span></div>`
     );
+
+    // Current pair training (if any)
+    if (t.current_pair) {
+      const pct = t.max_epoch ? (t.epoch / t.max_epoch * 100) : 0;
+      body.insertAdjacentHTML("beforeend",
+        `<div class="row"><span class="label">training</span>` +
+        `<span class="value">${esc(t.current_pair)} · epoch ${esc(t.epoch || "?")}/${esc(t.max_epoch || "?")}</span></div>` +
+        `<div class="progress"><div style="width:${esc(pct.toFixed(1))}%"></div></div>` +
+        `<div class="row"><span class="label muted">val_sharpe · ETA · avg/epoch</span>` +
+        `<span class="value">${fmt(t.val_sharpe, 2)} · <strong>${esc(fmtDur(t.current_pair_eta_s))}</strong> · ${esc(fmtDur(t.avg_epoch_seconds))}</span></div>`
+      );
+    }
+
+    // Per-pair queue table (compact)
+    if (t.pairs && t.pairs.length) {
+      let table = `<table class="tape" style="margin-top:8px;"><thead><tr><th>pair</th><th>status</th><th>last ep</th><th>sharpe</th></tr></thead><tbody>`;
+      for (const p of t.pairs) {
+        const tick = p.status === "done" ? "<span class=\"ok\">✓</span>" : "<span class=\"warn\">…</span>";
+        const ep = p.last_epoch != null ? `${esc(p.last_epoch)}/${esc(p.max_epoch || "?")}` : "—";
+        const sharpe = p.val_sharpe != null ? fmt(p.val_sharpe, 2) : "—";
+        const stop = p.early_stopped ? " <span class=\"muted\">(early-stop)</span>" : "";
+        table += `<tr><td>${esc(p.pair)}</td><td>${tick} ${esc(p.status)}${stop}</td><td>${ep}</td><td>${sharpe}</td></tr>`;
+      }
+      table += `</tbody></table>`;
+      body.insertAdjacentHTML("beforeend", table);
+    }
   } else {
     body.insertAdjacentHTML("beforeend",
-      `<div class="row"><span class="label">TFT</span><span class="muted">no recent epoch line</span></div>`);
+      `<div class="row"><span class="label">TFT</span><span class="muted">no log yet</span></div>`);
   }
 
+  // ── DRL ──
   const drlText = (d.drl && d.drl.status) ? d.drl.status : "—";
   body.insertAdjacentHTML("beforeend",
-    `<div class="row"><span class="label">DRL</span><span class="value muted">${esc(drlText)}</span></div>`);
+    `<div class="row" style="margin-top:6px;"><span class="label">DRL</span><span class="value muted">${esc(drlText)}</span></div>`);
 
+  // ── EPT ──
   if (d.ept && d.ept.generation !== undefined) {
     body.insertAdjacentHTML("beforeend",
       `<div class="row"><span class="label">EPT gen</span><span class="value">${esc(d.ept.generation)} (champ ${esc(d.ept.champion_id || "?")})</span></div>`);
   } else {
     body.insertAdjacentHTML("beforeend",
       `<div class="row"><span class="label">EPT</span><span class="muted">${esc((d.ept && d.ept.note) || "no generation yet")}</span></div>`);
+  }
+
+  // ── Warm-up banner (renders on the hero tile) ──
+  const banner = document.getElementById("warmup-banner");
+  if (banner) {
+    if (d.warmup && d.warmup.message) {
+      banner.style.display = "block";
+      banner.textContent = "⚠ " + d.warmup.message;
+    } else {
+      banner.style.display = "none";
+    }
   }
 }
 

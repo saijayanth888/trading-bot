@@ -138,36 +138,154 @@ async def services_summary() -> dict[str, Any]:
 
 
 def training_state(freqtrade_log: Path | None = None) -> dict[str, Any]:
-    """Best-effort training snapshot.
+    """Best-effort training snapshot, smart enough to be actionable.
 
-    TFT: parse most-recent ``TFTModel - INFO - epoch N/M loss=... val_sharpe=...`` line.
-    DRL: read ``user_data/logs/drl_status.json`` if present.
-    EPT: last entry of ``user_data/logs/evolution.json``.
+    Parses the freqtrade log to surface:
+      - which pair is currently training, current epoch / max
+      - per-pair completion status this cycle (done / training / queued)
+      - readiness: does pair_dictionary.json exist? (gate for predictions)
+      - first-trade ETA based on remaining pairs × avg-epoch-time
+
+    DRL: read user_data/logs/drl_status.json if present.
+    EPT: last entry of user_data/logs/evolution.json.
     """
-    out: dict[str, Any] = {"tft": None, "drl": None, "ept": None}
+    out: dict[str, Any] = {"tft": None, "drl": None, "ept": None, "warmup": None}
 
-    # TFT — read tail of the freqtrade log we have access to.
+    # ── TFT: walk the log forward to reconstruct queue state ─────────
     log_candidates = [freqtrade_log] if freqtrade_log else [
         USER_DATA_ROOT / "logs" / "freqtrade.log",
     ]
-    for log_path in log_candidates:
-        if log_path and log_path.exists():
-            try:
-                # tail efficiently — seek to the last 200k bytes
-                with log_path.open("rb") as f:
-                    f.seek(0, 2)
-                    size = f.tell()
-                    f.seek(max(0, size - 200_000))
-                    chunk = f.read()
-                tail = chunk.decode("utf-8", errors="replace").splitlines()
-                for line in reversed(tail):
-                    if "TFTModel" in line and "epoch " in line:
-                        out["tft"] = _parse_tft_line(line, log_path)
-                        break
-                if out["tft"]:
-                    break
-            except OSError:
-                continue
+    log_path = next((p for p in log_candidates if p and p.exists()), None)
+    if log_path:
+        try:
+            with log_path.open("rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - 500_000))  # ~last 500KB has the recent training session
+                chunk = f.read()
+            tail = chunk.decode("utf-8", errors="replace").splitlines()
+
+            # State machine: walk forward, track which pair is currently
+            # training and whether it's still active. Reset epoch counter on
+            # each "Starting training X/Y" or "early stopping" line.
+            import re as _re
+            cur_pair = None
+            cur_epoch = None
+            max_epoch = None
+            cur_val = None
+            cur_loss = None
+            last_ts = None
+            pairs_started: dict[str, dict] = {}     # pair → {start_ts, end_ts, epochs, val_sharpe, status}
+            epoch_durations: list[float] = []       # for ETA estimation
+            prev_epoch_ts = None
+
+            for line in tail:
+                ts_m = _re.search(r"(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})", line)
+                ts = ts_m.group(1) if ts_m else None
+
+                start_m = _re.search(r"Starting training (\w+)/\w+", line)
+                if start_m:
+                    pair = start_m.group(1).upper()
+                    # Close previous pair (in case freqtrade switched without early-stop log)
+                    if cur_pair and cur_pair in pairs_started and pairs_started[cur_pair].get("status") == "training":
+                        pairs_started[cur_pair].update(
+                            status="done", end_ts=ts, last_epoch=cur_epoch,
+                            val_sharpe=cur_val, max_epoch=max_epoch,
+                        )
+                    cur_pair = pair
+                    cur_epoch = None
+                    max_epoch = None
+                    cur_val = None
+                    prev_epoch_ts = None
+                    pairs_started[pair] = {"start_ts": ts, "status": "training"}
+                    continue
+
+                ep_m = _re.search(r"TFTModel.*epoch\s+(\d+)\s*/\s*(\d+)", line)
+                if ep_m:
+                    cur_epoch = int(ep_m.group(1))
+                    max_epoch = int(ep_m.group(2))
+                    val_m = _re.search(r"val_sharpe=([\-0-9.]+)", line)
+                    loss_m = _re.search(r"loss=([0-9.]+)", line)
+                    if val_m: cur_val = float(val_m.group(1))
+                    if loss_m: cur_loss = float(loss_m.group(1))
+                    if ts:
+                        last_ts = ts
+                        if prev_epoch_ts:
+                            try:
+                                from datetime import datetime as _dt
+                                a = _dt.fromisoformat(prev_epoch_ts.replace(" ", "T"))
+                                b = _dt.fromisoformat(ts.replace(" ", "T"))
+                                dt = (b - a).total_seconds()
+                                if 60 <= dt <= 1200:  # sane range: 1–20 min/epoch
+                                    epoch_durations.append(dt)
+                            except Exception:
+                                pass
+                        prev_epoch_ts = ts
+                    continue
+
+                if "early stopping at epoch" in line:
+                    es_m = _re.search(r"early stopping at epoch (\d+).*best val_sharpe=([\-0-9.]+)", line)
+                    if cur_pair and cur_pair in pairs_started:
+                        pairs_started[cur_pair].update(
+                            status="done", end_ts=ts,
+                            last_epoch=int(es_m.group(1)) if es_m else cur_epoch,
+                            val_sharpe=float(es_m.group(2)) if es_m else cur_val,
+                            max_epoch=max_epoch, early_stopped=True,
+                        )
+                    continue
+
+            # Whichever pair is "currently training" at the end of the walk.
+            if cur_pair and pairs_started.get(cur_pair, {}).get("status") == "training":
+                pairs_started[cur_pair].update(
+                    last_epoch=cur_epoch, max_epoch=max_epoch,
+                    val_sharpe=cur_val, loss=cur_loss,
+                )
+
+            # ETA computation: avg epoch duration × remaining epochs of current
+            # pair + (estimated full-pair epochs × queue length).
+            avg_epoch_s = (sum(epoch_durations) / len(epoch_durations)) if epoch_durations else None
+            avg_pair_epochs = 8  # observed: pairs early-stop around epoch 7-10 typically
+            current_pair_remaining_s = None
+            if avg_epoch_s and cur_epoch is not None and cur_pair:
+                # naive: remaining = max(avg_pair_epochs - cur_epoch, 0) × avg_epoch_s
+                rem_eps = max(avg_pair_epochs - cur_epoch, 1)
+                current_pair_remaining_s = int(rem_eps * avg_epoch_s)
+
+            # ── pair_dictionary.json existence (the gate for "model ready") ──
+            pair_dict_path = USER_DATA_ROOT / "models" / "tft_v1" / "pair_dictionary.json"
+            pair_dict_exists = pair_dict_path.exists()
+
+            # Build the human-friendly tft block.
+            out["tft"] = {
+                "current_pair": cur_pair if pairs_started.get(cur_pair, {}).get("status") == "training" else None,
+                "epoch": cur_epoch,
+                "max_epoch": max_epoch,
+                "val_sharpe": cur_val,
+                "loss": cur_loss,
+                "log_age_s": int(time.time() - log_path.stat().st_mtime) if log_path.exists() else None,
+                "pairs": [
+                    {"pair": p, **info}
+                    for p, info in pairs_started.items()
+                ],
+                "avg_epoch_seconds": int(avg_epoch_s) if avg_epoch_s else None,
+                "current_pair_eta_s": current_pair_remaining_s,
+                "pair_dict_ready": pair_dict_exists,
+            }
+
+            # ── Warmup banner: tell the operator clearly why no trades are firing ──
+            done_count = sum(1 for info in pairs_started.values() if info.get("status") == "done")
+            total = len(pairs_started)
+            if not pair_dict_exists:
+                msg = (
+                    f"freqai warm-up: pair_dictionary.json not yet written "
+                    f"(it lands after the first full training cycle). "
+                    f"{done_count}/{total} pairs done, {cur_pair or '?'} training "
+                    f"epoch {cur_epoch or '?'}/{max_epoch or '?'}. "
+                    f"First trade ETA: {current_pair_remaining_s//60 if current_pair_remaining_s else '?'} min."
+                )
+                out["warmup"] = {"reason": "no_pair_dict", "message": msg, "eta_seconds": current_pair_remaining_s}
+        except OSError:
+            pass
 
     # DRL — optional status file
     drl_path = USER_DATA_ROOT / "logs" / "drl_status.json"
