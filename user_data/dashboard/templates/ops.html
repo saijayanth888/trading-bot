@@ -98,6 +98,8 @@
     .qa-btn.qa-evolve { background: #2a1240; border-color: #7a3aa8; color: #c49bff; }
     .qa-btn.qa-risk   { background: #3a2c0a; border-color: #c9a227; color: #f7c948; }
     .qa-btn.qa-regime { background: #0a3036; border-color: #2a8c8c; color: #69d6cd; }
+    .qa-btn.qa-readiness { background: #1c2840; border-color: #4a90e2; color: #6bb6ff; }
+    .qa-btn.qa-rebalance { background: #2a1a3a; border-color: #b370c9; color: #d59ce8; }
     .qa-spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: qa-spin 0.7s linear infinite; vertical-align: -1px; margin-right: 6px; }
     @keyframes qa-spin { to { transform: rotate(360deg); } }
     .qa-result { margin-top: 14px; padding: 12px 14px; background: #060a1c; border: 1px solid #1f2748; border-radius: 8px; max-height: 0; opacity: 0; overflow: hidden; transition: max-height 250ms ease, opacity 250ms ease; }
@@ -229,6 +231,10 @@
           <button class="btn qa-btn qa-evolve"  data-tool="trigger_evolution_cycle">🧬 Trigger EPT evolution</button>
           <button class="btn qa-btn qa-risk"    data-tool="get_risk_status">🛡 Risk status</button>
           <button class="btn qa-btn qa-regime"  data-tool="get_current_regime">🧭 Regime check</button>
+          <!-- Inline-action buttons (not MCP tools — local /api/ops endpoints) -->
+          <button class="btn qa-btn qa-readiness"  data-action="readiness"           >✅ Validate readiness</button>
+          <button class="btn qa-btn qa-readiness"  data-action="readiness-ft"        >🚀 Readiness · fast-track</button>
+          <button class="btn qa-btn qa-rebalance"  data-action="rebalance-dry"       >⚖ Rebalance · dry-run</button>
         </div>
         <div id="qa-result" class="qa-result" style="display:none;"></div>
       </section>

@@ -547,29 +547,152 @@ function qaConfirm(message, doubleConfirm = false) {
 async function qaButtonHandler(ev) {
   const btn = ev.currentTarget;
   const tool = btn.dataset.tool;
+  const action = btn.dataset.action;
   const confirmMsg = btn.dataset.confirm;
   const doubleConfirm = btn.dataset.double === "1";
 
   if (confirmMsg && !qaConfirm(confirmMsg, doubleConfirm)) return;
 
-  const args = {};
-  if (tool === "pause_trading") args.reason = "manual_pause_via_dashboard_quick_action";
-  if (tool === "resume_trading") args.confirm = true;
-
   const original = btn.innerHTML;
   btn.disabled = true;
-  btn.innerHTML = `<span class="qa-spinner"></span>${original.replace(/^[^\s]+/, "").trim() || tool}…`;
+  btn.innerHTML = `<span class="qa-spinner"></span>${original.replace(/^[^\s]+/, "").trim() || tool || action}…`;
 
   let env;
   try {
-    env = await qaCallTool(tool, args);
+    if (tool) {
+      // MCP-routed buttons (pause/resume/evolve/risk/regime)
+      const args = {};
+      if (tool === "pause_trading") args.reason = "manual_pause_via_dashboard_quick_action";
+      if (tool === "resume_trading") args.confirm = true;
+      env = await qaCallTool(tool, args);
+      qaShowResult(tool, env || {});
+    } else if (action === "readiness" || action === "readiness-ft") {
+      const ft = action === "readiness-ft";
+      const r = await jsonFetch(`/api/ops/readiness?fast_track=${ft}`);
+      env = r.body;
+      qaShowReadiness(env);
+    } else if (action === "rebalance-dry") {
+      const r = await jsonFetch("/api/ops/rebalance");
+      env = r.body;
+      qaShowRebalance(env, /*isDry=*/true);
+    }
   } catch (e) {
     env = {status: "down", error: String(e), data: null};
+    qaShowResult(action || tool || "?", env);
   }
-  qaShowResult(tool, env || {});
 
   btn.disabled = false;
   btn.innerHTML = original;
+}
+
+function qaShowReadiness(env) {
+  const box = document.getElementById("qa-result");
+  box.style.display = "block";
+  requestAnimationFrame(() => box.classList.add("open"));
+
+  if (env.status === "down" || !env.data) {
+    box.innerHTML = `<div><strong>Validate readiness</strong> · <span class="bad">${esc(env.status || "?")}</span></div>` +
+                    `<div class="bad">${esc(env.error || "no data")}</div>`;
+    return;
+  }
+  const d = env.data;
+  const mode = d.mode === "fast_track" ? "FAST-TRACK" : "STANDARD";
+  const verdictCls = d.ready ? "ok" : "warn";
+  const verdictText = d.ready ? "READY ✓" : "NOT READY";
+  let html =
+    `<div><strong>Go-live readiness</strong> · ${esc(mode)} · ` +
+    `<span class="${verdictCls}">${esc(verdictText)}</span></div>` +
+    `<div class="muted" style="font-size:11px;margin-top:4px;">` +
+    `${esc(d.n_trades)} trades in window` +
+    (d.thresholds.window_days ? ` (last ${esc(d.thresholds.window_days)}d)` : "") +
+    `</div>`;
+
+  if (d.checks && d.checks.length) {
+    html += `<table class="tape" style="margin-top:8px;">` +
+            `<thead><tr><th>check</th><th>value</th><th></th><th>threshold</th><th></th></tr></thead><tbody>`;
+    for (const c of d.checks) {
+      const tick = c.passed ? "<span class=\"ok\">✓</span>" : "<span class=\"bad\">✗</span>";
+      const val = c.value === null ? "—" : c.value;
+      html += `<tr><td>${esc(c.name)}</td><td>${esc(val)}</td>` +
+              `<td>${esc(c.op)}</td><td>${esc(c.threshold)}</td><td>${tick}</td></tr>`;
+    }
+    html += `</tbody></table>`;
+  } else if (d.diagnostics && d.diagnostics.reason) {
+    html += `<div class="muted" style="margin-top:6px;">${esc(d.diagnostics.reason)}</div>`;
+  }
+  box.innerHTML = html;
+}
+
+async function qaApplyRebalance(window) {
+  if (!confirm("Apply this rebalance? This will atomic-write config.json and " +
+               "freqtrade picks up the new weights within 1h. A backup of the " +
+               "current config is saved first.")) return;
+
+  const r = await fetch("/api/ops/rebalance", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({confirm: true, window: window || 14}),
+  });
+  const env = await r.json().catch(() => ({}));
+  qaShowRebalance(env, /*isDry=*/false);
+}
+
+function qaShowRebalance(env, isDry) {
+  const box = document.getElementById("qa-result");
+  box.style.display = "block";
+  requestAnimationFrame(() => box.classList.add("open"));
+
+  if (!env || (!env.data && !env.detail)) {
+    box.innerHTML = `<div><strong>Rebalance</strong> · <span class="bad">failed</span></div>` +
+                    `<div class="bad">${esc(env && (env.error || env.detail) || "no response")}</div>`;
+    return;
+  }
+  if (env.detail) {
+    box.innerHTML = `<div class="bad">Failed: ${esc(env.detail)}</div>`;
+    return;
+  }
+  const d = env.data;
+  const cls = d.applied ? "ok" : (d.n_changes > 0 ? "warn" : "muted");
+  const verdict = d.applied ? "APPLIED" : (d.n_changes > 0 ? "DRY-RUN · proposal" : "NO CHANGE");
+
+  let html =
+    `<div><strong>Capital rebalance</strong> · <span class="${cls}">${esc(verdict)}</span> ` +
+    `· window ${esc(d.window_days)}d · floor ${esc(d.min_sharpe_for_trading)}</div>`;
+
+  if (!d.changes || d.changes.length === 0) {
+    html += `<div class="muted" style="margin-top:6px;">${esc(d.note || "weights are stable — no rebalance needed")}</div>`;
+  } else {
+    html += `<table class="tape" style="margin-top:8px;">` +
+            `<thead><tr><th>pair</th><th>sharpe (live)</th><th>from</th><th>→</th><th>to</th></tr></thead><tbody>`;
+    for (const c of d.changes) {
+      const arrow = c.to > c.from ? "<span class=\"ok\">↑</span>" : c.to < c.from ? "<span class=\"bad\">↓</span>" : "·";
+      const sharpe = c.sharpe == null ? "—" : c.sharpe;
+      html += `<tr><td>${esc(c.pair)}</td><td>${esc(sharpe)}</td>` +
+              `<td>${esc((c.from * 100).toFixed(1))}%</td><td>${arrow}</td>` +
+              `<td>${esc((c.to * 100).toFixed(1))}%</td></tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+
+  if (d.backup) {
+    html += `<div class="muted" style="font-size:11px;margin-top:6px;">Backup: ${esc(d.backup)}</div>`;
+  }
+  if (d.note) {
+    html += `<div class="muted" style="font-size:11px;margin-top:4px;">${esc(d.note)}</div>`;
+  }
+
+  // If this was a dry-run with changes, offer to apply.
+  if (isDry && d.n_changes > 0) {
+    const apply = document.createElement("button");
+    apply.className = "btn primary";
+    apply.style.cssText = "margin-top:10px;";
+    apply.textContent = `Apply ${d.n_changes} weight change${d.n_changes === 1 ? "" : "s"}`;
+    apply.addEventListener("click", () => qaApplyRebalance(d.window_days));
+    box.innerHTML = html;
+    box.appendChild(apply);
+    return;
+  }
+  box.innerHTML = html;
 }
 
 // ─── Slack daily-report preview ─────────────────────────────────────

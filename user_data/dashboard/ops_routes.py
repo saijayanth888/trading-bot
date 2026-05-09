@@ -20,6 +20,7 @@ own 3 s fetch timeout.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -616,6 +617,309 @@ async def resume(request: Request):
         raise HTTPException(status_code=code if code >= 400 else 502,
                             detail=err or f"freqtrade {code}: {payload}")
     return _envelope("ok", data={"freqtrade_response": payload, "reason": body.get("reason", "ops-tab manual resume")})
+
+
+# --------------------------------------------------------------------------
+# /api/ops/readiness — go-live validation gate (UI button on Ops dashboard)
+# --------------------------------------------------------------------------
+#
+# Mirrors scripts/validate_readiness.py — same checks, same thresholds. Lets
+# the operator click a button instead of shelling out, and surfaces the
+# pass/fail-per-criterion result in the same Quick-Actions result card.
+
+# Mode → (sharpe_min, dd_max, pf_min, wr_min, trades_min, window_days)
+_READINESS_MODES: dict[str, tuple[float, float, float, float, int, int | None]] = {
+    "standard":   (1.5, 0.12, 1.4, 0.55, 200, None),
+    "fast_track": (1.2, 0.08, 1.5, 0.55,  80, 7),
+}
+
+
+def _evaluate_readiness_inline(mode: str = "standard") -> dict:
+    """Compute the readiness report from trade_journal.
+
+    Mirrors scripts/validate_readiness.py's ``evaluate_readiness`` so the UI
+    button gives the same answer as the CLI. Returns a dict ready for the
+    Quick-Actions card.
+    """
+    if mode not in _READINESS_MODES:
+        return {"error": f"unknown mode: {mode}"}
+    sharpe_min, dd_max, pf_min, wr_min, trades_min, window_days = _READINESS_MODES[mode]
+
+    if not ops_db._HAVE_PG:
+        return {"error": "psycopg not installed"}
+
+    import math
+    where = "WHERE closed_at IS NOT NULL"
+    if window_days:
+        where += f" AND closed_at > NOW() - INTERVAL '{int(window_days)} days'"
+
+    with ops_db._connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"SELECT closed_at, pnl, pnl_pct, stake FROM trade_journal {where} "
+            "ORDER BY closed_at"
+        )
+        rows = cur.fetchall()
+
+    n = len(rows)
+    if n == 0:
+        return {
+            "mode": mode,
+            "ready": False,
+            "n_trades": 0,
+            "checks": [],
+            "diagnostics": {"reason": "no closed trades in window"},
+            "thresholds": {
+                "sharpe_min": sharpe_min, "dd_max": dd_max,
+                "profit_factor_min": pf_min, "win_rate_min": wr_min,
+                "trades_min": trades_min, "window_days": window_days,
+            },
+        }
+
+    pnls = [float(r["pnl"] or 0) for r in rows]
+    pnl_pcts = [float(r["pnl_pct"] or 0) for r in rows]
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p < 0]
+    wr = len(wins) / n
+    pf = (sum(wins) / abs(sum(losses))) if losses else float("inf")
+
+    # Daily P&L pct buckets → annualised Sharpe (× √365)
+    daily: dict[str, float] = {}
+    for r in rows:
+        day = r["closed_at"].astimezone(timezone.utc).strftime("%Y-%m-%d")
+        daily[day] = daily.get(day, 0.0) + float(r["pnl_pct"] or 0)
+    daily_pcts = list(daily.values())
+    if len(daily_pcts) >= 2:
+        mean = sum(daily_pcts) / len(daily_pcts)
+        var = sum((x - mean) ** 2 for x in daily_pcts) / (len(daily_pcts) - 1)
+        sd = math.sqrt(var)
+        sharpe = (mean / sd * math.sqrt(365)) if sd > 0 else 0.0
+    else:
+        sharpe = 0.0
+
+    # Max drawdown on cumulative quote PnL
+    cum, peak, max_dd_quote = 0.0, 0.0, 0.0
+    avg_stake = sum(float(r.get("stake") or 0.0) for r in rows) / n
+    for p in pnls:
+        cum += p
+        peak = max(peak, cum)
+        dd = (peak - cum) / max(peak, avg_stake or 1.0)
+        max_dd_quote = max(max_dd_quote, dd)
+
+    checks = [
+        {"name": "sharpe",        "value": round(sharpe, 4),       "threshold": sharpe_min,  "op": ">",  "passed": sharpe > sharpe_min},
+        {"name": "max_drawdown",  "value": round(max_dd_quote, 4), "threshold": dd_max,      "op": "<",  "passed": max_dd_quote < dd_max},
+        {"name": "profit_factor", "value": round(pf, 4) if pf != float("inf") else None, "threshold": pf_min, "op": ">", "passed": pf > pf_min},
+        {"name": "win_rate",      "value": round(wr, 4),           "threshold": wr_min,      "op": ">",  "passed": wr > wr_min},
+        {"name": "total_trades",  "value": n,                      "threshold": trades_min,  "op": ">=", "passed": n >= trades_min},
+    ]
+    return {
+        "mode": mode,
+        "ready": all(c["passed"] for c in checks),
+        "n_trades": n,
+        "checks": checks,
+        "diagnostics": {
+            "daily_buckets": len(daily_pcts),
+            "starting_equity_proxy": round(avg_stake, 2),
+            "window_days": window_days,
+        },
+        "thresholds": {
+            "sharpe_min": sharpe_min, "dd_max": dd_max,
+            "profit_factor_min": pf_min, "win_rate_min": wr_min,
+            "trades_min": trades_min, "window_days": window_days,
+        },
+    }
+
+
+@router.get("/readiness")
+async def readiness(fast_track: bool = False):
+    mode = "fast_track" if fast_track else "standard"
+    try:
+        loop = asyncio.get_running_loop()
+        report = await asyncio.wait_for(
+            loop.run_in_executor(None, _evaluate_readiness_inline, mode),
+            timeout=ENDPOINT_TIMEOUT_S * 3,
+        )
+    except asyncio.TimeoutError:
+        return _envelope("down", error="readiness query timed out")
+    except Exception as exc:
+        logger.exception("readiness failed")
+        return _envelope("down", error=str(exc))
+    if "error" in report:
+        return _envelope("degraded", data=report, error=report["error"])
+    return _envelope("ok", data=report)
+
+
+# --------------------------------------------------------------------------
+# /api/ops/rebalance — capital-allocation rebalance (UI button on Ops)
+# --------------------------------------------------------------------------
+#
+# Two-step UX:
+#   GET  /api/ops/rebalance                  → dry-run preview (default)
+#   POST /api/ops/rebalance with {confirm:true} → atomic-write the new weights
+
+
+def _compute_rebalance(
+    *,
+    window_days: int = 14,
+    max_weight: float = 0.50,
+    min_weight: float = 0.05,
+) -> dict:
+    """Pure-function rebalance computation. Mirrors scripts/rebalance_capital.py.
+
+    Returns a dict with current/proposed weights + the delta. Doesn't write
+    anything — caller decides whether to commit.
+    """
+    import math
+
+    cfg_text = CONFIG_PATH.read_text()
+    cfg = json.loads(cfg_text)
+    alloc = cfg.get("capital_allocation") or {}
+    current = dict(alloc.get("pair_weights") or {})
+    if not current:
+        return {"error": "no capital_allocation.pair_weights in config.json"}
+    floor = float(alloc.get("min_sharpe_for_trading", 0.0))
+
+    # Compute rolling-Sharpe per pair (live, last `window_days` days)
+    if not ops_db._HAVE_PG:
+        return {"error": "psycopg not installed"}
+    with ops_db._connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT pair, closed_at, pnl_pct FROM trade_journal "
+            "WHERE closed_at IS NOT NULL AND closed_at > NOW() - (%s || ' days')::interval "
+            "ORDER BY pair, closed_at",
+            (str(window_days),),
+        )
+        rows = cur.fetchall()
+
+    daily: dict[str, dict[str, float]] = {}
+    for r in rows:
+        pair = r["pair"]
+        day = r["closed_at"].strftime("%Y-%m-%d")
+        d = daily.setdefault(pair, {})
+        d[day] = d.get(day, 0.0) + float(r["pnl_pct"] or 0.0)
+
+    sharpes: dict[str, float] = {}
+    for pair, dmap in daily.items():
+        pcts = list(dmap.values())
+        if len(pcts) < 2:
+            continue
+        mean = sum(pcts) / len(pcts)
+        var = sum((x - mean) ** 2 for x in pcts) / (len(pcts) - 1)
+        sd = math.sqrt(var)
+        if sd > 0:
+            sharpes[pair] = (mean / sd) * math.sqrt(365)
+
+    eligible = {p: max(0.0, s) for p, s in sharpes.items()
+                if s >= floor and p in current}
+
+    if not eligible:
+        # No live data → keep existing allocation untouched
+        new = dict(current)
+    else:
+        total = sum(eligible.values()) or 1.0
+        new = {p: (eligible[p] / total) if p in eligible else 0.0 for p in current}
+        # Per-pair max cap
+        capped = {p: min(w, max_weight) for p, w in new.items()}
+        overflow = 1.0 - sum(capped.values())
+        if overflow > 0.001:
+            uncapped = {p: w for p, w in capped.items() if w < max_weight and p in eligible}
+            uc_total = sum(uncapped.values())
+            for p in uncapped:
+                bonus = overflow * (uncapped[p] / uc_total) if uc_total > 0 else 0
+                capped[p] = min(max_weight, capped[p] + bonus)
+        # Per-pair min floor for tradeable pairs
+        for p in eligible:
+            if 0 < capped[p] < min_weight:
+                capped[p] = min_weight
+        # Final normalise so total ≤ 1.0
+        total2 = sum(capped.values())
+        if total2 > 1.0:
+            capped = {p: w / total2 for p, w in capped.items()}
+        new = {p: round(w, 4) for p, w in capped.items()}
+
+    diffs = []
+    for p in sorted(set(current) | set(new)):
+        old = current.get(p, 0.0)
+        n = new.get(p, 0.0)
+        if abs(old - n) > 1e-4:
+            diffs.append({
+                "pair": p,
+                "from": round(old, 4),
+                "to": round(n, 4),
+                "sharpe": round(sharpes.get(p), 4) if sharpes.get(p) is not None else None,
+            })
+
+    return {
+        "window_days": window_days,
+        "min_sharpe_for_trading": floor,
+        "max_weight": max_weight,
+        "min_weight": min_weight,
+        "sharpes": {p: round(s, 4) for p, s in sharpes.items()},
+        "current_weights": current,
+        "proposed_weights": new,
+        "changes": diffs,
+        "n_changes": len(diffs),
+    }
+
+
+@router.get("/rebalance")
+async def rebalance_dryrun(window: int = 14):
+    """Dry-run: compute proposed new pair_weights but don't write."""
+    try:
+        loop = asyncio.get_running_loop()
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: _compute_rebalance(window_days=window)),
+            timeout=ENDPOINT_TIMEOUT_S * 3,
+        )
+    except asyncio.TimeoutError:
+        return _envelope("down", error="rebalance preview timed out")
+    except Exception as exc:
+        logger.exception("rebalance preview failed")
+        return _envelope("down", error=str(exc))
+    if "error" in result:
+        return _envelope("degraded", data=result, error=result["error"])
+    return _envelope("ok", data=result)
+
+
+@router.post("/rebalance")
+async def rebalance_apply(request: Request):
+    body: dict = {}
+    if request.headers.get("content-length"):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+    if not body.get("confirm"):
+        raise HTTPException(status_code=400, detail="confirm=true required to apply")
+    window = int(body.get("window", 14))
+
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(None, lambda: _compute_rebalance(window_days=window))
+    except Exception as exc:
+        logger.exception("rebalance compute failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    if result["n_changes"] == 0:
+        return _envelope("ok", data={**result, "applied": False, "note": "no-op (current weights stable)"})
+
+    # Snapshot + atomic-write
+    cfg_text = CONFIG_PATH.read_text()
+    cfg = json.loads(cfg_text)
+    backup_dir = USER_DATA_ROOT_FOR_BACKUPS / "data"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+    backup_path = backup_dir / f"config-backup-{stamp}-rebalance-ui.json"
+    backup_path.write_text(cfg_text)
+    cfg["capital_allocation"]["pair_weights"] = result["proposed_weights"]
+    tmp = CONFIG_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cfg, indent=4))
+    tmp.replace(CONFIG_PATH)
+
+    return _envelope("ok", data={**result, "applied": True, "backup": str(backup_path),
+                                 "note": "freqtrade picks up new weights within 1h via "
+                                         "bot_loop_start config re-read; no restart needed"})
 
 
 # --------------------------------------------------------------------------
