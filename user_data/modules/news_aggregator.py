@@ -14,9 +14,9 @@ Sources (zero external API costs):
                                    so it can use the existing rate limiter.
     2. cryptocurrency.cv         — free, no key
     3. Reddit (json endpoints)   — free, no key, needs User-Agent.
-                                   Replaces CryptoPanic — upvote_ratio +
-                                   comment volume on pair-specific posts is
-                                   the same crowd-sentiment signal.
+                                   upvote_ratio + comment volume on
+                                   pair-specific posts gives a free
+                                   crowd-sentiment signal.
     4. CoinGecko trending        — free, no key, low rate limit
     5. Direct RSS feeds          — free, no key (CoinDesk / CoinTelegraph /
                                    The Block / Decrypt)
@@ -133,7 +133,7 @@ class NewsItem:
     url: str
     timestamp: datetime
     pair_mentions: list[str] = field(default_factory=list)
-    community_sentiment: float | None = None   # -1..+1 (CryptoPanic vote ratio)
+    community_sentiment: float | None = None   # -1..+1 (Reddit upvote_ratio mapped to [-1,1])
     attention_score: float | None = None       # 0..1 (Reddit normalised)
 
 
@@ -379,9 +379,8 @@ class NewsAggregator:
                 permalink = p.get("permalink") or ""
 
                 # Reddit's `upvote_ratio` is the fraction in [0, 1] of users
-                # who upvoted (vs downvoted) the post. Map to [-1, +1] so it's
-                # the same shape as a CryptoPanic-style community sentiment
-                # signal: 1.0 = unanimous bullish, 0.5 = mixed, 0.0 = bearish
+                # who upvoted (vs downvoted) the post. Map to [-1, +1] so a
+                # 1.0 means unanimous bullish, 0.5 mixed, 0.0 bearish
                 # consensus. Only emit when the post has enough engagement
                 # (≥ 5 score) to be statistically meaningful.
                 upvote_ratio = p.get("upvote_ratio")

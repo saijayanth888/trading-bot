@@ -745,7 +745,7 @@ FEATURE_COLUMNS: tuple[str, ...] = (
     "%-sentiment_fng_neutral",
     "%-sentiment_fng_greed",
     "%-sentiment_fng_extreme_greed",
-    # Community vote average across CryptoPanic articles mentioning a pair (-1..+1).
+    # Reddit upvote-ratio average across pair-tagged posts, mapped to (-1..+1).
     "%-sentiment_community_score",
     # Reddit attention proxy: avg normalised score across r/cryptocurrency, r/bitcoin,
     # r/ethtrader hot posts (0..1). Spikes flag attention surges.

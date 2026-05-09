@@ -635,9 +635,10 @@ async def get_source_agreement() -> dict:
     """Cross-source sentiment agreement matrix.
 
     For each watched pair, summarise the *current* signal from every source
-    we have data for (Hermes-3 LLM scoring, CryptoPanic community votes,
-    Reddit attention, CoinGecko trending, Fear & Greed). Lets the operator
-    spot divergences (e.g. F&G says Greed but community votes are bearish).
+    we have data for (Hermes-3 LLM scoring, Reddit upvote-ratio crowd
+    sentiment, Reddit attention, CoinGecko trending, Fear & Greed). Lets
+    the operator spot divergences (e.g. F&G says Greed but Reddit votes
+    are bearish).
     """
     pairs = ("BTC", "ETH", "SOL", "ADA")
     out: dict = {"as_of": datetime.now(timezone.utc).isoformat(), "pairs": {}}
@@ -687,7 +688,7 @@ async def get_source_agreement() -> dict:
         out["pairs"][p] = {
             "llm_market_impact": base.get("market_impact"),
             "llm_score": float(base.get("sentiment_score") or 0),
-            # Reddit upvote-ratio crowd-sentiment (replaces CryptoPanic).
+            # Reddit upvote-ratio crowd-sentiment.
             "reddit_community_avg": float(comm.get("avg_score") or 0) if comm.get("n") else None,
             "reddit_community_n": int(comm.get("n") or 0),
             "reddit_attention_avg": float(rd.get("avg_score") or 0) if rd.get("n") else None,

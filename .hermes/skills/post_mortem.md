@@ -75,8 +75,9 @@ For each top-3 cluster (by total $ lost, not count), propose ONE of:
   regime changed mid-position, write a skill that triggers an early exit on
   regime change
 - `news_event_pause.md` — if losses cluster around timestamps that match
-  known news events (CryptoPanic high-vote articles), write a skill that
-  pauses entries 15 minutes after a >50-vote bearish article
+  known news events (high-engagement Reddit posts or RSS-feed headlines
+  with strongly bearish LLM scoring), write a skill that pauses entries
+  15 minutes after the event
 
 **(c) An EPT genome adjustment.** Examples:
 - Demote the current champion if it's responsible for the recurring losses
