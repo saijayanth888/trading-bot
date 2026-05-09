@@ -1,273 +1,380 @@
 {
-    "max_open_trades": 6,
-    "stake_currency": "USD",
-    "stake_amount": "unlimited",
-    "tradable_balance_ratio": 0.99,
-    "fiat_display_currency": "USD",
-    "dry_run": true,
-    "dry_run_wallet": 19000,
-    "cancel_open_orders_on_exit": false,
-    "trading_mode": "spot",
-    "margin_mode": "",
-    "timeframe": "5m",
-    "bot_name": "freqtrade-meanrev",
-    "initial_state": "running",
-    "force_entry_enable": false,
-    "minimal_roi": {
-        "0":  0.030,
-        "20": 0.015,
-        "40": 0.008,
-        "60": 0
-    },
-    "unfilledtimeout": {
-        "entry": 60,
-        "exit": 60,
-        "exit_timeout_count": 0,
-        "unit": "seconds"
-    },
-    "order_types": {
-        "entry": "limit",
-        "exit": "limit",
-        "emergency_exit": "limit",
-        "force_entry": "limit",
-        "force_exit": "limit",
-        "stoploss": "limit",
-        "stoploss_on_exchange": false,
-        "stoploss_on_exchange_interval": 60
-    },
-    "order_time_in_force": {
-        "entry": "GTC",
-        "exit": "GTC"
-    },
-    "entry_pricing": {
-        "price_side": "same",
-        "use_order_book": false,
-        "price_last_balance": 0.0,
-        "check_depth_of_market": {
-            "enabled": false,
-            "bids_to_ask_delta": 1
-        }
-    },
-    "exit_pricing": {
-        "price_side": "same",
-        "use_order_book": false
-    },
-    "exchange": {
-        "name": "coinbase",
-        "key": "__OVERRIDDEN_BY__FREQTRADE__EXCHANGE__KEY__",
-        "secret": "__OVERRIDDEN_BY__FREQTRADE__EXCHANGE__SECRET__",
-        "ccxt_config": {},
-        "ccxt_async_config": {},
-        "pair_whitelist": [
-            "BTC/USD",
-            "ETH/USD",
-            "SOL/USD",
-            "ADA/USD",
-            "XRP/USD",
-            "DOGE/USD",
-            "AVAX/USD",
-            "LINK/USD"
-        ],
-        "pair_blacklist": []
-    },
-    "pairlists": [
-        {
-            "method": "StaticPairList"
-        }
-    ],
-    "freqai": {
-        "enabled": true,
-        "purge_old_models": 2,
-        "train_period_days": 730,
-        "backtest_period_days": 14,
-        "live_retrain_hours": 24,
-        "expiration_hours": 26,
-        "identifier": "tft_v1",
-        "fit_live_predictions_candles": 300,
-        "conv_width": 60,
-        "feature_parameters": {
-            "include_timeframes": [
-                "5m",
-                "15m",
-                "1h",
-                "6h"
-            ],
-            "include_corr_pairlist": [
-                "BTC/USD",
-                "ETH/USD"
-            ],
-            "label_period_candles": 12,
-            "flat_threshold_bps": 10,
-            "include_shifted_candles": 0,
-            "DI_threshold": 0,
-            "weight_factor": 0.9,
-            "principal_component_analysis": false,
-            "use_SVM_to_remove_outliers": false,
-            "indicator_periods_candles": [
-                10,
-                20
-            ],
-            "noise_standard_deviation": 0.05,
-            "buffer_train_data_candles": 20
-        },
-        "data_split_parameters": {
-            "test_size": 0.2,
-            "shuffle": false
-        },
-        "model_training_parameters": {
-            "hidden_size": 64,
-            "n_heads": 4,
-            "dropout": 0.1,
-            "var_dim": 8,
-            "lr": 0.001,
-            "weight_decay": 0.0001,
-            "n_epochs": 25,
-            "batch_size": 256,
-            "quantile_loss_weight": 0.3,
-            "early_stopping_patience": 5,
-            "use_amp": true,
-            "use_compile": true,
-            "warmup_pct": 0.05
-        }
-    },
-    "freqaimodel": "TFTModel",
-    "freqaimodel_path": "user_data/freqaimodels",
-    "telegram": {
-        "enabled": false,
-        "token": "",
-        "chat_id": ""
-    },
-    "api_server": {
-        "enabled": true,
-        "listen_ip_address": "0.0.0.0",
-        "listen_port": 8080,
-        "verbosity": "error",
-        "enable_openapi": false,
-        "jwt_secret_key": "__OVERRIDDEN_BY__FREQTRADE__API_SERVER__JWT_SECRET_KEY__",
-        "ws_token": "__OVERRIDDEN_BY__FREQTRADE__API_SERVER__WS_TOKEN__",
-        "CORS_origins": [],
-        "username": "__OVERRIDDEN_BY__FREQTRADE__API_SERVER__USERNAME__",
-        "password": "__OVERRIDDEN_BY__FREQTRADE__API_SERVER__PASSWORD__"
-    },
-    "internals": {
-        "process_throttle_secs": 5
-    },
-    "risk_management": {
-        "max_portfolio_drawdown_pct": 0.08,
-        "daily_loss_limit_pct": 0.03,
-        "max_position_size_pct": 0.1,
-        "max_concurrent_positions": 6,
-        "correlation_threshold": 0.7,
-        "correlation_lookback_days": 30,
-        "correlation_min_overlap": 50,
-        "circuit_breaker_consecutive_losses": 5,
-        "circuit_breaker_cooldown_hours": 4.0,
-        "kelly_enabled": true,
-        "kelly_lookback_trades": 100,
-        "kelly_safety_factor": 0.5,
-        "kelly_max_fraction": 0.25,
-        "kelly_min_trades": 10
-    },
-    "execution": {
-        "slippage_pct": 0.003,
-        "retry_attempts": 3,
-        "retry_backoff_initial_sec": 1.0,
-        "retry_backoff_factor": 2.0,
-        "order_timeout_sec": 60,
-        "poll_interval_sec": 1.0,
-        "log_path": "user_data/logs/execution.log",
-        "dry_run": true,
-        "api_key_env": "COINBASE_API_KEY",
-        "api_secret_env": "COINBASE_API_SECRET"
-    },
-    "logfile": "user_data/logs/freqtrade.log",
-    "db_url": "__OVERRIDDEN_BY__FREQTRADE__DB_URL__",
-    "regime_gating": {
-        "_doc": "Per-regime tuning. entry_delta values are added to entry_threshold; exit_delta values are added to exit_threshold. null means 'hard-block long entries in this regime'. Override at runtime with FREQTRADE__REGIME_GATING__<KEY> env vars. AGGRESSIVE first-30-day stance for $1k/mo target — risk_management floor (8% DD, 3% daily, 5-loss breaker, Kelly 0.5) is unchanged.",
-        "entry_delta": {
-            "trending_up":     -0.08,
-            "mean_reverting":   0.00,
-            "high_volatility":  0.08,
-            "trending_down":    0.15,
-            "unknown":          0.00
-        },
-        "exit_delta": {
-            "mean_reverting":  -0.10,
-            "trending_up":      0.05,
-            "high_volatility":  0.00,
-            "trending_down":   -0.20,
-            "unknown":          0.00
-        },
-        "high_vol_stake_factor":      0.7,
-        "high_vol_min_confidence":    0.65,
-        "mean_rev_take_profit":       0.012,
-        "trending_up_trail_trigger":  0.025,
-        "trending_up_trail_distance": -0.02,
-        "tft_min_confidence":         0.35,
-        "meta_min_confidence":        0.35
-    },
-    "capital_allocation": {
-        "_doc": "Weights determine max capital allocation per pair. Pairs below min_sharpe_for_trading are data-only (model still trains, no entries). The strategy reads rolling 14-day Sharpe from trade_journal at bot_loop_start cadence; when fewer than `rebalance_after_days` of live data exist the trained val_sharpe is used as a bootstrap. Auto-rebalance recomputes weights on the rebalance_after_days schedule.",
-        "mode": "performance_weighted",
-        "min_sharpe_for_trading": 0.7,
-        "pair_weights": {
-            "BTC/USD":   0.35,
-            "ETH/USD":   0.35,
-            "SOL/USD":   0.10,
-            "ADA/USD":   0.05,
-            "XRP/USD":   0.04,
-            "DOGE/USD":  0.04,
-            "AVAX/USD":  0.04,
-            "LINK/USD":  0.03
-        },
-        "rebalance_after_days": 14
-    },
-    "sentiment_pipeline": {
-        "_doc": "Sentiment-engine knobs that used to be hardcoded constants. All overridable via env vars (SENTIMENT_*) at runtime.",
-        "poll_interval_s":      900,
-        "max_headlines_to_llm": 60,
-        "history_days":         7,
-        "dedup_threshold":      0.80
-    },
-    "news_sources_config": {
-        "_doc": "Per-source endpoint config. Edit here (no code change) to add/remove subreddits, RSS feeds, or change watched pair symbols. Aggregator reads this on each poll cycle (15 min cadence).",
-        "watched_pairs": ["BTC", "ETH", "SOL", "ADA", "XRP", "DOGE", "AVAX", "LINK", "POL"],
-        "reddit_subs": [
-            {"sub": "cryptocurrency", "limit": 25},
-            {"sub": "bitcoin",        "limit": 25},
-            {"sub": "ethtrader",      "limit": 15},
-            {"sub": "altcoin",        "limit": 15},
-            {"sub": "cryptomarkets",  "limit": 15}
-        ],
-        "rss_feeds": [
-            {"name": "coindesk",     "url": "https://www.coindesk.com/arc/outboundfeeds/rss/"},
-            {"name": "cointelegraph", "url": "https://cointelegraph.com/rss"},
-            {"name": "theblock",     "url": "https://www.theblock.co/rss"},
-            {"name": "decrypt",      "url": "https://decrypt.co/feed"},
-            {"name": "bitcoinmag",   "url": "https://bitcoinmagazine.com/.rss/full/"}
-        ]
-    },
-    "sentiment_sources": {
-        "_doc": "Per-source weights for the sentiment ensemble. The LLM scorers (Hermes-3 70B + 8B) read all sources together; weights are advisory for downstream consumers (e.g. market_research skill divergence checks). Six free sources, zero external API costs (Perplexity is freemium — gracefully degrades if PERPLEXITY_API_KEY is unset).",
-        "perplexity":         {"enabled": true, "weight": 0.30},
-        "cryptocurrency_cv":  {"enabled": false, "weight": 0.0, "_note": "disabled 2026-05-09: source switched to paid-only, returns HTTP 402"},
-        "reddit":             {"enabled": true, "weight": 0.20},
-        "rss_feeds":          {"enabled": true, "weight": 0.10},
-        "fear_greed":         {"enabled": true, "weight": 0.10},
-        "coingecko_trending": {"enabled": true, "weight": 0.10}
-    },
-    "ept_evolution": {
-        "_doc": "EPT evolution — accelerated cadence for first-30-day push toward champion convergence. Larger population (12) for diversity; tighter cycle (12h train + 24h eval = 36h gen) for faster generations. risk_governor still gates every trade.",
-        "population_size":         12,
-        "train_hours":             12,
-        "eval_hours":              24,
-        "elite_count":              4,
-        "children_count":           5,
-        "random_inject_count":      3,
-        "mutation_sigma_initial":   0.15,
-        "mutation_sigma_decay":     0.95,
-        "min_sharpe_for_champion":  0.8,
-        "auto_demote_rolling_window": 3,
-        "auto_demote_sharpe_floor":   0.5
+  "max_open_trades": 6,
+  "stake_currency": "USD",
+  "stake_amount": "unlimited",
+  "tradable_balance_ratio": 0.99,
+  "fiat_display_currency": "USD",
+  "dry_run": true,
+  "dry_run_wallet": 19000,
+  "cancel_open_orders_on_exit": false,
+  "trading_mode": "spot",
+  "margin_mode": "",
+  "timeframe": "5m",
+  "bot_name": "freqtrade-meanrev",
+  "initial_state": "running",
+  "force_entry_enable": false,
+  "minimal_roi": {
+    "0": 0.03,
+    "20": 0.015,
+    "40": 0.008,
+    "60": 0
+  },
+  "unfilledtimeout": {
+    "entry": 60,
+    "exit": 60,
+    "exit_timeout_count": 0,
+    "unit": "seconds"
+  },
+  "order_types": {
+    "entry": "limit",
+    "exit": "limit",
+    "emergency_exit": "limit",
+    "force_entry": "limit",
+    "force_exit": "limit",
+    "stoploss": "limit",
+    "stoploss_on_exchange": false,
+    "stoploss_on_exchange_interval": 60
+  },
+  "order_time_in_force": {
+    "entry": "GTC",
+    "exit": "GTC"
+  },
+  "entry_pricing": {
+    "price_side": "same",
+    "use_order_book": false,
+    "price_last_balance": 0.0,
+    "check_depth_of_market": {
+      "enabled": false,
+      "bids_to_ask_delta": 1
     }
+  },
+  "exit_pricing": {
+    "price_side": "same",
+    "use_order_book": false
+  },
+  "exchange": {
+    "name": "coinbase",
+    "key": "__OVERRIDDEN_BY__FREQTRADE__EXCHANGE__KEY__",
+    "secret": "__OVERRIDDEN_BY__FREQTRADE__EXCHANGE__SECRET__",
+    "ccxt_config": {},
+    "ccxt_async_config": {},
+    "pair_whitelist": [
+      "BTC/USD",
+      "ETH/USD",
+      "SOL/USD",
+      "ADA/USD",
+      "XRP/USD",
+      "DOGE/USD",
+      "AVAX/USD",
+      "LINK/USD"
+    ],
+    "pair_blacklist": []
+  },
+  "pairlists": [
+    {
+      "method": "StaticPairList"
+    }
+  ],
+  "freqai": {
+    "enabled": true,
+    "purge_old_models": 2,
+    "train_period_days": 730,
+    "backtest_period_days": 14,
+    "live_retrain_hours": 24,
+    "expiration_hours": 26,
+    "identifier": "tft_v1",
+    "fit_live_predictions_candles": 300,
+    "conv_width": 60,
+    "feature_parameters": {
+      "include_timeframes": [
+        "5m",
+        "15m",
+        "1h",
+        "6h"
+      ],
+      "include_corr_pairlist": [
+        "BTC/USD",
+        "ETH/USD"
+      ],
+      "label_period_candles": 12,
+      "flat_threshold_bps": 10,
+      "include_shifted_candles": 0,
+      "DI_threshold": 0,
+      "weight_factor": 0.9,
+      "principal_component_analysis": false,
+      "use_SVM_to_remove_outliers": false,
+      "indicator_periods_candles": [
+        10,
+        20
+      ],
+      "noise_standard_deviation": 0.05,
+      "buffer_train_data_candles": 20
+    },
+    "data_split_parameters": {
+      "test_size": 0.2,
+      "shuffle": false
+    },
+    "model_training_parameters": {
+      "hidden_size": 64,
+      "n_heads": 4,
+      "dropout": 0.1,
+      "var_dim": 8,
+      "lr": 0.001,
+      "weight_decay": 0.0001,
+      "n_epochs": 25,
+      "batch_size": 256,
+      "quantile_loss_weight": 0.3,
+      "early_stopping_patience": 5,
+      "use_amp": true,
+      "use_compile": true,
+      "warmup_pct": 0.05
+    }
+  },
+  "freqaimodel": "TFTModel",
+  "freqaimodel_path": "user_data/freqaimodels",
+  "telegram": {
+    "enabled": false,
+    "token": "",
+    "chat_id": ""
+  },
+  "api_server": {
+    "enabled": true,
+    "listen_ip_address": "0.0.0.0",
+    "listen_port": 8080,
+    "verbosity": "error",
+    "enable_openapi": false,
+    "jwt_secret_key": "__OVERRIDDEN_BY__FREQTRADE__API_SERVER__JWT_SECRET_KEY__",
+    "ws_token": "__OVERRIDDEN_BY__FREQTRADE__API_SERVER__WS_TOKEN__",
+    "CORS_origins": [],
+    "username": "__OVERRIDDEN_BY__FREQTRADE__API_SERVER__USERNAME__",
+    "password": "__OVERRIDDEN_BY__FREQTRADE__API_SERVER__PASSWORD__"
+  },
+  "internals": {
+    "process_throttle_secs": 5
+  },
+  "risk_management": {
+    "max_portfolio_drawdown_pct": 0.08,
+    "daily_loss_limit_pct": 0.03,
+    "max_position_size_pct": 0.1,
+    "max_concurrent_positions": 6,
+    "correlation_threshold": 0.7,
+    "correlation_lookback_days": 30,
+    "correlation_min_overlap": 50,
+    "circuit_breaker_consecutive_losses": 5,
+    "circuit_breaker_cooldown_hours": 4.0,
+    "kelly_enabled": true,
+    "kelly_lookback_trades": 100,
+    "kelly_safety_factor": 0.5,
+    "kelly_max_fraction": 0.25,
+    "kelly_min_trades": 10
+  },
+  "execution": {
+    "slippage_pct": 0.003,
+    "retry_attempts": 3,
+    "retry_backoff_initial_sec": 1.0,
+    "retry_backoff_factor": 2.0,
+    "order_timeout_sec": 60,
+    "poll_interval_sec": 1.0,
+    "log_path": "user_data/logs/execution.log",
+    "dry_run": true,
+    "api_key_env": "COINBASE_API_KEY",
+    "api_secret_env": "COINBASE_API_SECRET"
+  },
+  "logfile": "user_data/logs/freqtrade.log",
+  "db_url": "__OVERRIDDEN_BY__FREQTRADE__DB_URL__",
+  "regime_gating": {
+    "_doc": "Per-regime tuning. entry_delta values are added to entry_threshold; exit_delta values are added to exit_threshold. null means 'hard-block long entries in this regime'. Override at runtime with FREQTRADE__REGIME_GATING__<KEY> env vars. AGGRESSIVE first-30-day stance for $1k/mo target \u2014 risk_management floor (8% DD, 3% daily, 5-loss breaker, Kelly 0.5) is unchanged.",
+    "entry_delta": {
+      "trending_up": -0.08,
+      "mean_reverting": 0.0,
+      "high_volatility": 0.08,
+      "trending_down": 0.15,
+      "unknown": 0.0
+    },
+    "exit_delta": {
+      "mean_reverting": -0.1,
+      "trending_up": 0.05,
+      "high_volatility": 0.0,
+      "trending_down": -0.2,
+      "unknown": 0.0
+    },
+    "high_vol_stake_factor": 0.7,
+    "high_vol_min_confidence": 0.65,
+    "mean_rev_take_profit": 0.012,
+    "trending_up_trail_trigger": 0.025,
+    "trending_up_trail_distance": -0.02,
+    "tft_min_confidence": 0.35,
+    "meta_min_confidence": 0.35
+  },
+  "capital_allocation": {
+    "_doc": "Weights determine max capital allocation per pair. Pairs below min_sharpe_for_trading are data-only (model still trains, no entries). The strategy reads rolling 14-day Sharpe from trade_journal at bot_loop_start cadence; when fewer than `rebalance_after_days` of live data exist the trained val_sharpe is used as a bootstrap. Auto-rebalance recomputes weights on the rebalance_after_days schedule.",
+    "mode": "performance_weighted",
+    "min_sharpe_for_trading": 0.7,
+    "pair_weights": {
+      "BTC/USD": 0.35,
+      "ETH/USD": 0.35,
+      "SOL/USD": 0.1,
+      "ADA/USD": 0.05,
+      "XRP/USD": 0.04,
+      "DOGE/USD": 0.04,
+      "AVAX/USD": 0.04,
+      "LINK/USD": 0.03
+    },
+    "rebalance_after_days": 14
+  },
+  "sentiment_pipeline": {
+    "_doc": "Sentiment-engine knobs that used to be hardcoded constants. All overridable via env vars (SENTIMENT_*) at runtime.",
+    "poll_interval_s": 900,
+    "max_headlines_to_llm": 60,
+    "history_days": 7,
+    "dedup_threshold": 0.8
+  },
+  "news_sources_config": {
+    "_doc": "Per-source endpoint config. Edit here (no code change) to add/remove subreddits, RSS feeds, or change watched pair symbols. Aggregator reads this on each poll cycle (15 min cadence).",
+    "watched_pairs": [
+      "BTC",
+      "ETH",
+      "SOL",
+      "ADA",
+      "XRP",
+      "DOGE",
+      "AVAX",
+      "LINK",
+      "POL"
+    ],
+    "reddit_subs": [
+      {
+        "sub": "cryptocurrency",
+        "limit": 25
+      },
+      {
+        "sub": "bitcoin",
+        "limit": 25
+      },
+      {
+        "sub": "ethtrader",
+        "limit": 15
+      },
+      {
+        "sub": "altcoin",
+        "limit": 15
+      },
+      {
+        "sub": "cryptomarkets",
+        "limit": 15
+      }
+    ],
+    "rss_feeds": [
+      {
+        "name": "coindesk",
+        "url": "https://www.coindesk.com/arc/outboundfeeds/rss/"
+      },
+      {
+        "name": "cointelegraph",
+        "url": "https://cointelegraph.com/rss"
+      },
+      {
+        "name": "theblock",
+        "url": "https://www.theblock.co/rss"
+      },
+      {
+        "name": "decrypt",
+        "url": "https://decrypt.co/feed"
+      },
+      {
+        "name": "bitcoinmag",
+        "url": "https://bitcoinmagazine.com/.rss/full/"
+      }
+    ]
+  },
+  "sentiment_sources": {
+    "_doc": "Per-source weights for the sentiment ensemble. The LLM scorers (Hermes-3 70B + 8B) read all sources together; weights are advisory for downstream consumers (e.g. market_research skill divergence checks). Six free sources, zero external API costs (Perplexity is freemium \u2014 gracefully degrades if PERPLEXITY_API_KEY is unset).",
+    "perplexity": {
+      "enabled": true,
+      "weight": 0.3
+    },
+    "cryptocurrency_cv": {
+      "enabled": false,
+      "weight": 0.0,
+      "_note": "disabled 2026-05-09: source switched to paid-only, returns HTTP 402"
+    },
+    "reddit": {
+      "enabled": true,
+      "weight": 0.2
+    },
+    "rss_feeds": {
+      "enabled": true,
+      "weight": 0.1
+    },
+    "fear_greed": {
+      "enabled": true,
+      "weight": 0.1
+    },
+    "coingecko_trending": {
+      "enabled": true,
+      "weight": 0.1
+    }
+  },
+  "onchain_sources": {
+    "_doc": "Per-source enable/weight config for the on-chain & derivatives feature pipeline (rebuilt 2026-05 after CryptoQuant/Whale-Alert/Glassnode all moved their useful endpoints behind paid tiers). All seven sources here are 100% free, no key required, and US-accessible. Strategy uses neutral defaults (netflow_z=0, mvrv=1.0, whale_*=0) when a source is disabled or returns no data, so the TFT model continues to infer without these features.",
+    "okx": {
+      "enabled": true,
+      "weight": 0.5,
+      "_note": "OKX public derivatives API. No key, US-OK. Funding rate, OI, long/short, taker volume per pair (8 pairs)."
+    },
+    "defillama": {
+      "enabled": true,
+      "weight": 0.15,
+      "_note": "DefiLlama stablecoins.llama.fi \u2014 total stablecoin mcap delta. Leading indicator of fresh fiat capital."
+    },
+    "alternative_me": {
+      "enabled": true,
+      "weight": 0.1,
+      "_note": "alternative.me Fear & Greed Index. Daily, contrarian sentiment scalar."
+    },
+    "coingecko_global": {
+      "enabled": true,
+      "weight": 0.1,
+      "_note": "CoinGecko /global. BTC dominance for risk-on / risk-off rotation signal."
+    },
+    "mempool_space": {
+      "enabled": true,
+      "weight": 0.05,
+      "_note": "mempool.space /v1/fees/recommended. BTC-only mempool fee pressure (volatility leading indicator)."
+    },
+    "bitcoin_data": {
+      "enabled": true,
+      "weight": 0.1,
+      "_note": "ENABLED 2026-05-09. Free key in BITCOIN_DATA_API_KEY (.env). Cached 6h (4 calls/day), Bearer auth. Falls back to neutral 1.0 on 429."
+    },
+    "dydx": {
+      "enabled": false,
+      "weight": 0.0,
+      "_note": "dYdX v4 indexer (cross-source funding sanity check). Reserved \u2014 not yet wired into a feature column. Flip on if you want cross-venue funding dispersion."
+    },
+    "coinbase_intl": {
+      "enabled": false,
+      "weight": 0.0,
+      "_note": "Coinbase International perps (cross-source funding sanity check). Reserved. Flip on for cross-venue dispersion."
+    },
+    "kraken_futures": {
+      "enabled": false,
+      "weight": 0.0,
+      "_note": "Kraken Futures tickers (cross-source funding sanity check). Reserved."
+    }
+  },
+  "ept_evolution": {
+    "_doc": "EPT evolution \u2014 accelerated cadence for first-30-day push toward champion convergence. Larger population (12) for diversity; tighter cycle (12h train + 24h eval = 36h gen) for faster generations. risk_governor still gates every trade.",
+    "population_size": 12,
+    "train_hours": 12,
+    "eval_hours": 24,
+    "elite_count": 4,
+    "children_count": 5,
+    "random_inject_count": 3,
+    "mutation_sigma_initial": 0.15,
+    "mutation_sigma_decay": 0.95,
+    "min_sharpe_for_champion": 0.8,
+    "auto_demote_rolling_window": 3,
+    "auto_demote_sharpe_floor": 0.5
+  }
 }

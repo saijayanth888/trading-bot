@@ -58,6 +58,7 @@ services:
       - CRYPTOQUANT_API_KEY=${CRYPTOQUANT_API_KEY:-}
       - WHALE_ALERT_API_KEY=${WHALE_ALERT_API_KEY:-}
       - GLASSNODE_API_KEY=${GLASSNODE_API_KEY:-}
+      - BITCOIN_DATA_API_KEY=${BITCOIN_DATA_API_KEY:-}
       # All AI sentiment scoring runs locally via Ollama — no external API costs.
       # The dual-Hermes-3 trust-the-majority pattern uses both models in parallel.
       - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}

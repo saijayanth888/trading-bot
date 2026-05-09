@@ -3,292 +3,901 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#0b1020" />
-  <title>Trading bot — Ops</title>
-  <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='25' font-size='28'>🎛️</text></svg>" />
-  <link rel="stylesheet" href="/static/css/app.css" />
+  <meta name="theme-color" content="#08080c" />
+  <title>Quanta — Ops</title>
+  <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='6' fill='%237c5cff'/></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="/static/css/app.css?v=20260509-5" />
   <style>
-    /* ── Ops-tab specific styles (kept here so the global app.css stays untouched) ── */
+    /* ── Page grid ────────────────────────────────────────────────── */
     .ops-grid {
       display: grid;
-      gap: 16px;
-      padding: 16px;
-      max-width: 1400px;
+      gap: 12px;
+      padding: 12px 24px 56px;
+      max-width: var(--grid-max);
       margin: 0 auto;
       grid-template-columns: repeat(12, 1fr);
-      grid-auto-rows: auto;
     }
+
     .ops-card {
-      background: #0f1530;
-      border: 1px solid #1f2748;
-      border-radius: 10px;
-      padding: 14px 16px;
-      box-shadow: 0 1px 0 #0a0f24 inset;
+      background: var(--bg-card);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-card);
+      padding: 20px;
     }
-    .ops-card[data-status="degraded"] { border-color: #c9a227; box-shadow: 0 0 0 1px #c9a227 inset; }
-    .ops-card[data-status="down"]     { border-color: #c0392b; box-shadow: 0 0 0 1px #c0392b inset; }
+    .ops-card[data-status="degraded"] { border-color: var(--warning-border); }
+    .ops-card[data-status="down"]     { border-color: var(--down-border); }
 
-    .hero { grid-column: span 12; padding: 22px 24px; position: relative; min-height: 140px; }
-    .hero[data-regime="trending_up"]    { background: linear-gradient(135deg, #0f3320 0%, #0f1530 100%); border-color: #1f6f3f; }
-    .hero[data-regime="trending_down"]  { background: linear-gradient(135deg, #36100f 0%, #0f1530 100%); border-color: #8b2d2a; }
-    .hero[data-regime="mean_reverting"] { background: linear-gradient(135deg, #3a2c0a 0%, #0f1530 100%); border-color: #c9a227; }
-    .hero[data-regime="high_volatility"]{ background: linear-gradient(135deg, #2a1240 0%, #0f1530 100%); border-color: #7a3aa8; }
-    .hero h1     { margin: 0 0 8px 0; font-size: 28px; letter-spacing: 0.5px; }
-    .hero .meta  { font-size: 14px; opacity: 0.85; }
-    .hero .arrow { font-size: 22px; vertical-align: -2px; margin-left: 4px; }
-
-    .small-card { grid-column: span 4; }
-    @media (max-width: 1100px) { .small-card { grid-column: span 6; } }
-    @media (max-width: 700px)  { .small-card { grid-column: span 12; } }
-
-    .wide-card { grid-column: span 12; }
-
-    .card-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
-    .card-head h3 { margin: 0; font-size: 15px; font-weight: 600; }
-    .card-head .age { font-size: 11px; opacity: 0.6; font-variant-numeric: tabular-nums; }
-
-    .row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13px; }
-    .row .label { opacity: 0.7; }
-    .row .value { font-variant-numeric: tabular-nums; }
-
-    .ok    { color: #4cc38a; }
-    .warn  { color: #f7c948; }
-    .bad   { color: #ff6b6b; }
-    .muted { color: #7a86b8; }
-
-    .progress { height: 6px; background: #1f2748; border-radius: 3px; overflow: hidden; margin-top: 4px; }
-    .progress > div { height: 100%; background: #4cc38a; transition: width 250ms ease; }
-
-    .controls-bar {
-      grid-column: span 12;
-      display: flex;
+    .ops-card .card-head {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 14px;
       gap: 12px;
-      justify-content: flex-end;
-      padding-top: 4px;
     }
+    .ops-card .card-head h3 {
+      font-family: var(--sans);
+      font-weight: 600;
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin: 0;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .ops-card .card-head h3[data-num]::before {
+      content: attr(data-num);
+      font-family: var(--mono);
+      font-size: 10px; font-weight: 500;
+      color: var(--text-disabled);
+      letter-spacing: 0;
+      flex-shrink: 0;
+    }
+    .ops-card .card-head .age {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-muted);
+      letter-spacing: 0.04em;
+    }
+
+    /* ── HERO STRIP — flat 3-slot bar, no gradient, no glow ────── */
+    .hero {
+      grid-column: span 12;
+      padding: 0;
+      display: grid;
+      grid-template-columns: 2fr 1.6fr 1fr;
+      align-items: stretch;
+      min-height: 96px;
+      overflow: hidden;
+      position: relative;
+    }
+    /* Top accent line — colored by current regime */
+    .hero::before {
+      content: "";
+      position: absolute; top: 0; left: 0; right: 0;
+      height: 2px;
+      background: var(--text-disabled);
+    }
+    .hero[data-regime="trending_up"]::before    { background: var(--up); }
+    .hero[data-regime="trending_down"]::before  { background: var(--down); }
+    .hero[data-regime="mean_reverting"]::before { background: var(--warning); }
+    .hero[data-regime="high_volatility"]::before{ background: var(--accent); }
+
+    .hero-slot {
+      padding: 18px 22px;
+      border-right: 1px solid var(--border-subtle);
+      display: flex; flex-direction: column; gap: 6px;
+      min-width: 0;
+    }
+    .hero-slot:last-child { border-right: 0; }
+    .hero-eyebrow {
+      font-family: var(--sans);
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+    .hero-headline {
+      font-family: var(--sans);
+      font-weight: 600;
+      font-size: 22px;
+      letter-spacing: -0.01em;
+      color: var(--text-primary);
+      line-height: 1.2;
+      margin: 0;
+      display: flex; align-items: baseline; gap: 8px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .hero-headline .arrow {
+      font-weight: 500;
+      color: var(--text-secondary);
+    }
+    .hero[data-regime="trending_up"]    .hero-headline .arrow { color: var(--up); }
+    .hero[data-regime="trending_down"]  .hero-headline .arrow { color: var(--down); }
+    .hero[data-regime="mean_reverting"] .hero-headline .arrow { color: var(--warning); }
+    .hero[data-regime="high_volatility"].hero-headline .arrow { color: var(--accent); }
+    .hero-meta {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.45;
+      letter-spacing: 0;
+    }
+    .hero-meta b { color: var(--text-primary); font-weight: 600; }
+
+    /* Bot status slot — explicit, large, unambiguous */
+    .hero-bot { gap: 8px; }
+    .hero-bot-line {
+      display: flex; align-items: center; gap: 10px;
+      margin-top: 2px;
+    }
+    .hero-bot-dot {
+      width: 10px; height: 10px;
+      background: var(--text-muted);
+      border-radius: 50%;
+      flex-shrink: 0;
+      box-shadow: 0 0 0 4px rgba(255,255,255,0.04);
+    }
+    .hero-bot[data-state="running"] .hero-bot-dot {
+      background: var(--up);
+      box-shadow: 0 0 0 4px rgba(63,185,80,0.18);
+      animation: bot-pulse 2.4s ease-in-out infinite;
+    }
+    .hero-bot[data-state="paused"] .hero-bot-dot,
+    .hero-bot[data-state="stopped"] .hero-bot-dot {
+      background: var(--warning);
+      box-shadow: 0 0 0 4px rgba(245,166,35,0.18);
+    }
+    .hero-bot[data-state="error"] .hero-bot-dot,
+    .hero-bot[data-state="offline"] .hero-bot-dot {
+      background: var(--down);
+      box-shadow: 0 0 0 4px rgba(248,81,73,0.18);
+    }
+    @keyframes bot-pulse {
+      0%, 100% { box-shadow: 0 0 0 4px rgba(63,185,80,0.18); }
+      50%      { box-shadow: 0 0 0 6px rgba(63,185,80,0.10); }
+    }
+    .hero-bot-name {
+      font-family: var(--sans);
+      font-size: 22px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      color: var(--text-primary);
+    }
+    .hero-bot[data-state="running"] .hero-bot-name { color: var(--up); }
+    .hero-bot[data-state="paused"]  .hero-bot-name { color: var(--warning); }
+    .hero-bot[data-state="stopped"] .hero-bot-name { color: var(--warning); }
+    .hero-bot[data-state="error"]   .hero-bot-name,
+    .hero-bot[data-state="offline"] .hero-bot-name { color: var(--down); }
+    .hero-bot-meta {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      margin-top: 2px;
+    }
+    .hero-bot-meta .mode-pill { height: 22px; padding: 0 8px; font-size: 10px; }
+
+    .hero-clock {
+      align-items: flex-end;
+      text-align: right;
+    }
+    .hero-clock-time {
+      font-family: var(--mono);
+      font-size: 26px; font-weight: 600;
+      letter-spacing: -0.01em;
+      color: var(--text-primary);
+      line-height: 1;
+    }
+    .hero-clock-date {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-muted);
+      letter-spacing: 0.04em;
+    }
+
+    #warmup-banner {
+      grid-column: span 12;
+      margin-top: 0;
+      padding: 12px 16px;
+      background: var(--warning-bg);
+      border: 1px solid var(--warning-border);
+      border-radius: var(--radius-card);
+      color: var(--warning);
+      font-family: var(--sans);
+      font-size: 13px;
+      font-weight: 500;
+      line-height: 1.5;
+    }
+
+    /* ── Card spans ─────────────────────────────────────────────── */
+    .small-card { grid-column: span 4; }
+    .wide-card  { grid-column: span 12; }
+    @media (max-width: 1100px) {
+      .small-card { grid-column: span 6; }
+      .hero { grid-template-columns: 1.5fr 1.2fr 1fr; }
+    }
+    @media (max-width: 700px) {
+      .small-card { grid-column: span 12; }
+      .hero { grid-template-columns: 1fr; }
+      .hero-slot { border-right: 0; border-bottom: 1px solid var(--border-subtle); }
+      .hero-slot:last-child { border-bottom: 0; }
+      .hero-clock { align-items: flex-start; text-align: left; }
+    }
+
+    /* ── Generic value rows ─────────────────────────────────────── */
+    .row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 9px 0;
+      font-size: 13px;
+      font-family: var(--sans);
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .row:last-child { border-bottom: 0; }
+    .row .label {
+      color: var(--text-muted);
+      font-size: 12px;
+      font-weight: 500;
+    }
+    .row .value {
+      font-family: var(--mono);
+      color: var(--text-primary);
+      font-size: 13px;
+      font-weight: 500;
+    }
+    .ok    { color: var(--up); }
+    .warn  { color: var(--warning); }
+    .bad   { color: var(--down); }
+    .muted { color: var(--text-muted); }
+
+    .progress {
+      height: 3px;
+      background: var(--bg-inset);
+      border-radius: 999px;
+      overflow: hidden;
+      margin-top: 6px;
+    }
+    .progress > div {
+      height: 100%;
+      background: var(--up);
+      transition: width 400ms cubic-bezier(0.16, 1, 0.3, 1);
+      border-radius: 999px;
+    }
+
+    /* ── Buttons ────────────────────────────────────────────────── */
     .btn {
-      background: #1f2748; color: #e8ecf8; border: 1px solid #2c386a;
-      border-radius: 8px; padding: 10px 18px; font: inherit; cursor: pointer;
-      transition: background 120ms ease;
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      background: var(--bg-card);
+      color: var(--text-primary);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-button);
+      padding: 0 14px;
+      height: 36px;
+      font: inherit; font-family: var(--sans);
+      font-size: 13px; font-weight: 500;
+      cursor: pointer;
+      transition: background 120ms ease, border-color 120ms ease;
     }
-    .btn:hover { background: #2c386a; }
-    .btn.primary { background: #c0392b; border-color: #d0493b; }
-    .btn.primary:hover { background: #d0493b; }
-    .btn.success { background: #1f6f3f; border-color: #2f8f4f; }
-    .btn.success:hover { background: #2f8f4f; }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn:hover { background: var(--bg-card-hover); }
+    .btn.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+    .btn.primary:hover { filter: brightness(1.08); }
+    .btn.success {
+      background: var(--up);
+      color: #06150b;
+      border-color: var(--up);
+      font-weight: 600;
+    }
+    .btn.success:hover { filter: brightness(1.08); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-    table.tape { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
-    table.tape th, table.tape td { padding: 4px 8px; text-align: left; border-bottom: 1px solid #1f2748; }
-    table.tape th { font-weight: 600; opacity: 0.7; }
+    /* ── Tables ─────────────────────────────────────────────────── */
+    table.tape {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      font-family: var(--sans);
+    }
+    table.tape th, table.tape td {
+      padding: 10px 14px 10px 0;
+      text-align: left;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    table.tape th {
+      font-weight: 500;
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+    table.tape td { font-family: var(--mono); }
+    table.tape tr:last-child td { border-bottom: 0; }
 
-    .modal-back { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 100; }
+    /* ── Modal ──────────────────────────────────────────────────── */
+    .modal-back {
+      position: fixed; inset: 0;
+      background: rgba(8,8,12,0.7);
+      display: none; align-items: center; justify-content: center;
+      z-index: 100;
+    }
     .modal-back.open { display: flex; }
-    .modal { background: #0f1530; border: 1px solid #2c386a; border-radius: 10px; padding: 22px; width: 90%; max-width: 480px; }
-    .modal h3 { margin-top: 0; }
-    .modal input { width: 100%; padding: 8px; background: #060a1c; color: #e8ecf8; border: 1px solid #2c386a; border-radius: 6px; font: inherit; }
-    .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+    .modal {
+      background: var(--bg-card);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-card);
+      padding: 24px;
+      width: 90%; max-width: 480px;
+    }
+    .modal h3 {
+      font-family: var(--sans);
+      font-style: normal;
+      font-size: 16px; font-weight: 600;
+      margin: 0 0 14px;
+      color: var(--text-primary);
+      letter-spacing: -0.01em;
+      text-transform: none;
+    }
+    .modal h3::before { content: ""; display: none; }
+    .modal input {
+      width: 100%; padding: 10px;
+      background: var(--bg-inset);
+      color: var(--text-primary);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-input);
+      font: inherit;
+      height: auto;
+    }
+    .modal-actions {
+      display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px;
+    }
 
-    /* Quick Actions — color-coded buttons + slide-down result */
-    .qa-btn { font-size: 13px; padding: 9px 14px; border: 1px solid; border-radius: 7px; cursor: pointer; transition: transform 100ms ease, opacity 100ms ease; }
-    .qa-btn:hover:not(:disabled) { transform: translateY(-1px); }
-    .qa-btn:disabled { opacity: 0.55; cursor: progress; }
-    .qa-btn.qa-pause  { background: #36100f; border-color: #c0392b; color: #ff9089; }
-    .qa-btn.qa-resume { background: #0f3320; border-color: #2f8f4f; color: #4cc38a; }
-    .qa-btn.qa-evolve { background: #2a1240; border-color: #7a3aa8; color: #c49bff; }
-    .qa-btn.qa-risk   { background: #3a2c0a; border-color: #c9a227; color: #f7c948; }
-    .qa-btn.qa-regime { background: #0a3036; border-color: #2a8c8c; color: #69d6cd; }
-    .qa-btn.qa-readiness { background: #1c2840; border-color: #4a90e2; color: #6bb6ff; }
-    .qa-btn.qa-rebalance { background: #2a1a3a; border-color: #b370c9; color: #d59ce8; }
-    .qa-btn.qa-config    { background: #21282e; border-color: #6c757d; color: #adb5bd; }
-    .qa-spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: qa-spin 0.7s linear infinite; vertical-align: -1px; margin-right: 6px; }
+    /* ── Quick Actions — operational controls (the only place where ── */
+    /*    semantic colors become CTA backgrounds; everywhere else      */
+    /*    semantic colors are reserved for data) ─────────────────── */
+    .qa-bar { display: flex; flex-wrap: wrap; gap: 8px; }
+    .qa-btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-family: var(--sans);
+      font-size: 13px;
+      font-weight: 500;
+      height: 36px; padding: 0 14px;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-button);
+      background: var(--bg-inset);
+      color: var(--text-primary);
+      cursor: pointer;
+      transition: background 120ms ease, border-color 120ms ease, filter 120ms ease;
+    }
+    .qa-btn:hover:not(:disabled) { background: var(--bg-overlay); border-color: rgba(255,255,255,0.22); }
+    .qa-btn:disabled { opacity: 0.4; cursor: progress; }
+
+    /* Pause = solid warning. Resume = solid up. */
+    .qa-btn.qa-pause  { background: var(--warning); color: #1d1300; border-color: var(--warning); font-weight: 600; }
+    .qa-btn.qa-pause:hover { filter: brightness(1.08); }
+    .qa-btn.qa-resume { background: var(--up); color: #06150b; border-color: var(--up); font-weight: 600; }
+    .qa-btn.qa-resume:hover { filter: brightness(1.08); }
+
+    .qa-spinner {
+      display: inline-block; width: 9px; height: 9px;
+      border: 1.5px solid currentColor; border-right-color: transparent;
+      border-radius: 50%;
+      animation: qa-spin 0.7s linear infinite;
+    }
     @keyframes qa-spin { to { transform: rotate(360deg); } }
-    .qa-result { margin-top: 14px; padding: 12px 14px; background: #060a1c; border: 1px solid #1f2748; border-radius: 8px; max-height: 0; opacity: 0; overflow: hidden; transition: max-height 250ms ease, opacity 250ms ease; }
-    .qa-result.open { max-height: 600px; opacity: 1; padding: 12px 14px; }
-    .qa-result pre { margin: 6px 0 0; font: 12px/1.4 'JetBrains Mono', 'Menlo', monospace; color: #e8ecf8; white-space: pre-wrap; word-break: break-word; }
+    .qa-result {
+      margin-top: 14px; padding: 0 16px;
+      background: var(--bg-inset);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-input);
+      max-height: 0; opacity: 0; overflow: hidden;
+      transition: max-height 200ms ease, opacity 200ms ease, padding 200ms ease;
+    }
+    .qa-result.open { max-height: 600px; opacity: 1; padding: 14px 16px; }
+    .qa-result pre {
+      margin: 6px 0 0;
+      font: 12px/1.55 var(--mono);
+      color: var(--text-primary);
+      white-space: pre-wrap; word-break: break-word;
+    }
 
-    /* Slack-styled card for the daily-report preview */
-    .slack-card { background: #1a1d21; border-left: 4px solid #007a5a; border-radius: 4px; padding: 14px 16px; font: 14px/1.45 -apple-system, system-ui, "Segoe UI", sans-serif; color: #d1d2d3; }
+    /* ── Slack preview — match real Slack dark mode chrome ─────── */
+    .slack-card {
+      background: #1a1d21; border-left: 4px solid #007a5a;
+      border-radius: 4px; padding: 14px 16px;
+      font: 14px/1.45 -apple-system, system-ui, "Segoe UI", sans-serif;
+      color: #d1d2d3;
+    }
     .slack-card .slack-author { font-weight: 700; color: #e8e8e8; margin-bottom: 6px; }
     .slack-card .slack-block-header { font-size: 16px; font-weight: 700; color: #fff; margin: 6px 0; }
     .slack-card .slack-fields { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px 16px; margin: 6px 0; }
     .slack-card .slack-field strong { color: #fff; }
     .slack-card .slack-context { font-size: 12px; color: #8d8d8d; margin-top: 8px; padding-top: 8px; border-top: 1px solid #2a2c30; }
     .slack-card .slack-divider { height: 1px; background: #2a2c30; margin: 8px 0; }
-    .slack-card .slack-mono { font-family: 'JetBrains Mono', 'Menlo', monospace; font-variant-numeric: tabular-nums; }
+    .slack-card .slack-mono { font-family: var(--mono); }
 
-    /* Explainability cards */
-    .exp-card { padding: 12px 14px; background: #060a1c; border: 1px solid #1f2748; border-radius: 8px; margin-bottom: 10px; }
-    .exp-card[data-kind="entered"] { border-left: 3px solid #4cc38a; }
-    .exp-card[data-kind="blocked"] { border-left: 3px solid #c9a227; }
-    .exp-card .exp-line { display: flex; justify-content: space-between; padding: 2px 0; font-size: 13px; }
-    .exp-card .exp-line .label { opacity: 0.75; min-width: 110px; }
-    .exp-card .exp-line .value { font-variant-numeric: tabular-nums; }
-    .exp-card .exp-decision { margin-top: 8px; padding-top: 8px; border-top: 1px dashed #1f2748; font-weight: 600; }
+    /* ── Explainability ─────────────────────────────────────────── */
+    .exp-card {
+      padding: 14px 16px;
+      background: var(--bg-inset);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-input);
+      margin-bottom: 10px;
+      font-family: var(--sans);
+    }
+    .exp-card[data-kind="entered"] { border-left: 2px solid var(--up); }
+    .exp-card[data-kind="blocked"] { border-left: 2px solid var(--warning); }
+    .exp-card .exp-line { display: flex; justify-content: space-between; padding: 3px 0; font-size: 13px; }
+    .exp-card .exp-line .label {
+      color: var(--text-muted); min-width: 110px;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .exp-card .exp-line .value { font-family: var(--mono); font-weight: 500; }
+    .exp-card .exp-decision {
+      margin-top: 10px; padding-top: 10px;
+      border-top: 1px solid var(--border-subtle);
+      font-weight: 600;
+      font-size: 13px;
+    }
 
-    /* Sparkline cards — extra rows for regime band + sentiment line */
-    .spark-regime-bar { display: flex; height: 10px; border-radius: 2px; overflow: hidden; margin-top: 4px; }
+    /* ── Sparklines grid ────────────────────────────────────────── */
+    #sparklines {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 8px;
+    }
+    #sparklines > div {
+      padding: 14px 16px;
+      background: var(--bg-inset);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-input);
+      transition: background 120ms ease;
+    }
+    #sparklines > div:hover { background: var(--bg-card-hover); }
+
+    .spark-regime-bar {
+      display: flex; height: 4px;
+      border-radius: 999px;
+      overflow: hidden;
+      margin-top: 8px;
+      background: var(--bg-page);
+    }
     .spark-regime-seg { height: 100%; }
-    .spark-regime-seg.regime-trending_up    { background: #4cc38a; }
-    .spark-regime-seg.regime-trending_down  { background: #c0392b; }
-    .spark-regime-seg.regime-mean_reverting { background: #4a90e2; }
-    .spark-regime-seg.regime-high_volatility { background: #c9a227; }
-    .spark-regime-seg.regime-unknown        { background: #555; }
-    .spark-sentiment-canvas { width: 100%; height: 26px; display: block; margin-top: 4px; }
+    .spark-regime-seg.regime-trending_up    { background: var(--up); }
+    .spark-regime-seg.regime-trending_down  { background: var(--down); }
+    .spark-regime-seg.regime-mean_reverting { background: var(--warning); }
+    .spark-regime-seg.regime-high_volatility{ background: var(--accent); }
+    .spark-regime-seg.regime-unknown        { background: var(--text-disabled); }
+    .spark-sentiment-canvas { width: 100%; height: 26px; display: block; margin-top: 6px; }
 
-    /* MCP Console */
-    #mcp-output { color: #e8ecf8; }
-    .mcp-history-row { font: 11px/1.3 'JetBrains Mono', 'Menlo', monospace; padding: 4px 8px; background: #060a1c; border-radius: 4px; cursor: pointer; }
-    .mcp-history-row:hover { background: #0f1530; }
-    .mcp-history-row .muted { opacity: 0.6; margin-left: 6px; }
+    /* ── Regime params · How-it-works panel ───────────────────── */
+    .param-help {
+      margin: 0 0 16px 0;
+      background: var(--bg-inset);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-input);
+      overflow: hidden;
+    }
+    .param-help > summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 12px 16px;
+      display: flex; align-items: center; gap: 10px;
+      font-size: 13px; font-weight: 600;
+      color: var(--text-primary);
+      transition: background 120ms ease;
+    }
+    .param-help > summary::-webkit-details-marker { display: none; }
+    .param-help > summary::before {
+      content: "▸";
+      color: var(--text-muted);
+      font-size: 11px;
+      transition: transform 120ms ease;
+      flex-shrink: 0;
+    }
+    .param-help[open] > summary::before { transform: rotate(90deg); }
+    .param-help > summary:hover { background: var(--bg-card-hover); }
+    .param-help > summary .ph-tag {
+      margin-left: auto;
+      font-size: 11px; font-weight: 500;
+      color: var(--text-muted);
+      letter-spacing: 0.04em;
+    }
+    .param-help-body {
+      padding: 4px 18px 18px;
+      border-top: 1px solid var(--border-subtle);
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--text-secondary);
+    }
+    .param-help-body h4 {
+      font-family: var(--sans);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin: 18px 0 10px;
+    }
+    .param-help-body h4:first-child { margin-top: 14px; }
+    .param-help-body p { margin: 0 0 10px; }
+    .param-help-body code, .param-help-body kbd {
+      font-family: var(--mono);
+      font-size: 12px;
+      padding: 1px 5px;
+      background: var(--bg-page);
+      border: 1px solid var(--border-subtle);
+      border-radius: 3px;
+      color: var(--text-primary);
+    }
+    .param-help-body dl {
+      display: grid;
+      grid-template-columns: 200px 1fr;
+      gap: 6px 18px;
+      margin: 0 0 6px;
+    }
+    .param-help-body dt {
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-primary);
+      padding-top: 1px;
+    }
+    .param-help-body dd {
+      margin: 0;
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+    .param-help-body dd strong { color: var(--text-primary); font-weight: 600; }
+    .regime-tag {
+      display: inline-block;
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 600;
+      padding: 1px 7px;
+      border-radius: 3px;
+      letter-spacing: 0;
+      vertical-align: 1px;
+    }
+    .regime-tag-up   { color: var(--up);      background: var(--up-bg);      border: 1px solid var(--up-border); }
+    .regime-tag-down { color: var(--down);    background: var(--down-bg);    border: 1px solid var(--down-border); }
+    .regime-tag-mr   { color: var(--warning); background: var(--warning-bg); border: 1px solid var(--warning-border); }
+    .regime-tag-hv   { color: var(--accent);  background: var(--accent-bg);  border: 1px solid var(--accent-border); }
+    .regime-tag-unk  { color: var(--text-muted); background: var(--bg-page); border: 1px solid var(--border-subtle); }
+    .param-help-tuning {
+      margin: 14px 0 0;
+      padding: 12px 14px;
+      background: var(--bg-page);
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      counter-reset: step;
+    }
+    .param-help-tuning ol { margin: 0; padding-left: 24px; }
+    .param-help-tuning li { margin: 4px 0; font-size: 12px; }
+    .param-help-warning {
+      margin-top: 12px;
+      padding: 10px 14px;
+      background: var(--warning-bg);
+      border-left: 3px solid var(--warning);
+      border-radius: 4px;
+      font-size: 12px;
+      color: var(--text-primary);
+    }
+
+    /* ── MCP Console ───────────────────────────────────────────── */
+    #mcp-output { color: var(--text-primary); }
+    .mcp-history-row {
+      font: 12px/1.4 var(--mono);
+      padding: 8px 10px;
+      background: var(--bg-inset);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-input);
+      cursor: pointer;
+      transition: background 120ms ease;
+    }
+    .mcp-history-row:hover { background: var(--bg-card-hover); }
+    .mcp-history-row .muted { color: var(--text-muted); margin-left: 6px; }
   </style>
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">🎛️ Ops</div>
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span><em>Quanta</em></span>
+      <span class="brand-sub">Ops</span>
+    </div>
     <div class="controls">
-      <a href="/" class="mode-pill" style="text-decoration:none;">📈 Charts</a>
+      <a href="/" class="mode-pill" style="text-decoration:none;">Charts</a>
       <span id="last-refresh" class="mode-pill" title="Last refresh">— —</span>
     </div>
   </header>
 
+  <!-- ── KPI strip (under header, sticky-adjacent) ─────────────── -->
+  <section class="stat-strip" aria-label="Live KPIs">
+    <div>
+      <div class="stat-label">Daily P&amp;L · UTC</div>
+      <div class="stat-value" id="stat-pnl" data-flash>—</div>
+    </div>
+    <div>
+      <div class="stat-label">Open positions</div>
+      <div class="stat-value" id="stat-open" data-flash>—</div>
+    </div>
+    <div>
+      <div class="stat-label">30-day drawdown</div>
+      <div class="stat-value" id="stat-dd" data-flash>—</div>
+    </div>
+    <div>
+      <div class="stat-label">Active regime</div>
+      <div class="stat-value" id="stat-regime" data-flash>—</div>
+    </div>
+    <div>
+      <div class="stat-label">Bot state</div>
+      <div class="stat-value" id="stat-state" data-flash>—</div>
+    </div>
+  </section>
+
   <main>
     <div class="ops-grid">
 
-      <!-- ─── HERO: regime + sentiment ─────────────────────────────────── -->
+      <!-- ── HERO STRIP — Market regime · Bot status · Clock ──── -->
       <section class="ops-card hero" id="hero" data-regime="" data-status="ok">
-        <h1 id="hero-regime">Loading regime…</h1>
-        <div class="meta" id="hero-meta">—</div>
-        <div id="warmup-banner" style="display:none;margin-top:12px;padding:10px 14px;background:#3a2c0a;border:1px solid #c9a227;border-radius:6px;color:#f7c948;font-size:13px;line-height:1.5;"></div>
+        <div class="hero-slot">
+          <div class="hero-eyebrow">Market regime <span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0;">— this is what the market is doing, not the bot</span></div>
+          <h1 id="hero-regime" class="hero-headline">Loading…</h1>
+          <div class="hero-meta" id="hero-meta">—</div>
+        </div>
+        <div class="hero-slot hero-bot">
+          <div class="hero-eyebrow">Bot status</div>
+          <div class="hero-bot-line">
+            <span class="hero-bot-dot" id="hero-bot-dot"></span>
+            <span class="hero-bot-name" id="hero-bot-state">—</span>
+          </div>
+          <div class="hero-bot-meta">
+            <span id="hero-bot-mode" class="mode-pill">—</span>
+            <span class="muted" style="font-size:12px;font-family:var(--mono);"><span id="hero-bot-open">—</span> open</span>
+          </div>
+        </div>
+        <div class="hero-slot hero-clock">
+          <div class="hero-eyebrow">System time · UTC</div>
+          <div class="hero-clock-time" id="hero-clock-time">—— : —— : ——</div>
+          <div class="hero-clock-date" id="hero-clock-date">—</div>
+        </div>
       </section>
 
-      <!-- ─── Services ────────────────────────────────────────────────── -->
+      <div id="warmup-banner" style="display:none;"></div>
+
+      <!-- ── Services ──────────────────────────────────────────── -->
       <section class="ops-card small-card" id="card-services" data-status="ok">
         <div class="card-head">
-          <h3>Services</h3>
+          <h3 data-num="01">Services</h3>
           <span class="age" id="services-age">—</span>
         </div>
         <div id="services-body">Loading…</div>
       </section>
 
-      <!-- ─── Training ────────────────────────────────────────────────── -->
+      <!-- ── Training ──────────────────────────────────────────── -->
       <section class="ops-card small-card" id="card-training" data-status="ok">
         <div class="card-head">
-          <h3>Training</h3>
+          <h3 data-num="02">Training</h3>
           <span class="age" id="training-age">—</span>
         </div>
         <div id="training-body">Loading…</div>
       </section>
 
-      <!-- ─── MCP ─────────────────────────────────────────────────────── -->
+      <!-- ── MCP ──────────────────────────────────────────────── -->
       <section class="ops-card small-card" id="card-mcp" data-status="ok">
         <div class="card-head">
-          <h3>MCP wire</h3>
+          <h3 data-num="03">MCP wire</h3>
           <span class="age" id="mcp-age">—</span>
         </div>
         <div id="mcp-body">Loading…</div>
       </section>
 
-      <!-- ─── Per-pair sparklines (5m close prices, last 24h) ────────── -->
+      <!-- ── Sparklines ───────────────────────────────────────── -->
       <section class="ops-card wide-card" id="card-sparklines" data-status="ok">
         <div class="card-head">
-          <h3>Pair sparklines · <span class="muted" style="font-size:11px;">5m closes, last 24h · refreshes every 60s</span></h3>
+          <h3 data-num="04">Pair telemetry · 5m closes · trailing 24h</h3>
+          <span class="age">refreshes 60s</span>
         </div>
-        <div id="sparklines" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;">
-          <div class="muted" style="grid-column:1/-1;font-size:12px;">Loading…</div>
+        <div id="sparklines">
+          <div class="muted" style="grid-column:1/-1;font-size:13px;padding:14px 16px;">Loading…</div>
         </div>
       </section>
 
-      <!-- ─── Trades + risk ───────────────────────────────────────────── -->
+      <!-- ── Trades + risk ─────────────────────────────────────── -->
       <section class="ops-card wide-card" id="card-trades" data-status="ok">
         <div class="card-head">
-          <h3>Trades + risk</h3>
+          <h3 data-num="05">Trades &amp; risk</h3>
           <span class="age" id="trades-age">—</span>
         </div>
         <div id="trades-body">Loading…</div>
       </section>
 
-      <!-- ─── Regime parameters editor ────────────────────────────────── -->
+      <!-- ── Regime parameters editor ──────────────────────────── -->
       <section class="ops-card wide-card" id="card-regime-params" data-status="ok">
         <div class="card-head">
-          <h3>Regime parameters · <span class="muted" style="font-size:11px;">edits write config.json (atomic + backed up) and reload freqtrade</span></h3>
+          <h3 data-num="06">Regime parameters</h3>
           <span class="age" id="regime-params-age">—</span>
         </div>
+        <p style="font-size:12px;margin:0 0 14px;color:var(--text-muted);">Edits write config.json (atomic + backed up) and reload freqtrade.</p>
+
+        <details class="param-help">
+          <summary>How these parameters work — read before changing values<span class="ph-tag">decision guide</span></summary>
+          <div class="param-help-body">
+
+            <h4>The 5 market regimes</h4>
+            <p>A 4-state HMM classifies each candle into one of these regimes per pair. The strategy adapts entries, exits, sizing, and trailing-stop behaviour to the active regime.</p>
+            <dl>
+              <dt><span class="regime-tag regime-tag-up">trending_up</span></dt>
+              <dd>Sustained uptrend. <strong>Strategy:</strong> loosen entries, hold longer, activate trailing stop on winners.</dd>
+              <dt><span class="regime-tag regime-tag-down">trending_down</span></dt>
+              <dd>Sustained downtrend. <strong>Strategy:</strong> longs are <strong>hard-blocked</strong> — bot waits for regime change. The <code>entry_delta</code> here is belt-and-suspenders.</dd>
+              <dt><span class="regime-tag regime-tag-mr">mean_reverting</span></dt>
+              <dd>Range-bound, oscillating market. <strong>Strategy:</strong> quick scalps with tight take-profit (<code>mean_rev_take_profit</code>).</dd>
+              <dt><span class="regime-tag regime-tag-hv">high_volatility</span></dt>
+              <dd>Whippy, hard-to-predict. <strong>Strategy:</strong> shrink position size (<code>high_vol_stake_factor</code>) and require higher conviction (<code>high_vol_min_confidence</code>).</dd>
+              <dt><span class="regime-tag regime-tag-unk">unknown</span></dt>
+              <dd>HMM uncertain. <strong>Strategy:</strong> conservative defaults — neither blocked nor preferred.</dd>
+            </dl>
+
+            <h4>Entry &amp; exit deltas</h4>
+            <p>These add a per-regime offset to the base thresholds. Base entry = <code>0.62</code> (TFT up-probability needed to fire a long); base exit = <code>0.55</code> (down-probability needed to close).</p>
+            <dl>
+              <dt><code>entry_delta = +0.15</code></dt>
+              <dd>Require <code>up_prob ≥ 0.62 + 0.15 = 0.77</code>. <strong>Harder to enter</strong> in this regime.</dd>
+              <dt><code>entry_delta = −0.05</code></dt>
+              <dd>Require <code>up_prob ≥ 0.62 − 0.05 = 0.57</code>. <strong>Easier to enter</strong>.</dd>
+              <dt><code>entry_delta = blank</code></dt>
+              <dd><strong>Hard-block</strong> — no longs allowed in this regime. Same as setting threshold to ∞.</dd>
+              <dt><code>exit_delta = −0.20</code></dt>
+              <dd>Require <code>down_prob ≥ 0.55 − 0.20 = 0.35</code>. <strong>Faster exits</strong> — close on weaker signals.</dd>
+              <dt><code>exit_delta = +0.05</code></dt>
+              <dd>Require <code>down_prob ≥ 0.60</code>. <strong>Hold longer</strong>, only exit on strong reversal.</dd>
+            </dl>
+
+            <h4>Scalar parameters</h4>
+            <dl>
+              <dt><code>high_vol_stake_factor</code></dt>
+              <dd>In <span class="regime-tag regime-tag-hv">high_volatility</span>, multiply position size by this. Default <code>0.7</code> (30% smaller). Set <code>0.5</code> for half-size, <code>0</code> to skip entries entirely. Lower if drawdowns spike in volatile markets.</dd>
+
+              <dt><code>high_vol_min_confidence</code></dt>
+              <dd>In <span class="regime-tag regime-tag-hv">high_volatility</span>, require <code>up_prob ≥ this</code> on top of the regular threshold. Default <code>0.65</code>. Higher = fewer but higher-conviction trades.</dd>
+
+              <dt><code>mean_rev_take_profit</code></dt>
+              <dd>In <span class="regime-tag regime-tag-mr">mean_reverting</span>, exit immediately when profit reaches this fraction. Default <code>0.012</code> = +1.2%. Lower = quicker scalps; higher = let winners run further.</dd>
+
+              <dt><code>trending_up_trail_trigger</code></dt>
+              <dd>In <span class="regime-tag regime-tag-up">trending_up</span>, when profit exceeds this, activate trailing stop. Default <code>0.025</code> = 2.5%. Lower = trail sooner (lock in smaller wins); higher = wait for bigger wins before trailing.</dd>
+
+              <dt><code>trending_up_trail_distance</code></dt>
+              <dd>Once trailing is active, trail this far below the high-water mark (must be negative). Default <code>−0.02</code> = 2% below peak. More negative (e.g. <code>−0.03</code>) = wider trail, more room for noise; closer to <code>0</code> = tighter trail, gives back less but stops out sooner.</dd>
+
+              <dt><code>tft_min_confidence</code></dt>
+              <dd>TFT model's quantile-spread confidence floor. Default <code>0.35</code>. Below this, no entries fire <em>in any regime</em>. Raise to <code>0.45</code>+ to filter out low-conviction signals at the cost of fewer trades.</dd>
+
+              <dt><code>meta_min_confidence</code></dt>
+              <dd>When the DRL meta-agent (PPO + A2C + DQN ensemble) is active, require this confidence on the <code>meta_signal</code>. Same logic for entries (<code>signal=+1</code>) and exits (<code>signal=−1</code>). Default <code>0.35</code>.</dd>
+            </dl>
+
+            <h4>Recommended tuning order</h4>
+            <div class="param-help-tuning">
+              <ol>
+                <li><strong>Start with defaults</strong> — they're calibrated to work end-to-end.</li>
+                <li><strong>Too many losing entries:</strong> raise <code>tft_min_confidence</code> (+0.05 increments) or <code>meta_min_confidence</code>.</li>
+                <li><strong>No trades firing:</strong> lower <code>tft_min_confidence</code>, then check that no allowed regime has <code>entry_delta = blank</code>.</li>
+                <li><strong>Drawdowns in volatile markets:</strong> drop <code>high_vol_stake_factor</code> to <code>0.4</code>, raise <code>high_vol_min_confidence</code> to <code>0.8</code>.</li>
+                <li><strong>Profits get given back in trends:</strong> tighten <code>trending_up_trail_distance</code> closer to <code>0</code> (e.g. <code>−0.015</code>).</li>
+                <li><strong>Whipsawing in chop:</strong> raise <code>mean_rev_take_profit</code> to <code>0.018</code>+ to ignore tiny moves.</li>
+              </ol>
+            </div>
+
+            <div class="param-help-warning">
+              <strong>Apply changes</strong> writes <code>config.json</code> atomically (with timestamped backup) and triggers a freqtrade reload — the bot keeps running, but new candles will use the updated values. Open trades are <em>not</em> affected mid-flight; only future entries/exits use the new parameters.
+            </div>
+          </div>
+        </details>
+
         <div id="regime-params-body">Loading…</div>
-        <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:12px;">
+        <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:16px;">
           <button class="btn" id="btn-rg-revert">Revert</button>
-          <button class="btn primary" id="btn-rg-apply" disabled>Apply changes…</button>
+          <button class="btn primary" id="btn-rg-apply" disabled>Apply changes</button>
         </div>
       </section>
 
-      <!-- ─── Quick Actions (MCP-routed) ─────────────────────────────── -->
+      <!-- ── Quick actions ─────────────────────────────────────── -->
       <section class="ops-card wide-card" id="card-quick-actions" data-status="ok">
         <div class="card-head">
-          <h3>Quick actions · <span class="muted" style="font-size:11px;">routed through Hermes MCP — auth via HERMES_MCP_KEY for mutating tools</span></h3>
+          <h3 data-num="07">Quick actions</h3>
+          <span class="age">HERMES_MCP_KEY required for mutating tools</span>
         </div>
-        <div style="display:flex;flex-wrap:wrap;gap:10px;">
-          <button class="btn qa-btn qa-pause"   data-tool="pause_trading"        data-confirm="Are you sure? This will stop all trading.">⏸ Pause trading</button>
-          <button class="btn qa-btn qa-resume"  data-tool="resume_trading"       data-confirm="This will enable live/paper trading. Confirm twice." data-double="1">▶ Resume trading</button>
-          <button class="btn qa-btn qa-evolve"  data-tool="trigger_evolution_cycle">🧬 Trigger EPT evolution</button>
-          <button class="btn qa-btn qa-risk"    data-tool="get_risk_status">🛡 Risk status</button>
-          <button class="btn qa-btn qa-regime"  data-tool="get_current_regime">🧭 Regime check</button>
-          <!-- Inline-action buttons (not MCP tools — local /api/ops endpoints) -->
-          <button class="btn qa-btn qa-readiness"  data-action="readiness"           >✅ Validate readiness</button>
-          <button class="btn qa-btn qa-readiness"  data-action="readiness-ft"        >🚀 Readiness · fast-track</button>
-          <button class="btn qa-btn qa-rebalance"  data-action="rebalance-dry"       >⚖ Rebalance · dry-run</button>
-          <button class="btn qa-btn qa-config"     data-action="config-overview"     >🔍 Config overview</button>
+        <div class="qa-bar">
+          <button class="btn qa-btn qa-pause"   data-tool="pause_trading"  data-confirm="Stop all trading immediately?">Pause trading</button>
+          <button class="btn qa-btn qa-resume"  data-tool="resume_trading" data-confirm="Resume trading. Confirm twice." data-double="1">Resume trading</button>
+          <button class="btn qa-btn qa-evolve"  data-tool="trigger_evolution_cycle">Trigger evolution</button>
+          <button class="btn qa-btn qa-risk"    data-tool="get_risk_status">Risk status</button>
+          <button class="btn qa-btn qa-regime"  data-tool="get_current_regime">Regime check</button>
+          <button class="btn qa-btn qa-readiness"  data-action="readiness">Validate readiness</button>
+          <button class="btn qa-btn qa-readiness"  data-action="readiness-ft">Fast-track readiness</button>
+          <button class="btn qa-btn qa-rebalance"  data-action="rebalance-dry">Rebalance · dry-run</button>
+          <button class="btn qa-btn qa-config"     data-action="config-overview">Config overview</button>
         </div>
         <div id="qa-result" class="qa-result" style="display:none;"></div>
       </section>
 
-      <!-- ─── Slack daily-report preview ─────────────────────────────── -->
+      <!-- ── Slack preview ─────────────────────────────────────── -->
       <section class="ops-card wide-card" id="card-slack-preview" data-status="ok">
         <div class="card-head">
-          <h3>Slack preview · <span class="muted" style="font-size:11px;">live render of the next daily P&amp;L report (fires 00:00 UTC) · auto-refresh 60s</span></h3>
+          <h3 data-num="08">Slack preview · next daily report</h3>
           <span class="age" id="slack-preview-age">—</span>
         </div>
         <div id="slack-preview-body">Loading…</div>
       </section>
 
-      <!-- ─── Explainability — last N decisions for the active pair ──── -->
+      <!-- ── Explainability ────────────────────────────────────── -->
       <section class="ops-card wide-card" id="card-explainability" data-status="ok">
         <div class="card-head">
-          <h3>
-            Why this trade fired or didn't ·
-            <select id="exp-pair-select" style="background:#060a1c;color:#e8ecf8;border:1px solid #2c386a;border-radius:4px;padding:2px 6px;font:inherit;font-size:12px;"></select>
-          </h3>
+          <h3 data-num="09">Decision audit</h3>
           <span class="age" id="exp-age">—</span>
+        </div>
+        <div style="margin-bottom:12px;">
+          <select id="exp-pair-select"></select>
         </div>
         <div id="exp-body">Pick a pair…</div>
       </section>
 
-      <!-- ─── MCP Tool Console ──────────────────────────────────────── -->
+      <!-- ── MCP Tool Console ──────────────────────────────────── -->
       <section class="ops-card wide-card" id="card-mcp-console" data-status="ok">
         <div class="card-head">
-          <h3>MCP tool console · <span class="muted" style="font-size:11px;">call any of the 15 tools. Mutating tools require <code>HERMES_MCP_KEY</code>.</span></h3>
+          <h3 data-num="10">MCP tool console</h3>
+          <span class="age">15 tools · mutating tools require HERMES_MCP_KEY</span>
         </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;">
-          <div style="flex:1 1 260px;min-width:200px;">
-            <label class="muted" style="font-size:11px;">tool</label>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">
+          <div style="flex:1 1 280px;min-width:200px;">
+            <label style="font-size:11px;font-weight:500;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em;display:block;margin-bottom:6px;">Tool</label>
             <input id="mcp-tool-input" type="text" list="mcp-tool-list" autocomplete="off"
                    placeholder="start typing a tool name…"
-                   style="width:100%;padding:6px 8px;background:#060a1c;color:#e8ecf8;border:1px solid #2c386a;border-radius:4px;font:inherit;" />
+                   style="width:100%;height:36px;" />
             <datalist id="mcp-tool-list"></datalist>
-            <div id="mcp-tool-doc" class="muted" style="font-size:11px;margin-top:4px;min-height:16px;"></div>
+            <div id="mcp-tool-doc" class="muted" style="font-size:12px;margin-top:6px;min-height:14px;"></div>
           </div>
           <div id="mcp-params" style="flex:1 1 260px;min-width:200px;display:flex;flex-direction:column;gap:6px;"></div>
           <button id="mcp-execute" class="btn primary" disabled>Execute</button>
         </div>
-        <pre id="mcp-output" style="margin-top:10px;background:#060a1c;padding:10px;border-radius:6px;border:1px solid #1f2748;max-height:240px;overflow:auto;font-size:11px;font-family:'JetBrains Mono','Menlo',monospace;display:none;"></pre>
-        <details id="mcp-history-wrap" style="margin-top:8px;display:none;">
-          <summary class="muted" style="cursor:pointer;font-size:12px;">Last 10 calls…</summary>
-          <div id="mcp-history" style="display:flex;flex-direction:column;gap:4px;margin-top:6px;"></div>
+        <pre id="mcp-output" style="margin-top:12px;background:var(--bg-inset);padding:12px;border:1px solid var(--border-subtle);border-radius:var(--radius-input);max-height:240px;overflow:auto;font-size:12px;font-family:var(--mono);display:none;color:var(--text-primary);"></pre>
+        <details id="mcp-history-wrap" style="margin-top:12px;display:none;">
+          <summary style="cursor:pointer;font-size:11px;font-weight:500;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em;">Last 10 calls</summary>
+          <div id="mcp-history" style="display:flex;flex-direction:column;gap:6px;margin-top:10px;"></div>
         </details>
       </section>
 
     </div>
   </main>
 
-  <script src="/static/js/ops.js" defer></script>
+  <footer class="ticker" aria-hidden="true">
+    <div class="ticker-track"></div>
+  </footer>
+
+  <script>
+    /* Hero clock */
+    (function () {
+      const t = document.getElementById("hero-clock-time");
+      const d = document.getElementById("hero-clock-date");
+      if (!t || !d) return;
+      const MONTHS = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
+      function tick() {
+        const now = new Date();
+        const hh = String(now.getUTCHours()).padStart(2, "0");
+        const mm = String(now.getUTCMinutes()).padStart(2, "0");
+        const ss = String(now.getUTCSeconds()).padStart(2, "0");
+        t.textContent = `${hh}:${mm}:${ss}`;
+        d.textContent = `${MONTHS[now.getUTCMonth()]} ${String(now.getUTCDate()).padStart(2,"0")} · ${now.getUTCFullYear()}`;
+      }
+      tick(); setInterval(tick, 1000);
+    })();
+  </script>
+  <script src="/static/js/effects.js?v=20260509-5" defer></script>
+  <script src="/static/js/ops.js?v=20260509-5" defer></script>
 </body>
 </html>

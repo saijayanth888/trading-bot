@@ -95,9 +95,17 @@ async function refreshRegime() {
   const d = env.data || {};
   const arrow = REGIME_ARROW[d.current] || "·";
   document.getElementById("hero").dataset.regime = d.current || "";
-  document.getElementById("hero-regime").innerHTML =
-    "REGIME: <strong>" + esc((d.current || "—").replace("_", " ")) + "</strong> " +
-    "<span class=\"arrow\">" + esc(arrow) + "</span>";
+  const heroEl = document.getElementById("hero-regime");
+  while (heroEl.firstChild) heroEl.removeChild(heroEl.firstChild);
+  heroEl.appendChild(document.createTextNode("Market: "));
+  const strong = document.createElement("strong");
+  strong.textContent = (d.current || "—").replace("_", " ");
+  heroEl.appendChild(strong);
+  heroEl.appendChild(document.createTextNode(" "));
+  const arrowSpan = document.createElement("span");
+  arrowSpan.className = "arrow";
+  arrowSpan.textContent = arrow;
+  heroEl.appendChild(arrowSpan);
   const dur = d.duration_hours ? `${Number(d.duration_hours).toFixed(1)}h` : "—";
   const prob = d.probability ? Number(d.probability).toFixed(2) : "—";
   document.getElementById("hero-meta").textContent =

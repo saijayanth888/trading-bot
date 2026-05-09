@@ -39,6 +39,46 @@ SELECT create_hypertable('whale_transactions', 'ts', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS ix_whale_symbol_ts ON whale_transactions(symbol, ts DESC);
 
 -- ---------------------------------------------------------------------------
+-- Derivatives features (per-pair, free public APIs only).
+-- Replaces dead CryptoQuant netflow + Whale Alert with derivatives-side
+-- positioning: funding rate, open interest, taker buy/sell volume,
+-- long/short account ratio. All sources are no-key, US-accessible, regulated
+-- exchanges or DEX indexers (OKX, dYdX, Coinbase International, Kraken Futures).
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS derivatives_features (
+    pair                TEXT             NOT NULL,    -- "BTC/USD" form
+    ts                  TIMESTAMPTZ      NOT NULL,
+    funding_rate        DOUBLE PRECISION,             -- raw, e.g. 0.0001
+    next_funding_rate   DOUBLE PRECISION,             -- predicted next
+    open_interest_usd   DOUBLE PRECISION,             -- USD notional
+    long_short_ratio    DOUBLE PRECISION,             -- accounts; >1 = more longs
+    taker_buy_vol_usd   DOUBLE PRECISION,             -- 5m bucket
+    taker_sell_vol_usd  DOUBLE PRECISION,             -- 5m bucket
+    source              TEXT             NOT NULL,    -- 'okx' | 'dydx' | ...
+    PRIMARY KEY (pair, source, ts)
+);
+SELECT create_hypertable('derivatives_features', 'ts', if_not_exists => TRUE);
+CREATE INDEX IF NOT EXISTS ix_deriv_pair_ts ON derivatives_features(pair, ts DESC);
+
+-- ---------------------------------------------------------------------------
+-- Macro features (global, single row per poll, all pairs share).
+-- Sources: DefiLlama (stablecoin mcap), alternative.me (fear/greed),
+-- CoinGecko (BTC dominance), bitcoin-data.com (BTC MVRV), mempool.space.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS macro_features (
+    ts                          TIMESTAMPTZ PRIMARY KEY,
+    stablecoin_mcap_usd         DOUBLE PRECISION,    -- total USDT+USDC+...
+    stablecoin_mcap_chg_24h     DOUBLE PRECISION,    -- delta vs 24h ago, USD
+    fear_greed_index            DOUBLE PRECISION,    -- 0..100
+    btc_dominance_pct           DOUBLE PRECISION,    -- 0..100
+    btc_mvrv                    DOUBLE PRECISION,    -- BTC only; ~1.0 neutral
+    btc_mempool_fastest_fee     DOUBLE PRECISION     -- sat/vB
+);
+SELECT create_hypertable('macro_features', 'ts', if_not_exists => TRUE);
+
+-- ---------------------------------------------------------------------------
 -- Sentiment log (broad-market, single row per poll)
 -- ---------------------------------------------------------------------------
 

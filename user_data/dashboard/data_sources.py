@@ -402,8 +402,13 @@ def regime_segments_from_df(df: pd.DataFrame, time_col: str = "date") -> list[di
     return out
 
 
-def latest_state_from_df(df: pd.DataFrame) -> dict[str, Any]:
-    """Pull last-row regime / sentiment / on-chain / TFT signal for the sidebar."""
+def latest_state_from_df(df: pd.DataFrame, pair: str | None = None) -> dict[str, Any]:
+    """Pull last-row regime / sentiment / on-chain / TFT signal for the sidebar.
+
+    On-chain values are now read from the new free pipeline's DB tables
+    (derivatives_features, macro_features) since freqtrade's pair_candles
+    endpoint does not publish the FreqAI %- feature columns to clients.
+    """
     out: dict[str, Any] = {}
     if df is None or df.empty:
         return out
@@ -431,4 +436,68 @@ def latest_state_from_df(df: pd.DataFrame) -> dict[str, Any]:
                 out[dst] = float(v) if not isinstance(v, str) else str(v)
             except Exception:
                 out[dst] = str(v)
+
+    # Enrich with the new free on-chain pipeline (DB-direct).
+    # We map:
+    #   onchain_netflow_z   ← OKX funding rate × 10000  (basis points; readable)
+    #   onchain_mvrv        ← BTC MVRV (only when pair=BTC/USD; else neutral 1.0)
+    #   onchain_whale_count ← log1p(taker_buy_vol) over the last hour
+    if pair and _HAVE_PG:
+        try:
+            with psycopg.connect(_resolve_dsn(), connect_timeout=2,
+                                 row_factory=dict_row) as cn, cn.cursor() as cur:
+                cur.execute(
+                    "SELECT funding_rate, taker_buy_vol_usd, taker_sell_vol_usd "
+                    "FROM derivatives_features "
+                    "WHERE pair=%s ORDER BY ts DESC LIMIT 1",
+                    (pair,),
+                )
+                deriv = cur.fetchone()
+                cur.execute(
+                    "SELECT btc_mvrv FROM macro_features ORDER BY ts DESC LIMIT 1"
+                )
+                macro = cur.fetchone()
+        except Exception as exc:
+            logger.debug("on-chain DB enrich failed: %s", exc)
+            deriv = None
+            macro = None
+        if deriv:
+            fr = deriv.get("funding_rate")
+            buy = deriv.get("taker_buy_vol_usd") or 0.0
+            sell = deriv.get("taker_sell_vol_usd") or 0.0
+            if fr is not None:
+                # Express funding as basis points × 100 for readability
+                # (e.g. 0.0001 → 1.0). Fits the existing "Net-flow z" column
+                # which the operator already reads as a positioning proxy.
+                out["onchain_netflow_z"] = float(fr) * 10000.0
+            if buy + sell > 0:
+                import math
+                out["onchain_whale_count"] = math.log1p(buy)
+        if macro and pair.split("/")[0].upper() == "BTC":
+            mvrv = macro.get("btc_mvrv")
+            if mvrv is not None:
+                out["onchain_mvrv"] = float(mvrv)
+        elif "onchain_mvrv" not in out:
+            out["onchain_mvrv"] = 1.0  # neutral for non-BTC pairs
+
+    # Enrich sentiment from sentiment_log (same pattern — strategy doesn't
+    # publish %-sentiment_* through freqtrade's pair_candles endpoint).
+    if _HAVE_PG and "sentiment_score" not in out:
+        try:
+            with psycopg.connect(_resolve_dsn(), connect_timeout=2,
+                                 row_factory=dict_row) as cn, cn.cursor() as cur:
+                cur.execute(
+                    "SELECT sentiment_score, confidence "
+                    "FROM sentiment_log ORDER BY ts DESC LIMIT 1"
+                )
+                sent = cur.fetchone()
+        except Exception as exc:
+            logger.debug("sentiment DB enrich failed: %s", exc)
+            sent = None
+        if sent:
+            if sent.get("sentiment_score") is not None:
+                out["sentiment_score"] = float(sent["sentiment_score"])
+            if sent.get("confidence") is not None:
+                out["sentiment_confidence"] = float(sent["confidence"])
+
     return out

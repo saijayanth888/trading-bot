@@ -30,6 +30,7 @@ if str(_USER_DATA) not in sys.path:
 try:
     from modules.onchain_signals import (
         FEATURE_COLUMNS as ONCHAIN_FEATURES,
+        configure_sources as configure_onchain_sources,
         get_features as get_onchain_features,
     )
     _ONCHAIN_AVAILABLE = True
@@ -42,6 +43,7 @@ except Exception as exc:
         "%-onchain_whale_volume_1h",
     )
     get_onchain_features = None
+    configure_onchain_sources = None
     _ONCHAIN_AVAILABLE = False
 
 try:
@@ -481,6 +483,17 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         # MonitoringMixin owns Slack/journal/metrics setup. Safe no-op if
         # any of the optional monitoring modules failed to import.
         self._init_monitoring(self.config)
+
+        # On-chain sources block (config.json[onchain_sources]). Per-source
+        # enable/weight flags so the operator can disable a free source from
+        # /ops without redeploy. The strategy's neutral fallbacks (line 111-114
+        # of this file) take over when a source is disabled or returns nothing.
+        if _ONCHAIN_AVAILABLE and configure_onchain_sources is not None:
+            try:
+                configure_onchain_sources(self.config.get("onchain_sources", {}))
+                logger.info("[strategy] onchain_sources configured")
+            except Exception as exc:
+                logger.warning("[strategy] failed to configure onchain_sources: %s", exc)
 
         # Capital-allocation block (config.json[capital_allocation]). Safe
         # default: empty dict → all pair_weights default to 1.0 (no cap),

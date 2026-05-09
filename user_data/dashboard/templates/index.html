@@ -3,16 +3,23 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#0b1020" />
-  <title>Trading bot</title>
-  <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='25' font-size='28'>📈</text></svg>" />
+  <meta name="theme-color" content="#0a0907" />
+  <title>Trading bot — Charts</title>
+  <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='5' fill='%23f4b942'/><circle cx='16' cy='16' r='10' fill='none' stroke='%23f4b942' stroke-width='1' opacity='0.4'/></svg>" />
   <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js" defer></script>
-  <link rel="stylesheet" href="/static/css/app.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="/static/css/app.css?v=20260509-5" />
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">📈 Trading bot</div>
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span><em>Quanta</em></span>
+      <span class="brand-sub">CHARTS · LIVE</span>
+    </div>
     <div class="controls">
+      <a href="/ops" class="mode-pill" style="text-decoration:none;">↗ OPS CONSOLE</a>
       <select id="pair-select" aria-label="Pair">
         {% for p in pairs %}
         <option value="{{ p }}">{{ p }}</option>
@@ -24,12 +31,8 @@
         <option value="15m">15m</option>
         <option value="1h">1h</option>
       </select>
-      <span id="mode-badge" class="mode-pill mode-paper" title="Trading mode">
-        🧪 PAPER
-      </span>
-      <span id="ws-indicator" class="ws-pill ws-off" title="WebSocket status">
-        ◉ offline
-      </span>
+      <span id="mode-badge" class="mode-pill mode-paper" title="Trading mode">PAPER</span>
+      <span id="ws-indicator" class="ws-pill ws-off" title="WebSocket status">offline</span>
     </div>
   </header>
 
@@ -42,30 +45,30 @@
         </div>
         <div id="chart-main" class="chart"></div>
         <div class="legend">
-          <span class="dot dot-bb"></span> Bollinger Bands
-          <span class="dot dot-vol"></span> Volume
+          <span><span class="dot dot-bb"></span> Bollinger Bands</span>
+          <span><span class="dot dot-vol"></span> Volume</span>
         </div>
       </div>
 
       <div class="card sub-card">
-        <div class="card-head"><h3>RSI (14)</h3></div>
+        <div class="card-head"><h3 data-num="01">RSI · 14</h3></div>
         <div id="chart-rsi" class="chart subchart"></div>
       </div>
 
       <div class="card sub-card">
-        <div class="card-head"><h3>MACD (12, 26, 9)</h3></div>
+        <div class="card-head"><h3 data-num="02">MACD · 12/26/9</h3></div>
         <div id="chart-macd" class="chart subchart"></div>
       </div>
 
       <div class="card sub-card">
-        <div class="card-head"><h3>Regime</h3></div>
+        <div class="card-head"><h3 data-num="03">Regime — last 200 candles</h3></div>
         <div id="regime-ribbon" class="regime-ribbon" aria-live="polite"></div>
       </div>
     </section>
 
     <aside class="sidebar" aria-label="Sidebar">
       <div class="card">
-        <h3>Now</h3>
+        <h3 data-num="04">Now</h3>
         <div class="kv"><span>Regime</span><b id="state-regime">—</b></div>
         <div class="meter" title="Regime confidence">
           <div id="meter-regime" class="bar bar-blue"></div>
@@ -79,7 +82,7 @@
         <div class="meter" title="Meta-agent confidence">
           <div id="meter-meta" class="bar bar-green"></div>
         </div>
-        <div class="kv"><span>TFT (up / flat / down)</span><b id="state-tft">—</b></div>
+        <div class="kv"><span>TFT · up / flat / down</span><b id="state-tft">—</b></div>
         <div class="kv"><span>TFT confidence</span><b id="state-tft-conf">—</b></div>
         <div class="meter" title="TFT quantile-spread confidence">
           <div id="meter-tft" class="bar bar-violet"></div>
@@ -87,25 +90,25 @@
       </div>
 
       <div class="card">
-        <h3>On-chain</h3>
+        <h3 data-num="05">On-chain</h3>
         <div class="kv"><span>Net-flow z</span><b id="state-netflow">—</b></div>
         <div class="kv"><span>MVRV</span><b id="state-mvrv">—</b></div>
-        <div class="kv"><span>Whale count (1h)</span><b id="state-whale">—</b></div>
+        <div class="kv"><span>Whale count · 1h</span><b id="state-whale">—</b></div>
       </div>
 
       <div class="card">
-        <h3>Open positions</h3>
+        <h3 data-num="06">Open positions</h3>
         <div id="positions" class="positions"></div>
       </div>
 
       <div class="card">
-        <h3>P&amp;L</h3>
-        <div class="kv"><span>Today (UTC)</span><b id="state-daily-pnl">—</b></div>
+        <h3 data-num="07">Profit &amp; loss</h3>
+        <div class="kv"><span>Today · UTC</span><b id="state-daily-pnl">—</b></div>
         <div id="pnl-history" class="pnl-history"></div>
       </div>
 
       <div class="card">
-        <h3>Champion</h3>
+        <h3 data-num="08">Champion genome</h3>
         <div class="kv"><span>Generation</span><b id="state-gen">—</b></div>
         <div class="kv"><span>Member ID</span><b id="state-champ">—</b></div>
         <div class="kv"><span>Fitness</span><b id="state-champ-fit">—</b></div>
@@ -113,11 +116,15 @@
       </div>
 
       <div class="card">
-        <h3>Recent trades</h3>
+        <h3 data-num="09">Recent trades</h3>
         <div id="recent-trades" class="recent"></div>
       </div>
     </aside>
   </main>
+
+  <footer class="ticker" aria-hidden="true">
+    <div class="ticker-track"></div>
+  </footer>
 
   <script>
     window.DASHBOARD_CONFIG = {
@@ -125,6 +132,7 @@
       wsPushInterval: {{ ws_push_interval }}
     };
   </script>
-  <script src="/static/js/app.js" defer></script>
+  <script src="/static/js/effects.js?v=20260509-5" defer></script>
+  <script src="/static/js/app.js?v=20260509-5" defer></script>
 </body>
 </html>

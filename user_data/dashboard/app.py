@@ -156,7 +156,7 @@ async def api_candles(
     macd_signal = _line_series(df, "macd_signal")
     macd_hist = _hist_series(df, "macd_hist")
     regime = regime_segments_from_df(df)
-    state = latest_state_from_df(df)
+    state = latest_state_from_df(df, pair)
     last_close = float(df["close"].iloc[-1]) if "close" in df.columns else None
     last_time = (
         int(pd.to_datetime(df["date"].iloc[-1], utc=True).timestamp())
@@ -210,7 +210,7 @@ async def _build_state_payload() -> dict[str, Any]:
     df = await candles_task
     status = await status_task
 
-    pair_state = latest_state_from_df(df) if df is not None else {}
+    pair_state = latest_state_from_df(df, pair) if df is not None else {}
     daily_pnl = fetch_daily_pnl()
     recent = fetch_recent_trades(limit=10)
     champion = fetch_champion()
