@@ -122,3 +122,38 @@ CREATE INDEX IF NOT EXISTS ix_trade_journal_opened_at ON trade_journal(opened_at
 CREATE INDEX IF NOT EXISTS ix_trade_journal_pair ON trade_journal(pair, opened_at DESC);
 CREATE INDEX IF NOT EXISTS ix_trade_journal_external_id ON trade_journal(external_id) WHERE external_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_trade_journal_open ON trade_journal(opened_at DESC) WHERE closed_at IS NULL;
+
+-- ── Multi-source news aggregator (Task: expand sentiment sources) ───────
+CREATE TABLE IF NOT EXISTS news_headlines (
+    ts                   TIMESTAMPTZ NOT NULL,
+    source               TEXT NOT NULL,
+    title                TEXT NOT NULL,
+    summary              TEXT,
+    url                  TEXT,
+    pair_mentions        JSONB,
+    community_sentiment  DOUBLE PRECISION,
+    attention_score      DOUBLE PRECISION,
+    PRIMARY KEY (ts, source, title)
+);
+SELECT create_hypertable('news_headlines', 'ts', if_not_exists => TRUE);
+CREATE INDEX IF NOT EXISTS ix_news_headlines_source ON news_headlines(source, ts DESC);
+CREATE INDEX IF NOT EXISTS ix_news_headlines_pair_mentions ON news_headlines USING GIN (pair_mentions jsonb_path_ops);
+
+CREATE TABLE IF NOT EXISTS fear_greed_log (
+    ts             TIMESTAMPTZ PRIMARY KEY,
+    value          INTEGER NOT NULL,
+    classification TEXT NOT NULL,
+    history_7d     JSONB
+);
+SELECT create_hypertable('fear_greed_log', 'ts', if_not_exists => TRUE);
+
+-- Adjacent columns the sentiment_engine adds to sentiment_log so the
+-- multi-source signals are persistent alongside the LLM scores.
+ALTER TABLE sentiment_log
+    ADD COLUMN IF NOT EXISTS fear_greed_value          INTEGER,
+    ADD COLUMN IF NOT EXISTS fear_greed_classification TEXT,
+    ADD COLUMN IF NOT EXISTS community_score_avg       DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS reddit_attention_avg      DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS trending_pairs            JSONB,
+    ADD COLUMN IF NOT EXISTS sources_ok                JSONB,
+    ADD COLUMN IF NOT EXISTS sources_failed            JSONB;

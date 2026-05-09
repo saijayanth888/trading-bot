@@ -17,3 +17,6 @@ aiohttp>=3.9
 # pinned for reference only:
 # torch>=2.4
 
+
+# News aggregator — RSS parsing
+feedparser>=6.0.10

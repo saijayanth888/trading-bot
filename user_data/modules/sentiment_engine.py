@@ -194,6 +194,30 @@ _PERPLEXITY_USER_TEMPLATE = (
 )
 
 
+def _dedup_dicts_by_title(items: list[dict[str, Any]], threshold: float = 0.80) -> list[dict[str, Any]]:
+    """Drop near-duplicate ``items`` by fuzzy title match.
+
+    Used after merging Perplexity's items with the multi-source aggregator's —
+    the same headline often shows up in both. Newer item wins on tie.
+    """
+    import re as _re
+    from difflib import SequenceMatcher as _SM
+    if not items:
+        return []
+    norm = lambda s: _re.sub(r"[^a-z0-9 ]+", " ", str(s or "").lower()).strip()  # noqa: E731
+    kept: list[dict[str, Any]] = []
+    kept_norm: list[str] = []
+    for it in items:
+        n = norm(it.get("title"))
+        if not n:
+            continue
+        if any(_SM(None, n, k).ratio() >= threshold for k in kept_norm):
+            continue
+        kept.append(it)
+        kept_norm.append(n)
+    return kept
+
+
 def _ts_to_iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(timespec="seconds")
 
@@ -470,10 +494,45 @@ def _coerce_result(data: dict) -> dict:
 
 
 async def _poll_once() -> dict | None:
+    # Multi-source news aggregation: kick off the 6-source aggregator alongside
+    # the Perplexity fetcher so we have 7 channels to dedup + reason over.
+    from . import news_aggregator as _news
+    aggregator = _news.aggregator()
+
     async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
-        items = await _fetch_perplexity_news(session)
+        # Run Perplexity + 6-source aggregator concurrently.
+        perp_task = asyncio.create_task(_fetch_perplexity_news(session))
+        agg_task  = asyncio.create_task(aggregator.poll_all_sources())
+        perp_items, agg_result = await asyncio.gather(
+            perp_task, agg_task, return_exceptions=False,
+        )
+
+        # Convert aggregator NewsItem instances into the LLM-prompt shape and
+        # merge with Perplexity's. Aggregator-side items are already deduped;
+        # we re-dedup once more after the merge to drop Perplexity duplicates.
+        merged_items: list[dict[str, Any]] = list(perp_items or [])
+        for ni in agg_result.items:
+            merged_items.append({
+                "title":   ni.title[:240],
+                "summary": ni.summary[:600] if ni.summary else "",
+                "source":  ni.source,
+                "citation": ni.url,
+            })
+        items = _dedup_dicts_by_title(merged_items)
+        items = items[:MAX_HEADLINES_TO_LLM]
+
+        # Persist the deduped aggregated headlines + Fear & Greed snapshot.
+        try:
+            _news.store_aggregated(agg_result)
+        except Exception as exc:
+            logger.debug("[sentiment] news_aggregator DB write skipped: %s", exc)
+
         if not items:
-            logger.info("no news items — both models will see an empty list")
+            logger.info(
+                "no news items from any source — both models will see an empty list "
+                "(sources_ok=%s sources_failed=%s)",
+                agg_result.sources_ok, [s for s, _ in agg_result.sources_failed],
+            )
 
         # Fast + deep run in parallel; deep model gets a larger context window.
         # The 70B costs ~50-91 GB of GPU memory to keep loaded, so we use
@@ -496,19 +555,52 @@ async def _poll_once() -> dict | None:
     ts_dt = datetime.now(timezone.utc)
     final["ts"] = int(ts_dt.timestamp())
 
+    # ── Multi-source side-channel signals (no LLM scoring) ──
+    fg_value = agg_result.fear_greed.value if agg_result.fear_greed else None
+    fg_class = agg_result.fear_greed.classification if agg_result.fear_greed else None
+
+    community_scores = [
+        ni.community_sentiment for ni in agg_result.items
+        if ni.community_sentiment is not None
+    ]
+    community_avg = (sum(community_scores) / len(community_scores)) if community_scores else None
+
+    reddit_scores = [
+        ni.attention_score for ni in agg_result.items
+        if ni.source.startswith("reddit:") and ni.attention_score is not None
+    ]
+    reddit_avg = (sum(reddit_scores) / len(reddit_scores)) if reddit_scores else None
+
+    trending_pairs = (agg_result.trending.coins if agg_result.trending else [])
+    final["fear_greed_value"] = fg_value
+    final["fear_greed_classification"] = fg_class
+    final["community_score_avg"] = community_avg
+    final["reddit_attention_avg"] = reddit_avg
+    final["trending_pairs"] = trending_pairs
+    final["sources_ok"] = agg_result.sources_ok
+    final["sources_failed"] = [s for s, _ in agg_result.sources_failed]
+
     # Reuse the legacy schema columns: claude_* now hold the deep model's
     # output, llama_* hold the fast model's output. Avoids a migration.
+    # Plus the new multi-source columns added by news_aggregator (Fear &
+    # Greed, community sentiment, Reddit attention, trending pairs).
     db.execute_one(
         """
         INSERT INTO sentiment_log
             (ts, sentiment_score, confidence, market_impact, agreement, key_events,
              claude_score, claude_impact, raw_claude,
              llama_score, llama_impact, raw_llama,
-             n_headlines)
+             n_headlines,
+             fear_greed_value, fear_greed_classification,
+             community_score_avg, reddit_attention_avg, trending_pairs,
+             sources_ok, sources_failed)
         VALUES (%s, %s, %s, %s, %s, %s::jsonb,
                 %s, %s, %s::jsonb,
                 %s, %s, %s::jsonb,
-                %s)
+                %s,
+                %s, %s,
+                %s, %s, %s::jsonb,
+                %s::jsonb, %s::jsonb)
         ON CONFLICT (ts) DO UPDATE SET
             sentiment_score = EXCLUDED.sentiment_score,
             confidence      = EXCLUDED.confidence,
@@ -521,7 +613,14 @@ async def _poll_once() -> dict | None:
             llama_score     = EXCLUDED.llama_score,
             llama_impact    = EXCLUDED.llama_impact,
             raw_llama       = EXCLUDED.raw_llama,
-            n_headlines     = EXCLUDED.n_headlines
+            n_headlines     = EXCLUDED.n_headlines,
+            fear_greed_value = EXCLUDED.fear_greed_value,
+            fear_greed_classification = EXCLUDED.fear_greed_classification,
+            community_score_avg  = EXCLUDED.community_score_avg,
+            reddit_attention_avg = EXCLUDED.reddit_attention_avg,
+            trending_pairs       = EXCLUDED.trending_pairs,
+            sources_ok           = EXCLUDED.sources_ok,
+            sources_failed       = EXCLUDED.sources_failed
         """,
         (
             ts_dt,
@@ -537,6 +636,13 @@ async def _poll_once() -> dict | None:
             fast["market_impact"] if fast else None,
             json.dumps(fast) if fast else None,
             len(items),
+            final.get("fear_greed_value"),
+            final.get("fear_greed_classification"),
+            final.get("community_score_avg"),
+            final.get("reddit_attention_avg"),
+            json.dumps(final.get("trending_pairs") or []),
+            json.dumps(final.get("sources_ok") or []),
+            json.dumps(final.get("sources_failed") or []),
         ),
     )
 
@@ -619,44 +725,73 @@ class SentimentEngine:
 # ---------------------------------------------------------------------------
 
 FEATURE_COLUMNS: tuple[str, ...] = (
+    # Existing — LLM-scored sentiment from the Hermes 3 70B + 8B "Trust the Majority" pair.
     "%-sentiment_score",
     "%-sentiment_confidence",
     "%-sentiment_bullish",
     "%-sentiment_bearish",
     "%-sentiment_agreement",
+    # New — direct features from the multi-source aggregator (no LLM scoring).
+    # Fear & Greed: 0..1 (raw 0–100 / 100). Bridge between extreme greed (potential
+    # blow-off) and extreme fear (capitulation / accumulation zone).
+    "%-sentiment_fear_greed",
+    # One-hot encoding for the FNG classification — lets the TFT pick up regime-
+    # like effects of market mood without having to threshold the continuous value.
+    "%-sentiment_fng_extreme_fear",
+    "%-sentiment_fng_fear",
+    "%-sentiment_fng_neutral",
+    "%-sentiment_fng_greed",
+    "%-sentiment_fng_extreme_greed",
+    # Community vote average across CryptoPanic articles mentioning a pair (-1..+1).
+    "%-sentiment_community_score",
+    # Reddit attention proxy: avg normalised score across r/cryptocurrency, r/bitcoin,
+    # r/ethtrader hot posts (0..1). Spikes flag attention surges.
+    "%-sentiment_reddit_attention",
+    # 1.0 if any of our pairs is in CoinGecko's top-7 trending search list.
+    "%-sentiment_trending",
 )
 
-_NEUTRAL_FEATURE_VALUES: dict[str, float] = {
-    "%-sentiment_score": 0.0,
-    "%-sentiment_confidence": 0.0,
-    "%-sentiment_bullish": 0.0,
-    "%-sentiment_bearish": 0.0,
-    "%-sentiment_agreement": 0.0,
-}
+_NEUTRAL_FEATURE_VALUES: dict[str, float] = {c: 0.0 for c in FEATURE_COLUMNS}
 
 
 def _empty_features() -> pd.DataFrame:
     return pd.DataFrame(columns=list(FEATURE_COLUMNS))
 
 
+_FNG_CLASS_TO_ONEHOT: dict[str, str] = {
+    "Extreme Fear":  "%-sentiment_fng_extreme_fear",
+    "Fear":          "%-sentiment_fng_fear",
+    "Neutral":       "%-sentiment_fng_neutral",
+    "Greed":         "%-sentiment_fng_greed",
+    "Extreme Greed": "%-sentiment_fng_extreme_greed",
+}
+
+
 def get_sentiment_features(pair: str) -> pd.DataFrame:
     """
     Return a DataFrame indexed by UTC datetime with sentiment features.
 
-    `pair` is accepted for symmetry with `onchain_signals.get_features` —
+    ``pair`` is accepted for symmetry with ``onchain_signals.get_features`` —
     the current implementation returns broad-market sentiment that is the
-    same for all pairs.
+    same for all pairs, but the ``%-sentiment_trending`` column is per-pair
+    (1.0 only if THIS pair is in the trending list at that timestamp).
 
-    Caller should `pd.merge_asof` the result onto its candle dataframe with
-    `direction='backward'` and ffill missing values.
+    Caller should ``pd.merge_asof`` the result onto its candle dataframe with
+    ``direction='backward'`` and ffill missing values.
     """
     SentimentEngine.instance().start()                   # lazy start
 
     cutoff = datetime.now(timezone.utc) - pd.Timedelta(days=HISTORY_DAYS)
     try:
         rows = db.fetch_all(
-            "SELECT ts, sentiment_score, confidence, market_impact, agreement "
-            "FROM sentiment_log WHERE ts >= %s ORDER BY ts ASC",
+            """
+            SELECT ts, sentiment_score, confidence, market_impact, agreement,
+                   fear_greed_value, fear_greed_classification,
+                   community_score_avg, reddit_attention_avg, trending_pairs
+            FROM sentiment_log
+            WHERE ts >= %s
+            ORDER BY ts ASC
+            """,
             (cutoff,),
         )
     except Exception as exc:
@@ -671,9 +806,60 @@ def get_sentiment_features(pair: str) -> pd.DataFrame:
     df = df.set_index("dt").drop(columns=["ts"])
 
     out = pd.DataFrame(index=df.index)
+    # Existing LLM-scored features
     out["%-sentiment_score"] = df["sentiment_score"].astype(float)
     out["%-sentiment_confidence"] = df["confidence"].astype(float)
     out["%-sentiment_bullish"] = (df["market_impact"] == "bullish").astype(float)
     out["%-sentiment_bearish"] = (df["market_impact"] == "bearish").astype(float)
     out["%-sentiment_agreement"] = df["agreement"].astype(float)
+
+    # Fear & Greed continuous + one-hot
+    fng_val = df.get("fear_greed_value")
+    out["%-sentiment_fear_greed"] = (
+        fng_val.astype(float) / 100.0 if fng_val is not None else 0.0
+    )
+    fng_cls = df.get("fear_greed_classification")
+    for col in (
+        "%-sentiment_fng_extreme_fear",
+        "%-sentiment_fng_fear",
+        "%-sentiment_fng_neutral",
+        "%-sentiment_fng_greed",
+        "%-sentiment_fng_extreme_greed",
+    ):
+        out[col] = 0.0
+    if fng_cls is not None:
+        for cls_name, col in _FNG_CLASS_TO_ONEHOT.items():
+            out[col] = (fng_cls == cls_name).astype(float)
+
+    # Community + Reddit attention
+    out["%-sentiment_community_score"] = (
+        df.get("community_score_avg", pd.Series([0.0] * len(df), index=df.index))
+        .astype(float).fillna(0.0)
+    )
+    out["%-sentiment_reddit_attention"] = (
+        df.get("reddit_attention_avg", pd.Series([0.0] * len(df), index=df.index))
+        .astype(float).fillna(0.0)
+    )
+
+    # CoinGecko trending — per-pair: extract the symbol prefix of `pair`
+    # (e.g. "BTC/USD" → "BTC") and check membership in trending_pairs at each ts.
+    pair_sym = (pair.split("/")[0] if pair else "").upper()
+    if pair_sym and "trending_pairs" in df.columns:
+        def _is_trending(v: Any) -> float:
+            if v is None:
+                return 0.0
+            if isinstance(v, str):
+                # JSONB returned as string in some envs — defensive parse.
+                try:
+                    import json as _json
+                    v = _json.loads(v)
+                except (TypeError, ValueError):
+                    return 0.0
+            if isinstance(v, (list, tuple)):
+                return 1.0 if pair_sym in {str(x).upper() for x in v} else 0.0
+            return 0.0
+        out["%-sentiment_trending"] = df["trending_pairs"].apply(_is_trending)
+    else:
+        out["%-sentiment_trending"] = 0.0
+
     return out

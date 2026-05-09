@@ -530,6 +530,179 @@ async def get_onchain_signals() -> dict:
 # ----- Database ------------------------------------------------------------
 
 
+# ----- News + Fear & Greed (multi-source aggregator) ----------------------
+
+
+@mcp.tool()
+async def get_latest_headlines(pair: str = "BTC", limit: int = 20) -> list[dict]:
+    """Latest aggregated headlines mentioning a pair, with source + community sentiment.
+
+    Pulls from news_headlines (populated by user_data/modules/news_aggregator.py
+    every 15 min). ``pair`` is the symbol-prefix; pass "BTC" not "BTC/USD".
+    """
+    pair = (pair or "BTC").split("/")[0].upper()
+    limit = max(1, min(100, int(limit)))
+    rows = _query(
+        """
+        SELECT ts, source, title, summary, url, pair_mentions,
+               community_sentiment, attention_score
+        FROM news_headlines
+        WHERE pair_mentions @> %s::jsonb
+        ORDER BY ts DESC LIMIT %s
+        """,
+        (json.dumps([pair]), limit),
+    )
+    out = [
+        {
+            "ts": r["ts"].isoformat() if isinstance(r["ts"], datetime) else r["ts"],
+            "source": r["source"],
+            "title": r["title"],
+            "summary": r.get("summary"),
+            "url": r.get("url"),
+            "pair_mentions": r.get("pair_mentions"),
+            "community_sentiment": r.get("community_sentiment"),
+            "attention_score": r.get("attention_score"),
+        }
+        for r in rows
+    ]
+    _audit("get_latest_headlines", {"pair": pair, "limit": limit}, f"{len(out)} rows")
+    return out
+
+
+@mcp.tool()
+async def get_fear_greed_index() -> dict:
+    """Current Fear & Greed Index value, classification, and last 7 daily readings."""
+    rows = _query(
+        "SELECT ts, value, classification, history_7d FROM fear_greed_log "
+        "ORDER BY ts DESC LIMIT 1"
+    )
+    if not rows:
+        return {"error": "no fear_greed_log rows yet"}
+    r = rows[0]
+    out = {
+        "value": int(r["value"]),
+        "classification": r["classification"],
+        "history_7d": r.get("history_7d") or [],
+        "ts": r["ts"].isoformat() if isinstance(r["ts"], datetime) else r["ts"],
+    }
+    _audit("get_fear_greed_index", {}, f"{out['value']} ({out['classification']})")
+    return out
+
+
+@mcp.tool()
+async def get_reddit_buzz(pair: str = "BTC") -> dict:
+    """Reddit attention score + top posts for a pair in the last 24h."""
+    pair = (pair or "BTC").split("/")[0].upper()
+    rows = _query(
+        """
+        SELECT ts, source, title, url, attention_score
+        FROM news_headlines
+        WHERE source LIKE 'reddit:%%'
+          AND ts > NOW() - INTERVAL '24 hours'
+          AND pair_mentions @> %s::jsonb
+        ORDER BY attention_score DESC NULLS LAST, ts DESC
+        LIMIT 10
+        """,
+        (json.dumps([pair]),),
+    )
+    if not rows:
+        out = {"pair": pair, "n_posts": 0, "avg_attention": 0.0, "top_posts": []}
+        _audit("get_reddit_buzz", {"pair": pair}, "no posts")
+        return out
+    scores = [float(r["attention_score"] or 0) for r in rows]
+    out = {
+        "pair": pair,
+        "n_posts": len(rows),
+        "avg_attention": round(sum(scores) / len(scores), 4) if scores else 0.0,
+        "max_attention": round(max(scores), 4) if scores else 0.0,
+        "top_posts": [
+            {
+                "ts": r["ts"].isoformat() if isinstance(r["ts"], datetime) else r["ts"],
+                "subreddit": r["source"].replace("reddit:", ""),
+                "title": r["title"],
+                "url": r.get("url"),
+                "attention_score": r.get("attention_score"),
+            }
+            for r in rows[:10]
+        ],
+    }
+    _audit("get_reddit_buzz", {"pair": pair}, f"{len(rows)} posts")
+    return out
+
+
+@mcp.tool()
+async def get_source_agreement() -> dict:
+    """Cross-source sentiment agreement matrix.
+
+    For each watched pair, summarise the *current* signal from every source
+    we have data for (Hermes-3 LLM scoring, CryptoPanic community votes,
+    Reddit attention, CoinGecko trending, Fear & Greed). Lets the operator
+    spot divergences (e.g. F&G says Greed but community votes are bearish).
+    """
+    pairs = ("BTC", "ETH", "SOL", "ADA")
+    out: dict = {"as_of": datetime.now(timezone.utc).isoformat(), "pairs": {}}
+
+    # Latest LLM-scored sentiment_log row (broad market — same for all pairs).
+    sent_rows = _query(
+        "SELECT sentiment_score, market_impact, fear_greed_value, "
+        "       fear_greed_classification, trending_pairs "
+        "FROM sentiment_log ORDER BY ts DESC LIMIT 1"
+    )
+    base = sent_rows[0] if sent_rows else {}
+
+    for p in pairs:
+        # Reddit upvote-ratio average (the crowd-sentiment signal) over 6h.
+        comm_rows = _query(
+            """
+            SELECT AVG(community_sentiment) AS avg_score, COUNT(*) AS n
+            FROM news_headlines
+            WHERE source LIKE 'reddit:%%'
+              AND ts > NOW() - INTERVAL '6 hours'
+              AND pair_mentions @> %s::jsonb
+              AND community_sentiment IS NOT NULL
+            """,
+            (json.dumps([p]),),
+        )
+        comm = comm_rows[0] if comm_rows else {}
+        # Reddit attention sum.
+        rd_rows = _query(
+            """
+            SELECT AVG(attention_score) AS avg_score, COUNT(*) AS n
+            FROM news_headlines
+            WHERE source LIKE 'reddit:%%'
+              AND ts > NOW() - INTERVAL '6 hours'
+              AND pair_mentions @> %s::jsonb
+              AND attention_score IS NOT NULL
+            """,
+            (json.dumps([p]),),
+        )
+        rd = rd_rows[0] if rd_rows else {}
+        trending = base.get("trending_pairs") or []
+        if isinstance(trending, str):
+            try:
+                trending = json.loads(trending)
+            except ValueError:
+                trending = []
+
+        out["pairs"][p] = {
+            "llm_market_impact": base.get("market_impact"),
+            "llm_score": float(base.get("sentiment_score") or 0),
+            # Reddit upvote-ratio crowd-sentiment (replaces CryptoPanic).
+            "reddit_community_avg": float(comm.get("avg_score") or 0) if comm.get("n") else None,
+            "reddit_community_n": int(comm.get("n") or 0),
+            "reddit_attention_avg": float(rd.get("avg_score") or 0) if rd.get("n") else None,
+            "reddit_attention_n": int(rd.get("n") or 0),
+            "fear_greed_value": base.get("fear_greed_value"),
+            "fear_greed_classification": base.get("fear_greed_classification"),
+            "trending": p in {str(x).upper() for x in trending},
+        }
+    _audit("get_source_agreement", {}, f"{len(pairs)} pairs")
+    return out
+
+
+# ----- DB query passthrough -----------------------------------------------
+
+
 @mcp.tool()
 async def query_trade_journal(sql: str) -> dict:
     """

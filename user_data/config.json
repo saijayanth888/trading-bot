@@ -215,6 +215,15 @@
         },
         "rebalance_after_days": 14
     },
+    "sentiment_sources": {
+        "_doc": "Per-source weights for the sentiment ensemble. The LLM scorers (Hermes-3 70B + 8B) read all sources together; weights are advisory for downstream consumers (e.g. market_research skill divergence checks). Six free sources, zero external API costs (Perplexity is freemium — gracefully degrades if PERPLEXITY_API_KEY is unset).",
+        "perplexity":         {"enabled": true, "weight": 0.30},
+        "cryptocurrency_cv":  {"enabled": true, "weight": 0.20},
+        "reddit":             {"enabled": true, "weight": 0.20},
+        "rss_feeds":          {"enabled": true, "weight": 0.10},
+        "fear_greed":         {"enabled": true, "weight": 0.10},
+        "coingecko_trending": {"enabled": true, "weight": 0.10}
+    },
     "ept_evolution": {
         "_doc": "EPT evolution — accelerated cadence for first-30-day push toward champion convergence. Larger population (12) for diversity; tighter cycle (12h train + 24h eval = 36h gen) for faster generations. risk_governor still gates every trade.",
         "population_size":         12,
