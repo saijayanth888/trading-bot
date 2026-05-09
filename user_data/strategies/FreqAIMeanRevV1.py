@@ -846,6 +846,22 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         # Compute meta-agent (TFT + DRL ensemble) signal columns. No-op
         # when the DRL weights aren't loadable yet (cold start).
         dataframe = self._compute_meta_signals(dataframe)
+        # Pydantic v2 (freqtrade 2026.4 / py3.14) refuses to serialize
+        # numpy.float32 — it is not a subclass of Python float the way
+        # numpy.float64 is, so /api/v1/pair_candles 500s on every poll.
+        # TFTModel emits up/down/flat/tft_confidence as float32; when
+        # FreqAI mixes those with NaN backfill the column dtype lands as
+        # `object` with float32 cells, which `select_dtypes(['float32'])`
+        # misses. Cast both float32 columns and the named FreqAI
+        # prediction columns to float64 so the API serializer accepts
+        # them.
+        f32_cols = list(dataframe.select_dtypes(include=["float32"]).columns)
+        for col in ("up", "down", "flat", "tft_confidence"):
+            if col in dataframe.columns and col not in f32_cols:
+                if dataframe[col].dtype != "float64":
+                    f32_cols.append(col)
+        for col in f32_cols:
+            dataframe[col] = pd.to_numeric(dataframe[col], errors="coerce").astype("float64")
         return dataframe
 
     # ------------------------------------------------------------------
