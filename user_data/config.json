@@ -250,7 +250,7 @@
     "sentiment_sources": {
         "_doc": "Per-source weights for the sentiment ensemble. The LLM scorers (Hermes-3 70B + 8B) read all sources together; weights are advisory for downstream consumers (e.g. market_research skill divergence checks). Six free sources, zero external API costs (Perplexity is freemium — gracefully degrades if PERPLEXITY_API_KEY is unset).",
         "perplexity":         {"enabled": true, "weight": 0.30},
-        "cryptocurrency_cv":  {"enabled": true, "weight": 0.20},
+        "cryptocurrency_cv":  {"enabled": false, "weight": 0.0, "_note": "disabled 2026-05-09: source switched to paid-only, returns HTTP 402"},
         "reddit":             {"enabled": true, "weight": 0.20},
         "rss_feeds":          {"enabled": true, "weight": 0.10},
         "fear_greed":         {"enabled": true, "weight": 0.10},

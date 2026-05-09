@@ -252,12 +252,18 @@ class NewsAggregator:
             timeout=HTTP_TIMEOUT,
             headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
         ) as session:
-            fetchers = [
+            all_fetchers = [
                 ("cryptocurrency_cv", self._fetch_cryptocurrency_cv),
                 ("reddit",            self._fetch_reddit),
                 ("rss",               self._fetch_rss_feeds),
                 ("fear_greed",        self._fetch_fear_greed),
                 ("coingecko_trending", self._fetch_coingecko_trending),
+            ]
+            _src_cfg = (_load_config().get("sentiment_sources") or {})
+            _alias = {"rss": "rss_feeds"}
+            fetchers = [
+                (name, fn) for (name, fn) in all_fetchers
+                if _src_cfg.get(_alias.get(name, name), {}).get("enabled", True)
             ]
             tasks = [
                 asyncio.wait_for(fn(session), timeout=PER_SOURCE_TIMEOUT)

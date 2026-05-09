@@ -102,11 +102,11 @@ class MonitoringMixin:
                 try:
                     mode = "DRY-RUN (paper)" if config.get("dry_run", True) else "LIVE"
                     ratio = config.get("tradable_balance_ratio", 1.0)
-                    self._slack.notify_error(
+                    self._slack.notify_info(
                         component="bot_start",
-                        exc=f"FreqAIMeanRevV1 booted — mode={mode}, "
-                            f"tradable_balance_ratio={ratio}, "
-                            f"strategy={type(self).__name__}",
+                        message=f"FreqAIMeanRevV1 booted — mode={mode}, "
+                                f"tradable_balance_ratio={ratio}, "
+                                f"strategy={type(self).__name__}",
                         context={"timeframe": getattr(self, "timeframe", "?"),
                                  "max_open_trades": config.get("max_open_trades")},
                     )

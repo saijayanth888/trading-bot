@@ -114,13 +114,7 @@ _ONCHAIN_NEUTRAL = {
     "%-onchain_whale_volume_1h": 0.0,
 }
 
-_SENTIMENT_NEUTRAL = {
-    "%-sentiment_score": 0.0,
-    "%-sentiment_confidence": 0.0,
-    "%-sentiment_bullish": 0.0,
-    "%-sentiment_bearish": 0.0,
-    "%-sentiment_agreement": 0.0,
-}
+_SENTIMENT_NEUTRAL = {col: 0.0 for col in SENTIMENT_FEATURES}
 
 _REGIME_NEUTRAL = {col: 0.0 for col in REGIME_FEATURES}
 

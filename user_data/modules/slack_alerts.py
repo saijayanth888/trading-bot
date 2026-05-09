@@ -303,6 +303,24 @@ class SlackAlerter:
             dedup_key=f"error:{component}:{tb[:64]}",
         )
 
+    def notify_info(
+        self, component: str, message: str,
+        context: Mapping[str, Any] | None = None,
+    ) -> bool:
+        fields = [("Component", f"`{component}`"), ("Status", f"`{message}`")]
+        if context:
+            for k, v in context.items():
+                fields.append((str(k), f"`{v}`"))
+        blocks = _blocks(
+            header=f"{EMOJI['info']}  {component.replace('_', ' ').title()}",
+            fields=fields,
+        )
+        return self._post(
+            text=f"{component}: {message}",
+            blocks=blocks,
+            dedup_key=f"info:{component}:{message[:64]}",
+        )
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
