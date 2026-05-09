@@ -31,7 +31,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-from . import ops_db, ops_probes
+from . import mcp_local, ops_db, ops_probes
 from .data_sources import _ensure_jwt, fetch_freqtrade_candles
 
 logger = logging.getLogger(__name__)
@@ -371,10 +371,56 @@ async def sparklines(timeframe: str = "5m", limit: int = 60):
         return _envelope("down", error=str(exc))
 
     data = {pair: payload for pair, payload in results}
+
+    # Improvement 3 — also surface 24h regime band + sentiment line. These
+    # are shared across pairs (the HMM + Perplexity-fetched sentiment are
+    # global, not per-pair), so one DB roundtrip serves all the cards.
+    timeline_24h = {"regimes": [], "sentiment": []}
+    try:
+        loop = asyncio.get_running_loop()
+
+        def _read_timeline():
+            if not ops_db._HAVE_PG:
+                return [], []
+            with ops_db._connect() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "SELECT ts, regime, probability FROM regime_log "
+                    "WHERE ts > NOW() - INTERVAL '24 hours' ORDER BY ts"
+                )
+                regs = [
+                    {"ts": r["ts"].isoformat(), "regime": r["regime"],
+                     "probability": float(r["probability"] or 0)}
+                    for r in cur.fetchall()
+                ]
+                cur.execute(
+                    "SELECT ts, sentiment_score, confidence FROM sentiment_log "
+                    "WHERE ts > NOW() - INTERVAL '24 hours' ORDER BY ts"
+                )
+                sents = [
+                    {"ts": r["ts"].isoformat(),
+                     "score": float(r["sentiment_score"] or 0),
+                     "confidence": float(r["confidence"] or 0)}
+                    for r in cur.fetchall()
+                ]
+                return regs, sents
+
+        regs, sents = await asyncio.wait_for(
+            loop.run_in_executor(None, _read_timeline), timeout=ENDPOINT_TIMEOUT_S,
+        )
+        timeline_24h["regimes"] = regs
+        timeline_24h["sentiment"] = sents
+    except Exception:
+        logger.exception("sparklines timeline read failed")
+
     has_any = any(p.get("closes") for p in data.values())
     return _envelope(
         "ok" if has_any else "degraded",
-        data={"pairs": data, "timeframe": timeframe, "limit": limit},
+        data={
+            "pairs": data,
+            "timeframe": timeframe,
+            "limit": limit,
+            "timeline_24h": timeline_24h,
+        },
         error=None if has_any else "freqtrade returned no candle data",
     )
 
@@ -570,3 +616,302 @@ async def resume(request: Request):
         raise HTTPException(status_code=code if code >= 400 else 502,
                             detail=err or f"freqtrade {code}: {payload}")
     return _envelope("ok", data={"freqtrade_response": payload, "reason": body.get("reason", "ops-tab manual resume")})
+
+
+# --------------------------------------------------------------------------
+# /api/mcp/tools and /api/mcp/{tool_name} — surface MCP-tool calls to the UI
+# --------------------------------------------------------------------------
+#
+# The dashboard container can't reach the host's hermes-mcp on :8089 (the
+# host firewall blocks docker-bridge → host:8089). So instead of an HTTP
+# proxy, this is a local shim that runs the same tool implementations
+# in-process. Same audit log path, same result shapes.
+
+
+@router.get("/tools", include_in_schema=True)
+@router.get("/mcp/tools", include_in_schema=False)  # alias under /api/mcp/* for nicer paths
+async def mcp_tools():
+    return _envelope("ok", data={"tools": mcp_local.schema()})
+
+
+@router.post("/mcp/{tool_name}")
+async def mcp_call(tool_name: str, request: Request):
+    body: dict = {}
+    if request.headers.get("content-length"):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+    try:
+        result = await asyncio.wait_for(
+            mcp_local.dispatch(tool_name, body or {}),
+            timeout=ENDPOINT_TIMEOUT_S * 5,  # MCP tools can be slow (DB scans, freqtrade RTT)
+        )
+    except asyncio.TimeoutError:
+        return _envelope("down", error=f"{tool_name} timed out")
+    except Exception as exc:
+        logger.exception("MCP tool %s failed", tool_name)
+        return _envelope("down", error=str(exc))
+    # Tools return either {"error": "..."} or the actual payload. Surface
+    # them through the envelope so the frontend has a stable contract.
+    if isinstance(result, dict) and "error" in result and len(result) == 1:
+        return _envelope("degraded", data=result, error=result["error"])
+    return _envelope("ok", data=result)
+
+
+# --------------------------------------------------------------------------
+# /api/explainability/{pair} — last N decisions for that pair (entered + blocked)
+# --------------------------------------------------------------------------
+
+
+@router.get("/explainability/{base}/{quote}")
+async def explainability(base: str, quote: str, limit: int = 5):
+    """Decision records for the most recent candle ticks.
+
+    Two sources joined into one timeline:
+      - trade_journal rows (full context: TFT/DRL/sentiment/regime + reasoning)
+      - parsed lines from freqtrade.log of the form
+        ``[strategy] risk-blocked PAIR: REASON (constraint=NAME)``
+        for entries the risk governor refused.
+    """
+    pair = f"{base.upper()}/{quote.upper()}"
+    limit = max(1, min(50, int(limit)))
+
+    decisions: list[dict] = []
+
+    # 1) Last `limit` trade-journal entries (entered)
+    if ops_db._HAVE_PG:
+        try:
+            with ops_db._connect() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT trade_id, pair, direction, opened_at, closed_at,
+                           entry_price, exit_price, pnl, pnl_pct, stake,
+                           confidence, tft_probs, drl_votes, sentiment_score,
+                           sentiment_confidence, regime, exit_reason, reasoning
+                    FROM trade_journal
+                    WHERE pair = %s
+                    ORDER BY opened_at DESC LIMIT %s
+                    """,
+                    (pair, limit),
+                )
+                for r in cur.fetchall():
+                    decisions.append({
+                        "kind": "entered",
+                        "ts": r["opened_at"].isoformat() if r.get("opened_at") else None,
+                        "pair": r["pair"],
+                        "side": r["direction"],
+                        "entry_price": float(r["entry_price"] or 0),
+                        "stake": float(r["stake"] or 0),
+                        "confidence": float(r["confidence"] or 0),
+                        "tft_probs": r.get("tft_probs"),
+                        "drl_votes": r.get("drl_votes"),
+                        "sentiment_score": float(r["sentiment_score"] or 0) if r.get("sentiment_score") is not None else None,
+                        "sentiment_confidence": float(r["sentiment_confidence"] or 0) if r.get("sentiment_confidence") is not None else None,
+                        "regime": r.get("regime"),
+                        "reasoning": r.get("reasoning"),
+                        "closed_at": r["closed_at"].isoformat() if r.get("closed_at") else None,
+                        "exit_price": float(r["exit_price"] or 0) if r.get("exit_price") is not None else None,
+                        "pnl_pct": float(r["pnl_pct"] or 0) if r.get("pnl_pct") is not None else None,
+                        "exit_reason": r.get("exit_reason"),
+                    })
+        except Exception as exc:
+            logger.exception("explainability DB read failed")
+
+    # 2) Last `limit` blocked-entry log lines (didn't fire)
+    log_path = USER_DATA_ROOT_FOR_BACKUPS / "logs" / "freqtrade.log"
+    if log_path.exists():
+        try:
+            with log_path.open("rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - 500_000))
+                tail = f.read().decode("utf-8", errors="replace").splitlines()
+            import re as _re
+            blocked_pat = _re.compile(
+                r"(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}).*"
+                r"risk-blocked\s+" + _re.escape(pair) + r":\s*(.+?)\s*\(constraint=([^)]+)\)"
+            )
+            blocked: list[dict] = []
+            for line in reversed(tail):
+                m = blocked_pat.search(line)
+                if m:
+                    blocked.append({
+                        "kind": "blocked",
+                        "ts": m.group(1),
+                        "pair": pair,
+                        "reason": m.group(2).strip(),
+                        "constraint": m.group(3).strip(),
+                    })
+                    if len(blocked) >= limit:
+                        break
+            decisions.extend(blocked)
+        except OSError:
+            pass
+
+    decisions.sort(key=lambda d: d.get("ts") or "", reverse=True)
+    decisions = decisions[:limit]
+    return _envelope(
+        "ok" if decisions else "degraded",
+        data={"pair": pair, "decisions": decisions},
+        error=None if decisions else "no entries or blocked-decisions in window",
+    )
+
+
+# --------------------------------------------------------------------------
+# /api/timeline/{pair}?hours=24 — candles + regime band + sentiment line
+# --------------------------------------------------------------------------
+
+
+@router.get("/timeline/{base}/{quote}")
+async def timeline(base: str, quote: str, hours: int = 24, timeframe: str = "5m"):
+    pair = f"{base.upper()}/{quote.upper()}"
+    hours = max(1, min(168, int(hours)))
+    if timeframe not in ("1m", "5m", "15m", "1h", "6h"):
+        timeframe = "5m"
+
+    # ── Candles (close-only is enough for the sparkline) ──
+    per_hour = {"1m": 60, "5m": 12, "15m": 4, "1h": 1, "6h": 1}.get(timeframe, 12)
+    limit = min(500, hours * per_hour + 5)
+    df = await fetch_freqtrade_candles(pair, timeframe=timeframe, limit=limit)
+    candles: list[dict] = []
+    if df is not None and not df.empty:
+        for _, row in df.iterrows():
+            ts = row.get("date")
+            candles.append({
+                "ts": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+                "close": float(row.get("close", 0) or 0),
+            })
+
+    # ── Regime segments + sentiment series ──
+    regimes: list[dict] = []
+    sentiment: list[dict] = []
+    if ops_db._HAVE_PG:
+        try:
+            with ops_db._connect() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT ts, regime, probability
+                    FROM regime_log
+                    WHERE ts >= NOW() - (%s || ' hours')::interval
+                    ORDER BY ts
+                    """,
+                    (str(hours),),
+                )
+                regimes = [
+                    {"ts": r["ts"].isoformat(), "regime": r["regime"],
+                     "probability": float(r["probability"] or 0)}
+                    for r in cur.fetchall()
+                ]
+                cur.execute(
+                    """
+                    SELECT ts, sentiment_score, market_impact, confidence
+                    FROM sentiment_log
+                    WHERE ts >= NOW() - (%s || ' hours')::interval
+                    ORDER BY ts
+                    """,
+                    (str(hours),),
+                )
+                sentiment = [
+                    {"ts": r["ts"].isoformat(),
+                     "score": float(r["sentiment_score"] or 0),
+                     "market_impact": r.get("market_impact"),
+                     "confidence": float(r["confidence"] or 0)}
+                    for r in cur.fetchall()
+                ]
+        except Exception:
+            logger.exception("timeline DB read failed")
+
+    has_data = bool(candles) and (bool(regimes) or bool(sentiment))
+    return _envelope(
+        "ok" if has_data else "degraded",
+        data={
+            "pair": pair, "timeframe": timeframe, "hours": hours,
+            "candles": candles, "regimes": regimes, "sentiment": sentiment,
+        },
+        error=None if has_data else "candles missing or regime/sentiment empty in window",
+    )
+
+
+# --------------------------------------------------------------------------
+# /api/slack-preview — what the next daily-P&L Slack report will look like
+# --------------------------------------------------------------------------
+
+
+@router.get("/slack_preview")
+async def slack_preview():
+    """Live render of today's daily P&L (the same payload the cron will Slack
+    at 00:00 UTC). Frontend renders this in a Slack-styled card.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        # Today's stats from trade_journal
+        if not ops_db._HAVE_PG:
+            return _envelope("degraded", data={}, error="postgres unavailable")
+        with ops_db._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    COALESCE(SUM(pnl), 0)                               AS pnl_usd,
+                    COALESCE(SUM(pnl_pct), 0)                           AS pnl_pct,
+                    COUNT(*)                                             AS trades,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END)             AS wins,
+                    SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END)             AS losses
+                FROM trade_journal
+                WHERE closed_at IS NOT NULL
+                  AND closed_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC')
+                """
+            )
+            today = cur.fetchone() or {}
+
+            # Per-pair P&L for top/bottom
+            cur.execute(
+                """
+                SELECT pair, COUNT(*) AS n, COALESCE(SUM(pnl), 0) AS pnl
+                FROM trade_journal
+                WHERE closed_at IS NOT NULL
+                  AND closed_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC')
+                GROUP BY pair ORDER BY pnl DESC
+                """
+            )
+            per_pair = [dict(r) for r in cur.fetchall()]
+
+            # Regime distribution (last 24h)
+            cur.execute(
+                """
+                SELECT regime, COUNT(*) AS n
+                FROM regime_log
+                WHERE ts > NOW() - INTERVAL '24 hours'
+                GROUP BY regime ORDER BY n DESC
+                """
+            )
+            regime_dist = [dict(r) for r in cur.fetchall()]
+    except Exception as exc:
+        logger.exception("slack_preview db failed")
+        return _envelope("down", error=str(exc))
+
+    perf = await loop.run_in_executor(None, mcp_local.get_performance_metrics)
+
+    n = int(today.get("trades") or 0)
+    pnl_usd = float(today.get("pnl_usd") or 0)
+    pnl_pct = float(today.get("pnl_pct") or 0)
+    wins = int(today.get("wins") or 0)
+    losses = int(today.get("losses") or 0)
+    win_rate = (wins / n * 100) if n else 0.0
+
+    best = per_pair[0] if per_pair else None
+    worst = per_pair[-1] if per_pair and len(per_pair) > 1 else None
+
+    return _envelope("ok", data={
+        "date_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "pnl_usd": pnl_usd,
+        "pnl_pct": pnl_pct,
+        "trades": n,
+        "wins": wins,
+        "losses": losses,
+        "win_rate_pct": round(win_rate, 1),
+        "sharpe_trailing": perf.get("sharpe", 0.0),
+        "max_dd_trailing": perf.get("max_dd", 0.0),
+        "best": best, "worst": worst,
+        "regime_distribution": regime_dist,
+    })

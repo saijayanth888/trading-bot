@@ -8,13 +8,15 @@
  */
 
 const REFRESH_MS = {
-  services:    5000,
-  training:   10000,
-  regime:     30000,
-  sentiment:  30000,
-  mcp:        15000,
-  trades:      5000,
-  sparklines: 60000,  // 5m candles only change every 5 min; refresh once a min
+  services:        5000,
+  training:       10000,
+  regime:         30000,
+  sentiment:      30000,
+  mcp:            15000,
+  trades:          5000,
+  sparklines:     60000,   // 5m candles only change every 5 min
+  slack_preview:  60000,   // daily report preview — once a min is plenty
+  explainability: 30000,   // trade journal updates on each entry/exit
 };
 
 const REGIME_ARROW = {
@@ -356,10 +358,12 @@ async function refreshSparklines() {
   const env = r.body;
   if (env.status === "down" || !env.data) return;
   const pairs = env.data.pairs || {};
+  const tl = env.data.timeline_24h || {regimes: [], sentiment: []};
   const host = document.getElementById("sparklines");
   if (!host) return;
 
-  // Build / re-build the row of cards
+  // Build / re-build the row of cards. Each card gets a price chunk + a
+  // regime band + a sentiment mini-canvas (Improvement 3).
   const labels = Object.keys(pairs);
   if (host.dataset.built !== labels.join(",")) {
     host.dataset.built = labels.join(",");
@@ -373,7 +377,9 @@ async function refreshSparklines() {
         `<span class="muted" style="font-size:10px;" data-spark-pct>—</span>` +
         `</div>` +
         `<div style="font-size:18px;font-variant-numeric:tabular-nums;" data-spark-price>—</div>` +
-        `<canvas data-spark-canvas style="width:100%;height:36px;display:block;"></canvas>`;
+        `<canvas data-spark-canvas style="width:100%;height:36px;display:block;"></canvas>` +
+        `<div data-spark-regime class="spark-regime-bar" title="regime band, last 24h"></div>` +
+        `<canvas data-spark-sentiment class="spark-sentiment-canvas" title="sentiment line, last 24h"></canvas>`;
       card.dataset.pair = p;
       host.appendChild(card);
     }
@@ -385,6 +391,9 @@ async function refreshSparklines() {
     const priceEl = card.querySelector("[data-spark-price]");
     const pctEl = card.querySelector("[data-spark-pct]");
     const canvas = card.querySelector("[data-spark-canvas]");
+    const regimeBar = card.querySelector("[data-spark-regime]");
+    const sentCanvas = card.querySelector("[data-spark-sentiment]");
+
     priceEl.textContent = v.current !== null && v.current !== undefined
       ? "$" + Number(v.current).toLocaleString(undefined, {maximumFractionDigits: 4})
       : "—";
@@ -397,31 +406,411 @@ async function refreshSparklines() {
       pctEl.textContent = "—";
     }
     drawSparkline(canvas, v.closes || []);
+
+    // Regime band — render proportional segments by duration
+    drawRegimeBar(regimeBar, tl.regimes || []);
+
+    // Sentiment mini line — green above 0, red below
+    drawSentimentMini(sentCanvas, tl.sentiment || []);
   }
 }
 
-// ─── Pause / Resume ─────────────────────────────────────────────────
-async function pauseClicked() {
-  const btn = document.getElementById("btn-pause");
-  btn.disabled = true; btn.textContent = "Pausing…";
-  const r = await fetch("/api/ops/pause", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({reason: "ops-tab manual pause"}),
-  });
-  const body = await r.json().catch(() => ({}));
-  alert(r.ok ? "Paused. Freqtrade reports: " + JSON.stringify(body.data) : "Failed: " + JSON.stringify(body));
-  btn.disabled = false; btn.textContent = "⏸ Pause Trading";
+function drawRegimeBar(host, points) {
+  if (!host) return;
+  host.replaceChildren();
+  if (!points || points.length === 0) {
+    host.style.opacity = "0.3";
+    return;
+  }
+  host.style.opacity = "1";
+  const t0 = new Date(points[0].ts).getTime();
+  const tN = new Date(points[points.length - 1].ts).getTime();
+  const span = Math.max(1, tN - t0);
+
+  // Group consecutive same-regime points into segments
+  const segs = [];
+  let cur = null;
+  for (const p of points) {
+    if (!cur || cur.regime !== p.regime) {
+      if (cur) segs.push(cur);
+      cur = {regime: p.regime, start: new Date(p.ts).getTime(), end: new Date(p.ts).getTime()};
+    } else {
+      cur.end = new Date(p.ts).getTime();
+    }
+  }
+  if (cur) segs.push(cur);
+
+  for (const s of segs) {
+    const w = Math.max(1, ((s.end - s.start) / span) * 100);
+    const div = document.createElement("div");
+    div.className = "spark-regime-seg regime-" + (s.regime || "unknown");
+    div.style.flexBasis = w + "%";
+    div.title = `${s.regime}: ${new Date(s.start).toISOString().substring(11,16)}Z → ${new Date(s.end).toISOString().substring(11,16)}Z`;
+    host.appendChild(div);
+  }
 }
 
-function openResumeModal() {
-  const m = document.getElementById("resume-modal");
-  m.classList.add("open");
-  fetch("/api/ops/trades_risk").then(r => r.json()).then(env => {
-    const d = env.data || {};
-    document.getElementById("resume-context").textContent =
-      `Current: open ${d.open_count}/${d.max_open}, DD 30d ${fmtPct(d.drawdown_pct_30d)}, breaker ${d.circuit_breaker && d.circuit_breaker.active ? "ACTIVE" : "clear"}.`;
+function drawSentimentMini(canvas, points) {
+  if (!canvas) return;
+  if (!points || points.length < 2) {
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    return;
+  }
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.clientWidth, H = canvas.clientHeight || 26;
+  if (canvas.width !== W * dpr) { canvas.width = W * dpr; canvas.height = H * dpr; }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  // Score domain is [-1, +1] always (clamp). Y midline = 0.
+  const mid = H / 2;
+  const x = i => (i / (points.length - 1)) * (W - 2) + 1;
+  const y = v => mid - (Math.max(-1, Math.min(1, v)) * (H / 2 - 2));
+
+  // Mid baseline
+  ctx.strokeStyle = "#1f2748";
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(W, mid); ctx.stroke();
+
+  // Two-pass line: green above zero, red below. We draw segments per-pair.
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1].score, b = points[i].score;
+    const avg = (a + b) / 2;
+    ctx.strokeStyle = avg >= 0 ? "#4cc38a" : "#ff6b6b";
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(x(i - 1), y(a));
+    ctx.lineTo(x(i), y(b));
+    ctx.stroke();
+  }
+}
+
+// ─── Quick Actions (MCP-routed via /api/mcp/{tool_name}) ───────────
+async function qaCallTool(tool, args = {}) {
+  const r = await fetch(`/api/mcp/${encodeURIComponent(tool)}`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(args || {}),
   });
+  return r.json();
+}
+
+function qaShowResult(tool, env) {
+  const box = document.getElementById("qa-result");
+  box.style.display = "block";
+  // give the browser a tick to register display:block before opening
+  requestAnimationFrame(() => box.classList.add("open"));
+
+  const ok = env && env.status === "ok";
+  const data = env && env.data;
+  let summary;
+  switch (tool) {
+    case "get_risk_status": {
+      const d = data || {};
+      summary =
+        `<div><strong>${esc(tool)}</strong> · <span class="${ok ? "ok" : "warn"}">${esc(env.status || "?")}</span></div>` +
+        `<div class="row"><span class="label">open positions</span><span class="value">${esc(d.open_positions ?? "—")}</span></div>` +
+        `<div class="row"><span class="label">trade count</span><span class="value">${esc(d.trade_count ?? "—")}</span></div>` +
+        `<div class="row"><span class="label">winning trades</span><span class="value">${esc(d.winning_trades ?? "—")}</span></div>` +
+        `<div class="row"><span class="label">total PnL closed</span><span class="value">${esc(d.total_pnl_closed ?? "—")}</span></div>`;
+      break;
+    }
+    case "get_current_regime": {
+      const d = data || {};
+      const arrow = REGIME_ARROW[d.regime] || "·";
+      summary =
+        `<div><strong>${esc(tool)}</strong> · <span class="ok">${esc(env.status)}</span></div>` +
+        `<div style="font-size:24px;margin-top:6px;">${esc((d.regime || "—").replace("_"," "))} <span style="opacity:0.7;">${esc(arrow)}</span></div>` +
+        `<div class="muted" style="font-size:12px;">probability ${fmt(d.probability, 2)} · active ${fmt(d.duration_hours, 1)}h · ts ${esc(d.ts || "—")}</div>`;
+      break;
+    }
+    default: {
+      summary =
+        `<div><strong>${esc(tool)}</strong> · <span class="${ok ? "ok" : "warn"}">${esc(env.status || "?")}</span></div>` +
+        `<pre>${esc(JSON.stringify(data, null, 2))}</pre>`;
+      if (env && env.error) {
+        summary += `<div class="bad" style="margin-top:6px;">${esc(env.error)}</div>`;
+      }
+    }
+  }
+  box.innerHTML = summary;
+}
+
+function qaConfirm(message, doubleConfirm = false) {
+  if (!confirm(message)) return false;
+  if (doubleConfirm && !confirm("Are you absolutely sure? Final confirmation.")) return false;
+  return true;
+}
+
+async function qaButtonHandler(ev) {
+  const btn = ev.currentTarget;
+  const tool = btn.dataset.tool;
+  const confirmMsg = btn.dataset.confirm;
+  const doubleConfirm = btn.dataset.double === "1";
+
+  if (confirmMsg && !qaConfirm(confirmMsg, doubleConfirm)) return;
+
+  const args = {};
+  if (tool === "pause_trading") args.reason = "manual_pause_via_dashboard_quick_action";
+  if (tool === "resume_trading") args.confirm = true;
+
+  const original = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `<span class="qa-spinner"></span>${original.replace(/^[^\s]+/, "").trim() || tool}…`;
+
+  let env;
+  try {
+    env = await qaCallTool(tool, args);
+  } catch (e) {
+    env = {status: "down", error: String(e), data: null};
+  }
+  qaShowResult(tool, env || {});
+
+  btn.disabled = false;
+  btn.innerHTML = original;
+}
+
+// ─── Slack daily-report preview ─────────────────────────────────────
+async function refreshSlackPreview() {
+  const r = await jsonFetch("/api/ops/slack_preview");
+  const env = r.body;
+  setStatus("card-slack-preview", env.status || "down");
+  document.getElementById("slack-preview-age").textContent = env.error || "live";
+  const body = document.getElementById("slack-preview-body");
+  if (!env.data) { body.textContent = env.error || "—"; return; }
+  const d = env.data;
+  const pnlClass = d.pnl_usd > 0 ? "ok" : d.pnl_usd < 0 ? "bad" : "muted";
+
+  const regimeRows = (d.regime_distribution || []).map(r =>
+    `<div>${esc(r.regime)}: <span class="slack-mono">${esc(r.n)}</span></div>`
+  ).join(" · ");
+
+  const bestPair = d.best
+    ? `${esc(d.best.pair)} <span class="slack-mono">${fmtUsd(d.best.pnl)}</span> (${esc(d.best.n)}t)`
+    : "—";
+  const worstPair = d.worst
+    ? `${esc(d.worst.pair)} <span class="slack-mono">${fmtUsd(d.worst.pnl)}</span> (${esc(d.worst.n)}t)`
+    : "—";
+
+  body.innerHTML =
+    `<div class="slack-card">` +
+      `<div class="slack-author">📊 Trading Bot · daily P&amp;L preview</div>` +
+      `<div class="slack-block-header">Daily P&amp;L — ${esc(d.date_utc)} (UTC)</div>` +
+      `<div class="slack-fields">` +
+        `<div class="slack-field"><strong>Net P&amp;L</strong><br><span class="slack-mono ${pnlClass}">${esc(fmtUsd(d.pnl_usd))} (${esc(fmtPct(d.pnl_pct))})</span></div>` +
+        `<div class="slack-field"><strong>Trades</strong><br><span class="slack-mono">${esc(d.trades)} (${esc(d.wins)}W / ${esc(d.losses)}L)</span></div>` +
+        `<div class="slack-field"><strong>Win rate</strong><br><span class="slack-mono">${esc(fmt(d.win_rate_pct, 1))}%</span></div>` +
+        `<div class="slack-field"><strong>Sharpe (trailing)</strong><br><span class="slack-mono">${esc(fmt(d.sharpe_trailing, 2))}</span></div>` +
+      `</div>` +
+      `<div class="slack-divider"></div>` +
+      `<div><strong>Best pair:</strong> ${bestPair}</div>` +
+      `<div><strong>Worst pair:</strong> ${worstPair}</div>` +
+      `<div class="slack-context">` +
+        `Regime distribution (24h): ${regimeRows || "—"} · Max DD trailing: <span class="slack-mono">${esc(fmtPct((d.max_dd_trailing || 0) * 100))}</span>` +
+      `</div>` +
+    `</div>`;
+}
+
+// ─── Explainability — last 5 decisions for a pair ──────────────────
+async function refreshExplainability() {
+  const sel = document.getElementById("exp-pair-select");
+  const pairValue = sel && sel.value;
+  if (!pairValue) return;
+  const [base, quote] = pairValue.split("/");
+  const r = await jsonFetch(`/api/ops/explainability/${encodeURIComponent(base)}/${encodeURIComponent(quote)}?limit=5`);
+  const env = r.body;
+  setStatus("card-explainability", env.status || "down");
+  document.getElementById("exp-age").textContent = env.error || "live";
+  const body = document.getElementById("exp-body");
+  if (!env.data || !env.data.decisions || env.data.decisions.length === 0) {
+    body.textContent = env.error || "no recent decisions for this pair";
+    return;
+  }
+  body.replaceChildren();
+  for (const d of env.data.decisions) {
+    body.insertAdjacentHTML("beforeend", renderExpCard(d));
+  }
+}
+
+function renderExpCard(d) {
+  const ts = esc(d.ts || "—");
+  if (d.kind === "blocked") {
+    return (
+      `<div class="exp-card" data-kind="blocked">` +
+        `<div class="exp-line"><span class="label">${ts}</span><span class="value warn">NO ENTRY · blocked</span></div>` +
+        `<div class="exp-line"><span class="label">pair</span><span class="value">${esc(d.pair)}</span></div>` +
+        `<div class="exp-line"><span class="label">constraint</span><span class="value">${esc(d.constraint)}</span></div>` +
+        `<div class="exp-line"><span class="label">reason</span><span class="value">${esc(d.reason)}</span></div>` +
+      `</div>`
+    );
+  }
+  // entered
+  const tft = d.tft_probs || {};
+  const drl = d.drl_votes || {};
+  const sentDir = d.sentiment_score == null ? "—"
+                : d.sentiment_score > 0.1 ? "bullish"
+                : d.sentiment_score < -0.1 ? "bearish" : "neutral";
+  const closed = d.closed_at
+    ? `<div class="exp-line"><span class="label">closed</span><span class="value">${esc(d.closed_at)} · pnl ${esc(fmtPct(d.pnl_pct))} · ${esc(d.exit_reason || "—")}</span></div>`
+    : `<div class="exp-line"><span class="label">closed</span><span class="value muted">still open</span></div>`;
+  return (
+    `<div class="exp-card" data-kind="entered">` +
+      `<div class="exp-line"><span class="label">${ts}</span><span class="value ok">ENTRY · ${esc(d.side || "long")}</span></div>` +
+      `<div class="exp-line"><span class="label">TFT probs</span><span class="value">up ${fmt(tft.up, 2)} · flat ${fmt(tft.flat, 2)} · down ${fmt(tft.down, 2)}</span></div>` +
+      `<div class="exp-line"><span class="label">DRL votes</span><span class="value">${esc(JSON.stringify(drl))}</span></div>` +
+      `<div class="exp-line"><span class="label">meta confidence</span><span class="value">${fmt(d.confidence, 2)}</span></div>` +
+      `<div class="exp-line"><span class="label">sentiment</span><span class="value">${fmt(d.sentiment_score, 2)} (${sentDir}) · conf ${fmt(d.sentiment_confidence, 2)}</span></div>` +
+      `<div class="exp-line"><span class="label">regime</span><span class="value">${esc(d.regime || "—")}</span></div>` +
+      `<div class="exp-line"><span class="label">entry / stake</span><span class="value">$${esc(d.entry_price)} · $${esc(d.stake)}</span></div>` +
+      (d.reasoning ? `<div class="exp-decision">${esc(d.reasoning)}</div>` : "") +
+      closed +
+    `</div>`
+  );
+}
+
+async function loadExpPairs() {
+  // Prefill the pair dropdown from /api/pairs (existing)
+  const r = await jsonFetch("/api/pairs");
+  const pairs = (r.body && r.body.pairs) || ["BTC/USD", "ETH/USD", "SOL/USD"];
+  const sel = document.getElementById("exp-pair-select");
+  if (!sel) return;
+  sel.replaceChildren();
+  for (const p of pairs) {
+    const opt = document.createElement("option");
+    opt.value = p; opt.textContent = p;
+    sel.appendChild(opt);
+  }
+}
+
+// ─── MCP Tool Console ───────────────────────────────────────────────
+let _mcp_tools = [];        // [{name, doc, mutating, params}, ...]
+const _mcp_history = [];    // most recent first
+const MCP_HISTORY_MAX = 10;
+
+async function loadMcpTools() {
+  const r = await jsonFetch("/api/ops/tools");
+  if (!r.body || !r.body.data || !r.body.data.tools) return;
+  _mcp_tools = r.body.data.tools;
+  const datalist = document.getElementById("mcp-tool-list");
+  if (!datalist) return;
+  datalist.replaceChildren();
+  for (const t of _mcp_tools) {
+    const opt = document.createElement("option");
+    opt.value = t.name;
+    if (t.mutating) opt.label = "❗ " + t.doc;
+    else opt.label = t.doc;
+    datalist.appendChild(opt);
+  }
+}
+
+function _findMcpTool(name) {
+  return _mcp_tools.find(t => t.name === name) || null;
+}
+
+function showMcpToolParams(toolName) {
+  const params = document.getElementById("mcp-params");
+  const doc = document.getElementById("mcp-tool-doc");
+  const exec = document.getElementById("mcp-execute");
+  params.replaceChildren();
+  doc.textContent = "";
+
+  const t = _findMcpTool(toolName);
+  if (!t) {
+    exec.disabled = true;
+    return;
+  }
+  doc.textContent = (t.mutating ? "❗ MUTATING · " : "") + t.doc;
+  for (const p of t.params) {
+    const wrap = document.createElement("label");
+    wrap.style.cssText = "display:flex;flex-direction:column;font-size:11px;color:#7a86b8;";
+    wrap.textContent = `${p.name} (${p.type})${p.required ? " *" : ""}`;
+    const inp = document.createElement("input");
+    inp.type = p.type === "int" || p.type === "float" ? "number" : "text";
+    inp.dataset.paramName = p.name;
+    inp.dataset.paramType = p.type;
+    if (p.type === "bool") {
+      inp.type = "checkbox";
+      inp.checked = !!p.default;
+      inp.style.cssText = "margin-top:4px;";
+    } else {
+      inp.value = p.default ?? "";
+      inp.placeholder = String(p.default ?? "");
+      inp.style.cssText = "margin-top:2px;padding:4px 6px;background:#060a1c;color:#e8ecf8;border:1px solid #2c386a;border-radius:4px;font:inherit;";
+    }
+    wrap.appendChild(inp);
+    params.appendChild(wrap);
+  }
+  exec.disabled = false;
+}
+
+function _collectMcpArgs() {
+  const out = {};
+  document.querySelectorAll("#mcp-params input[data-param-name]").forEach(el => {
+    const name = el.dataset.paramName;
+    const type = el.dataset.paramType;
+    if (type === "bool") {
+      out[name] = el.checked;
+    } else {
+      const raw = el.value.trim();
+      if (raw === "") return;  // omit so default applies
+      out[name] = raw;
+    }
+  });
+  return out;
+}
+
+async function executeMcp() {
+  const name = document.getElementById("mcp-tool-input").value.trim();
+  const t = _findMcpTool(name);
+  if (!t) return;
+  const args = _collectMcpArgs();
+  const exec = document.getElementById("mcp-execute");
+  const out = document.getElementById("mcp-output");
+
+  exec.disabled = true; exec.textContent = "Executing…";
+  out.style.display = "block";
+  out.textContent = "(running)";
+
+  let env;
+  try {
+    env = await qaCallTool(name, args);
+  } catch (e) {
+    env = {status: "down", error: String(e)};
+  }
+  out.textContent = JSON.stringify(env, null, 2);
+
+  pushMcpHistory(name, args, env);
+
+  exec.disabled = false; exec.textContent = "Execute";
+}
+
+function pushMcpHistory(tool, args, env) {
+  _mcp_history.unshift({
+    ts: new Date().toISOString().substring(11, 19) + "Z",
+    tool, args, env,
+  });
+  while (_mcp_history.length > MCP_HISTORY_MAX) _mcp_history.pop();
+  const wrap = document.getElementById("mcp-history-wrap");
+  const list = document.getElementById("mcp-history");
+  wrap.style.display = "block";
+  list.replaceChildren();
+  for (const h of _mcp_history) {
+    const row = document.createElement("div");
+    row.className = "mcp-history-row";
+    const status = h.env && h.env.status === "ok" ? "ok" : "bad";
+    row.innerHTML =
+      `<span class="${status}">${esc(h.env.status || "?")}</span> ` +
+      `<strong>${esc(h.tool)}</strong>` +
+      `<span class="muted">${esc(JSON.stringify(h.args))}</span>` +
+      `<span class="muted">@ ${esc(h.ts)}</span>`;
+    row.addEventListener("click", () => {
+      document.getElementById("mcp-output").style.display = "block";
+      document.getElementById("mcp-output").textContent = JSON.stringify(h.env, null, 2);
+    });
+    list.appendChild(row);
+  }
 }
 
 // ─── Regime parameters editor ──────────────────────────────────────
@@ -525,39 +914,39 @@ async function applyRegimeConfig() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-  document.getElementById("btn-pause").addEventListener("click", pauseClicked);
-  document.getElementById("btn-resume").addEventListener("click", openResumeModal);
-  document.getElementById("btn-rg-apply").addEventListener("click", applyRegimeConfig);
-  document.getElementById("btn-rg-revert").addEventListener("click", () => refreshRegimeConfig());
-  document.getElementById("resume-cancel").addEventListener("click", () => {
-    document.getElementById("resume-modal").classList.remove("open");
-    document.getElementById("resume-input").value = "";
-    document.getElementById("resume-confirm").disabled = true;
-  });
-  document.getElementById("resume-input").addEventListener("input", (e) => {
-    document.getElementById("resume-confirm").disabled = e.target.value !== "RESUME";
-  });
-  document.getElementById("resume-confirm").addEventListener("click", async () => {
-    const r = await fetch("/api/ops/resume", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({confirm: true, reason: "ops-tab manual resume"}),
-    });
-    const body = await r.json().catch(() => ({}));
-    alert(r.ok ? "Resumed. " + JSON.stringify(body.data) : "Failed: " + JSON.stringify(body));
-    document.getElementById("resume-modal").classList.remove("open");
-    document.getElementById("resume-input").value = "";
-    document.getElementById("resume-confirm").disabled = true;
-  });
+  // Quick Actions buttons (replace the old btn-pause / btn-resume / resume-modal flow)
+  document.querySelectorAll(".qa-btn").forEach(b => b.addEventListener("click", qaButtonHandler));
 
+  // Regime params editor
+  const rgApply = document.getElementById("btn-rg-apply");
+  const rgRevert = document.getElementById("btn-rg-revert");
+  if (rgApply) rgApply.addEventListener("click", applyRegimeConfig);
+  if (rgRevert) rgRevert.addEventListener("click", () => refreshRegimeConfig());
+
+  // Explainability pair selector
+  const expSel = document.getElementById("exp-pair-select");
+  if (expSel) expSel.addEventListener("change", refreshExplainability);
+
+  // MCP Console
+  const mcpInput = document.getElementById("mcp-tool-input");
+  const mcpExec  = document.getElementById("mcp-execute");
+  if (mcpInput) mcpInput.addEventListener("input", () => showMcpToolParams(mcpInput.value.trim()));
+  if (mcpExec)  mcpExec.addEventListener("click", executeMcp);
+
+  // First-paint refreshes
   refreshRegime().then(refreshSentiment);
   refreshServices(); refreshTraining(); refreshMcp(); refreshTrades();
   refreshRegimeConfig(); refreshSparklines();
+  refreshSlackPreview();
+  loadExpPairs().then(refreshExplainability);
+  loadMcpTools();
 
   setInterval(() => { refreshRegime().then(refreshSentiment); }, REFRESH_MS.regime);
   setInterval(refreshServices, REFRESH_MS.services);
   setInterval(refreshTraining, REFRESH_MS.training);
   setInterval(refreshMcp,      REFRESH_MS.mcp);
   setInterval(refreshTrades,   REFRESH_MS.trades);
-  setInterval(refreshSparklines, REFRESH_MS.sparklines);
+  setInterval(refreshSparklines,    REFRESH_MS.sparklines);
+  setInterval(refreshSlackPreview,  REFRESH_MS.slack_preview);
+  setInterval(refreshExplainability, REFRESH_MS.explainability);
 });

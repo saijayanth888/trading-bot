@@ -88,6 +88,56 @@
     .modal h3 { margin-top: 0; }
     .modal input { width: 100%; padding: 8px; background: #060a1c; color: #e8ecf8; border: 1px solid #2c386a; border-radius: 6px; font: inherit; }
     .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+
+    /* Quick Actions — color-coded buttons + slide-down result */
+    .qa-btn { font-size: 13px; padding: 9px 14px; border: 1px solid; border-radius: 7px; cursor: pointer; transition: transform 100ms ease, opacity 100ms ease; }
+    .qa-btn:hover:not(:disabled) { transform: translateY(-1px); }
+    .qa-btn:disabled { opacity: 0.55; cursor: progress; }
+    .qa-btn.qa-pause  { background: #36100f; border-color: #c0392b; color: #ff9089; }
+    .qa-btn.qa-resume { background: #0f3320; border-color: #2f8f4f; color: #4cc38a; }
+    .qa-btn.qa-evolve { background: #2a1240; border-color: #7a3aa8; color: #c49bff; }
+    .qa-btn.qa-risk   { background: #3a2c0a; border-color: #c9a227; color: #f7c948; }
+    .qa-btn.qa-regime { background: #0a3036; border-color: #2a8c8c; color: #69d6cd; }
+    .qa-spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: qa-spin 0.7s linear infinite; vertical-align: -1px; margin-right: 6px; }
+    @keyframes qa-spin { to { transform: rotate(360deg); } }
+    .qa-result { margin-top: 14px; padding: 12px 14px; background: #060a1c; border: 1px solid #1f2748; border-radius: 8px; max-height: 0; opacity: 0; overflow: hidden; transition: max-height 250ms ease, opacity 250ms ease; }
+    .qa-result.open { max-height: 600px; opacity: 1; padding: 12px 14px; }
+    .qa-result pre { margin: 6px 0 0; font: 12px/1.4 'JetBrains Mono', 'Menlo', monospace; color: #e8ecf8; white-space: pre-wrap; word-break: break-word; }
+
+    /* Slack-styled card for the daily-report preview */
+    .slack-card { background: #1a1d21; border-left: 4px solid #007a5a; border-radius: 4px; padding: 14px 16px; font: 14px/1.45 -apple-system, system-ui, "Segoe UI", sans-serif; color: #d1d2d3; }
+    .slack-card .slack-author { font-weight: 700; color: #e8e8e8; margin-bottom: 6px; }
+    .slack-card .slack-block-header { font-size: 16px; font-weight: 700; color: #fff; margin: 6px 0; }
+    .slack-card .slack-fields { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px 16px; margin: 6px 0; }
+    .slack-card .slack-field strong { color: #fff; }
+    .slack-card .slack-context { font-size: 12px; color: #8d8d8d; margin-top: 8px; padding-top: 8px; border-top: 1px solid #2a2c30; }
+    .slack-card .slack-divider { height: 1px; background: #2a2c30; margin: 8px 0; }
+    .slack-card .slack-mono { font-family: 'JetBrains Mono', 'Menlo', monospace; font-variant-numeric: tabular-nums; }
+
+    /* Explainability cards */
+    .exp-card { padding: 12px 14px; background: #060a1c; border: 1px solid #1f2748; border-radius: 8px; margin-bottom: 10px; }
+    .exp-card[data-kind="entered"] { border-left: 3px solid #4cc38a; }
+    .exp-card[data-kind="blocked"] { border-left: 3px solid #c9a227; }
+    .exp-card .exp-line { display: flex; justify-content: space-between; padding: 2px 0; font-size: 13px; }
+    .exp-card .exp-line .label { opacity: 0.75; min-width: 110px; }
+    .exp-card .exp-line .value { font-variant-numeric: tabular-nums; }
+    .exp-card .exp-decision { margin-top: 8px; padding-top: 8px; border-top: 1px dashed #1f2748; font-weight: 600; }
+
+    /* Sparkline cards — extra rows for regime band + sentiment line */
+    .spark-regime-bar { display: flex; height: 10px; border-radius: 2px; overflow: hidden; margin-top: 4px; }
+    .spark-regime-seg { height: 100%; }
+    .spark-regime-seg.regime-trending_up    { background: #4cc38a; }
+    .spark-regime-seg.regime-trending_down  { background: #c0392b; }
+    .spark-regime-seg.regime-mean_reverting { background: #4a90e2; }
+    .spark-regime-seg.regime-high_volatility { background: #c9a227; }
+    .spark-regime-seg.regime-unknown        { background: #555; }
+    .spark-sentiment-canvas { width: 100%; height: 26px; display: block; margin-top: 4px; }
+
+    /* MCP Console */
+    #mcp-output { color: #e8ecf8; }
+    .mcp-history-row { font: 11px/1.3 'JetBrains Mono', 'Menlo', monospace; padding: 4px 8px; background: #060a1c; border-radius: 4px; cursor: pointer; }
+    .mcp-history-row:hover { background: #0f1530; }
+    .mcp-history-row .muted { opacity: 0.6; margin-left: 6px; }
   </style>
 </head>
 <body>
@@ -168,28 +218,68 @@
         </div>
       </section>
 
-      <!-- ─── Controls ────────────────────────────────────────────────── -->
-      <div class="controls-bar">
-        <button id="btn-pause"  class="btn primary">⏸ Pause Trading</button>
-        <button id="btn-resume" class="btn success">▶ Resume Trading…</button>
-      </div>
+      <!-- ─── Quick Actions (MCP-routed) ─────────────────────────────── -->
+      <section class="ops-card wide-card" id="card-quick-actions" data-status="ok">
+        <div class="card-head">
+          <h3>Quick actions · <span class="muted" style="font-size:11px;">routed through Hermes MCP — auth via HERMES_MCP_KEY for mutating tools</span></h3>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;">
+          <button class="btn qa-btn qa-pause"   data-tool="pause_trading"        data-confirm="Are you sure? This will stop all trading.">⏸ Pause trading</button>
+          <button class="btn qa-btn qa-resume"  data-tool="resume_trading"       data-confirm="This will enable live/paper trading. Confirm twice." data-double="1">▶ Resume trading</button>
+          <button class="btn qa-btn qa-evolve"  data-tool="trigger_evolution_cycle">🧬 Trigger EPT evolution</button>
+          <button class="btn qa-btn qa-risk"    data-tool="get_risk_status">🛡 Risk status</button>
+          <button class="btn qa-btn qa-regime"  data-tool="get_current_regime">🧭 Regime check</button>
+        </div>
+        <div id="qa-result" class="qa-result" style="display:none;"></div>
+      </section>
+
+      <!-- ─── Slack daily-report preview ─────────────────────────────── -->
+      <section class="ops-card wide-card" id="card-slack-preview" data-status="ok">
+        <div class="card-head">
+          <h3>Slack preview · <span class="muted" style="font-size:11px;">live render of the next daily P&amp;L report (fires 00:00 UTC) · auto-refresh 60s</span></h3>
+          <span class="age" id="slack-preview-age">—</span>
+        </div>
+        <div id="slack-preview-body">Loading…</div>
+      </section>
+
+      <!-- ─── Explainability — last N decisions for the active pair ──── -->
+      <section class="ops-card wide-card" id="card-explainability" data-status="ok">
+        <div class="card-head">
+          <h3>
+            Why this trade fired or didn't ·
+            <select id="exp-pair-select" style="background:#060a1c;color:#e8ecf8;border:1px solid #2c386a;border-radius:4px;padding:2px 6px;font:inherit;font-size:12px;"></select>
+          </h3>
+          <span class="age" id="exp-age">—</span>
+        </div>
+        <div id="exp-body">Pick a pair…</div>
+      </section>
+
+      <!-- ─── MCP Tool Console ──────────────────────────────────────── -->
+      <section class="ops-card wide-card" id="card-mcp-console" data-status="ok">
+        <div class="card-head">
+          <h3>MCP tool console · <span class="muted" style="font-size:11px;">call any of the 15 tools. Mutating tools require <code>HERMES_MCP_KEY</code>.</span></h3>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;">
+          <div style="flex:1 1 260px;min-width:200px;">
+            <label class="muted" style="font-size:11px;">tool</label>
+            <input id="mcp-tool-input" type="text" list="mcp-tool-list" autocomplete="off"
+                   placeholder="start typing a tool name…"
+                   style="width:100%;padding:6px 8px;background:#060a1c;color:#e8ecf8;border:1px solid #2c386a;border-radius:4px;font:inherit;" />
+            <datalist id="mcp-tool-list"></datalist>
+            <div id="mcp-tool-doc" class="muted" style="font-size:11px;margin-top:4px;min-height:16px;"></div>
+          </div>
+          <div id="mcp-params" style="flex:1 1 260px;min-width:200px;display:flex;flex-direction:column;gap:6px;"></div>
+          <button id="mcp-execute" class="btn primary" disabled>Execute</button>
+        </div>
+        <pre id="mcp-output" style="margin-top:10px;background:#060a1c;padding:10px;border-radius:6px;border:1px solid #1f2748;max-height:240px;overflow:auto;font-size:11px;font-family:'JetBrains Mono','Menlo',monospace;display:none;"></pre>
+        <details id="mcp-history-wrap" style="margin-top:8px;display:none;">
+          <summary class="muted" style="cursor:pointer;font-size:12px;">Last 10 calls…</summary>
+          <div id="mcp-history" style="display:flex;flex-direction:column;gap:4px;margin-top:6px;"></div>
+        </details>
+      </section>
 
     </div>
   </main>
-
-  <!-- ─── Resume confirm modal ──────────────────────────────────────── -->
-  <div class="modal-back" id="resume-modal">
-    <div class="modal">
-      <h3>Resume trading?</h3>
-      <p class="muted" id="resume-context">Loading current state…</p>
-      <p>Type <strong>RESUME</strong> to confirm:</p>
-      <input id="resume-input" type="text" autocomplete="off" />
-      <div class="modal-actions">
-        <button class="btn" id="resume-cancel">Cancel</button>
-        <button class="btn success" id="resume-confirm" disabled>Confirm Resume</button>
-      </div>
-    </div>
-  </div>
 
   <script src="/static/js/ops.js" defer></script>
 </body>

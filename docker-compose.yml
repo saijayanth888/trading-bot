@@ -120,6 +120,12 @@ services:
       --config /freqtrade/user_data/config.json
       --strategy FreqAIMeanRevV1
 
+  # ── DEPRECATION NOTICE ────────────────────────────────────────────────
+  # InfluxDB is scheduled for removal once Grafana dashboards are migrated
+  # to query TimescaleDB directly. Until then, both run in parallel.
+  # To remove: delete this service + its volumes, update grafana provisioning
+  # to use the PostgreSQL/TimescaleDB datasource, and remove INFLUX_* from .env.
+  # ────────────────────────────────────────────────────────────────────────
   influxdb:
     image: influxdb:2.7
     container_name: influxdb
@@ -162,10 +168,10 @@ services:
       # hermes-dashboard 9119) from inside the container.
       - "host.docker.internal:host-gateway"
     volumes:
-      # Mount the same user_data the bot writes into so the dashboard reads
-      # the live trade_journal SQLite + evolution.json. RW so the Ops tab
-      # can write config.json (validated + atomic + backed-up) when the
-      # operator updates regime params from /ops.
+      # Mount user_data so the dashboard can read evolution.json and static
+      # assets, and (RW) write config.json when the operator updates regime
+      # params from /ops (validated + atomic + backed-up). Trade data is
+      # read from TimescaleDB, not files.
       - ./user_data:/freqtrade/user_data
     environment:
       - USER_DATA_ROOT=/freqtrade/user_data
@@ -182,6 +188,9 @@ services:
       - FREQTRADE_API_URL=http://freqtrade:8080
       - FREQTRADE_API_USER=${FREQTRADE_API_USER:-freqtrader}
       - FREQTRADE_API_PASS=${FREQTRADE_API_PASS:-}
+      # Hermes MCP key — gates mutating tools (pause/resume/trigger_evolution)
+      # via the /api/ops/mcp/* shim. Read-only tools work without it.
+      - HERMES_MCP_KEY=${HERMES_MCP_KEY:-}
     healthcheck:
       test: ["CMD-SHELL", "python -c 'import urllib.request,sys;sys.exit(0 if urllib.request.urlopen(\"http://127.0.0.1:8081/api/pairs\", timeout=3).status==200 else 1)'"]
       interval: 30s
