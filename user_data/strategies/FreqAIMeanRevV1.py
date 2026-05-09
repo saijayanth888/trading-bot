@@ -363,6 +363,17 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
     # _last_metric_hour) is owned by MonitoringMixin and initialised in
     # _init_monitoring().
 
+    # ── Capital allocation (config.json[capital_allocation]) ──
+    # Drives per-pair max stake (pair_weights) and a rolling-Sharpe gate
+    # (min_sharpe_for_trading) so weak pairs become data-only.
+    _capital_allocation: dict = {}
+    # Per-pair rolling Sharpe (annualised, last 14 days) cache; refreshed
+    # at most once per hour from trade_journal.
+    _pair_rolling_sharpe: dict = {}
+    _rolling_sharpe_refreshed_at: float = 0.0
+    # Compounded-equity log latch — emit at most one INFO line per UTC day.
+    _last_compounding_log_date: str | None = None
+
     # ------------------------------------------------------------------
     # FreqAI feature engineering
     # ------------------------------------------------------------------
@@ -477,6 +488,20 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         # any of the optional monitoring modules failed to import.
         self._init_monitoring(self.config)
 
+        # Capital-allocation block (config.json[capital_allocation]). Safe
+        # default: empty dict → all pair_weights default to 1.0 (no cap),
+        # min_sharpe_for_trading defaults to 0.0 (gate disabled).
+        self._capital_allocation = dict(self.config.get("capital_allocation") or {})
+        if self._capital_allocation:
+            mode = self._capital_allocation.get("mode", "performance_weighted")
+            n_weights = len(self._capital_allocation.get("pair_weights") or {})
+            logger.info(
+                "[strategy] capital allocation: mode=%s, %d pair_weights, "
+                "min_sharpe_for_trading=%.2f",
+                mode, n_weights,
+                float(self._capital_allocation.get("min_sharpe_for_trading", 0.0)),
+            )
+
     def bot_loop_start(self, current_time, **kwargs) -> None:
         """
         Per-iteration tick: refresh equity, harvest newly-closed trades,
@@ -510,6 +535,151 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         # safe to call every iteration.
         self._maybe_write_hourly_snapshot(current_time, equity, gov)
         self._maybe_send_daily_summary(current_time, gov)
+
+        # Refresh per-pair 14-day rolling Sharpe at most once per hour, used
+        # by the capital_allocation gate (min_sharpe_for_trading) and by the
+        # entry-threshold tweak in populate_entry_trend.
+        self._refresh_rolling_sharpe_if_due(current_time)
+
+        # Once-per-UTC-day compounded-equity INFO line (visibility only —
+        # freqtrade already compounds in dry-run via its in-memory wallet).
+        self._maybe_log_compounding(current_time)
+
+    # ------------------------------------------------------------------
+    # Capital allocation + rolling-Sharpe gate
+    # ------------------------------------------------------------------
+
+    def _pair_weight(self, pair: str) -> float:
+        """Max fraction of equity allowed for this pair (0 = data-only).
+
+        Comes from config.json[capital_allocation][pair_weights]. Defaults to
+        1.0 if no allocation is configured (i.e. no per-pair cap).
+        """
+        if not self._capital_allocation:
+            return 1.0
+        weights = self._capital_allocation.get("pair_weights") or {}
+        if pair not in weights:
+            return 0.0  # missing = excluded
+        try:
+            return max(0.0, min(1.0, float(weights[pair])))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _min_sharpe_for_trading(self) -> float:
+        if not self._capital_allocation:
+            return 0.0
+        return float(self._capital_allocation.get("min_sharpe_for_trading", 0.0))
+
+    def _refresh_rolling_sharpe_if_due(self, now=None) -> None:
+        """Re-compute per-pair 14-day rolling Sharpe at most once an hour.
+
+        Reads ``trade_journal``, groups by pair, computes annualised Sharpe
+        on daily P&L percentages. Pairs with no trades stay at None — the
+        gate treats None as "no data → allow" (let the system bootstrap).
+        """
+        import time as _time
+        now_ts = _time.time()
+        if (now_ts - self._rolling_sharpe_refreshed_at) < 3600:
+            return
+        self._rolling_sharpe_refreshed_at = now_ts
+
+        try:
+            sys.path.insert(0, str(_USER_DATA))
+            from modules import db as _db
+            with _db.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT pair, closed_at, pnl_pct
+                    FROM trade_journal
+                    WHERE closed_at IS NOT NULL
+                      AND closed_at > NOW() - INTERVAL '14 days'
+                    ORDER BY pair, closed_at
+                    """
+                )
+                rows = cur.fetchall()
+        except Exception as exc:
+            logger.debug("[strategy] rolling Sharpe refresh failed: %s", exc)
+            return
+
+        # Group: pair → list of daily-P&L-pct sums
+        from collections import defaultdict
+        import math as _math
+        per_pair_daily: dict[str, dict[str, float]] = defaultdict(dict)
+        for r in rows:
+            pair = r["pair"]
+            day = r["closed_at"].strftime("%Y-%m-%d")
+            per_pair_daily[pair][day] = (
+                per_pair_daily[pair].get(day, 0.0) + float(r["pnl_pct"] or 0.0)
+            )
+
+        new_cache: dict[str, float] = {}
+        for pair, daily in per_pair_daily.items():
+            pcts = list(daily.values())
+            if len(pcts) < 2:
+                continue
+            mean = sum(pcts) / len(pcts)
+            var = sum((x - mean) ** 2 for x in pcts) / (len(pcts) - 1)
+            sd = _math.sqrt(var)
+            if sd <= 0:
+                continue
+            sharpe = (mean / sd) * _math.sqrt(365)
+            new_cache[pair] = float(sharpe)
+        self._pair_rolling_sharpe = new_cache
+        if new_cache:
+            logger.info(
+                "[strategy] rolling 14d Sharpe refreshed: %s",
+                {p: round(s, 2) for p, s in sorted(new_cache.items())},
+            )
+
+    def _entry_threshold_adjust(self, pair: str, base: float) -> float:
+        """Per-pair entry-threshold tweak based on rolling Sharpe.
+
+        Stronger pairs (live Sharpe > 0.9) get a -0.05 nudge so the bot
+        enters more easily; weaker pairs (< 0.7) get +0.10. Pairs with no
+        live data are unchanged. Below ``min_sharpe_for_trading`` the gate
+        in populate_entry_trend blocks entry outright, so this method's
+        +0.10 branch is a defence-in-depth layer.
+        """
+        s = self._pair_rolling_sharpe.get(pair)
+        if s is None:
+            return base
+        if s > 0.9:
+            return base - 0.05
+        if s < 0.7:
+            return base + 0.10
+        return base
+
+    def _maybe_log_compounding(self, now) -> None:
+        """Once per UTC day, INFO-log the compounded paper-trading equity.
+
+        Freqtrade already compounds in dry-run by tracking the wallet in
+        memory (initial dry_run_wallet + accumulated P&L). This hook only
+        surfaces the number for operator visibility; it does NOT mutate
+        config.json, which would require a restart to take effect.
+        """
+        try:
+            today = now.strftime("%Y-%m-%d")
+        except Exception:
+            return
+        if self._last_compounding_log_date == today:
+            return
+        # Run shortly after midnight UTC so the previous day's last close
+        # has settled in the wallet.
+        if not (0 <= getattr(now, "hour", 0) <= 1):
+            return
+        try:
+            initial = float(self.config.get("dry_run_wallet", 0) or 0)
+            current_equity = float(self.wallets.get_total_stake_amount())
+            cum_pnl = current_equity - initial
+            growth_pct = (cum_pnl / initial * 100.0) if initial else 0.0
+            logger.info(
+                "[compounding] day=%s initial_wallet=$%.2f current_equity=$%.2f "
+                "cumulative_pnl=$%+.2f growth=%+.2f%%",
+                today, initial, current_equity, cum_pnl, growth_pct,
+            )
+            self._last_compounding_log_date = today
+        except Exception as exc:
+            logger.debug("[compounding] log failed: %s", exc)
 
     def _open_positions_snapshot(self) -> list[tuple[str, float]]:
         """Return [(pair, current_stake_in_quote), ...] for all open trades."""
@@ -831,7 +1001,24 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
                     or (dataframe["meta_position_size"] > 0).any())
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        base = float(self.entry_threshold.value)
+        pair = metadata.get("pair", "")
+        # Capital-allocation gates (no-op if config has no [capital_allocation]).
+        # 1) Pair excluded entirely (weight=0): block all entries; model still
+        #    trains so the data feed stays warm.
+        # 2) Rolling 14d live Sharpe known and below the floor: block.
+        if pair and self._capital_allocation:
+            if self._pair_weight(pair) <= 0.0:
+                dataframe["enter_long"] = 0
+                return dataframe
+            min_sharpe = self._min_sharpe_for_trading()
+            live_sharpe = self._pair_rolling_sharpe.get(pair)
+            if min_sharpe > 0 and live_sharpe is not None and live_sharpe < min_sharpe:
+                dataframe["enter_long"] = 0
+                return dataframe
+
+        # Per-pair entry-threshold tweak: stronger live Sharpe lowers the bar,
+        # weaker raises it. base is the strategy's hyperopt-tunable default.
+        base = self._entry_threshold_adjust(pair, float(self.entry_threshold.value))
         threshold = self._per_row_threshold(dataframe, base, self.REGIME_ENTRY_DELTA)
 
         long_conditions = [
@@ -970,6 +1157,23 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
                     stake = float(decision.suggested_stake)
             except Exception as exc:
                 logger.debug("[strategy] governor sizing call failed: %s", exc)
+
+        # Capital-allocation cap: stake ≤ pair_weight × equity. Ensures
+        # ETH/BTC concentration matches config without touching the
+        # max_position_size_pct floor in risk_management.
+        weight = self._pair_weight(pair)
+        if weight > 0.0 and weight < 1.0:
+            try:
+                equity_for_cap = float(self.wallets.get_total_stake_amount())
+                pair_cap = equity_for_cap * weight
+                if stake > pair_cap > 0:
+                    logger.debug(
+                        "[strategy] %s: capping stake %.2f → %.2f (weight=%.2f, equity=%.2f)",
+                        pair, stake, pair_cap, weight, equity_for_cap,
+                    )
+                    stake = pair_cap
+            except Exception:
+                pass
 
         if min_stake is not None:
             stake = max(stake, min_stake)

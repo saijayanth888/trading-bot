@@ -185,17 +185,41 @@ cmd_status() {
     echo "Window PnL (30d): $(window_pnl 30)"
 }
 
+# Stage ratios — controlled by FAST_TRACK env var (default: standard).
+#   standard:   stage1 0.10 → 0.30 → 0.50 → 0.99 over 7/14/30 days
+#   FAST_TRACK: stage1 0.15 → 0.40 → 0.75 → 0.99 over fewer days
+FAST_TRACK="${FAST_TRACK:-0}"
+if [[ "$FAST_TRACK" == "1" ]]; then
+    STAGE1_RATIO=0.15
+    STAGE2_RATIO=0.40
+    STAGE3_RATIO=0.75
+    STAGE4_RATIO=0.99
+    STAGE2_MIN_DAYS=4
+    STAGE3_MIN_DAYS=7
+    STAGE4_MIN_DAYS=14
+    INIT_VALIDATOR_FLAGS="--fast-track"
+else
+    STAGE1_RATIO=0.10
+    STAGE2_RATIO=0.30
+    STAGE3_RATIO=0.50
+    STAGE4_RATIO=0.99
+    STAGE2_MIN_DAYS=7
+    STAGE3_MIN_DAYS=14
+    STAGE4_MIN_DAYS=30
+    INIT_VALIDATOR_FLAGS=""
+fi
+
 cmd_init() {
-    log "init: validating readiness"
-    if ! python3 "${ROOT_DIR}/scripts/validate_readiness.py"; then
+    log "init: validating readiness (FAST_TRACK=$FAST_TRACK)"
+    if ! python3 "${ROOT_DIR}/scripts/validate_readiness.py" $INIT_VALIDATOR_FLAGS; then
         die "validate_readiness.py failed — aborting init"
     fi
-    log "init: validation passed; flipping dry_run=false, ratio=0.10"
-    patch_config 0.10 false
-    py_state set_stage 1 0.10 init
-    py_state record_event "INIT" "stage=1 ratio=0.10"
+    log "init: validation passed; flipping dry_run=false, ratio=$STAGE1_RATIO"
+    patch_config "$STAGE1_RATIO" false
+    py_state set_stage 1 "$STAGE1_RATIO" init
+    py_state record_event "INIT" "stage=1 ratio=$STAGE1_RATIO fast_track=$FAST_TRACK"
     restart_bot
-    log "init: live trading started at stage 1 (ratio 0.10)"
+    log "init: live trading started at stage 1 (ratio $STAGE1_RATIO)"
 }
 
 cmd_advance() {
@@ -209,31 +233,31 @@ cmd_advance() {
 
     case "$cur_stage" in
         1)
-            (( cur_days >= 7 )) || die "stage 1 requires 7 days live (have $cur_days)"
-            local pnl; pnl="$(window_pnl 7)"
+            (( cur_days >= STAGE2_MIN_DAYS )) || die "stage 1 requires $STAGE2_MIN_DAYS days live (have $cur_days)"
+            local pnl; pnl="$(window_pnl $STAGE2_MIN_DAYS)"
             python3 -c "import sys; sys.exit(0 if float('$pnl') > 0 else 1)" \
-                || die "stage 1 -> 2 requires last-7d PnL > 0 (have $pnl)"
-            log "advance: stage 1 → 2; ratio 0.30  (week-1 PnL=$pnl)"
-            patch_config 0.30 false
-            py_state set_stage 2 0.30 "week1_pnl=$pnl"
+                || die "stage 1 -> 2 requires last-${STAGE2_MIN_DAYS}d PnL > 0 (have $pnl)"
+            log "advance: stage 1 → 2; ratio $STAGE2_RATIO  (week-1 PnL=$pnl)"
+            patch_config "$STAGE2_RATIO" false
+            py_state set_stage 2 "$STAGE2_RATIO" "week1_pnl=$pnl"
             ;;
         2)
-            (( cur_days >= 14 )) || die "stage 2 requires 14 days live (have $cur_days)"
+            (( cur_days >= STAGE3_MIN_DAYS )) || die "stage 2 requires $STAGE3_MIN_DAYS days live (have $cur_days)"
             local pnl; pnl="$(window_pnl 7)"
             python3 -c "import sys; sys.exit(0 if float('$pnl') > 0 else 1)" \
                 || die "stage 2 -> 3 requires last-7d PnL > 0 (have $pnl)"
-            log "advance: stage 2 → 3; ratio 0.50  (week-2 PnL=$pnl)"
-            patch_config 0.50 false
-            py_state set_stage 3 0.50 "week2_pnl=$pnl"
+            log "advance: stage 2 → 3; ratio $STAGE3_RATIO  (week-2 PnL=$pnl)"
+            patch_config "$STAGE3_RATIO" false
+            py_state set_stage 3 "$STAGE3_RATIO" "week2_pnl=$pnl"
             ;;
         3)
-            (( cur_days >= 30 )) || die "stage 3 requires 30 days live (have $cur_days)"
-            local pnl; pnl="$(window_pnl 30)"
+            (( cur_days >= STAGE4_MIN_DAYS )) || die "stage 3 requires $STAGE4_MIN_DAYS days live (have $cur_days)"
+            local pnl; pnl="$(window_pnl $STAGE4_MIN_DAYS)"
             python3 -c "import sys; sys.exit(0 if float('$pnl') > 0 else 1)" \
-                || die "stage 3 -> 4 requires last-30d PnL > 0 (have $pnl)"
-            log "advance: stage 3 → 4; ratio 0.99  (30d PnL=$pnl)"
-            patch_config 0.99 false
-            py_state set_stage 4 0.99 "month1_pnl=$pnl"
+                || die "stage 3 -> 4 requires last-${STAGE4_MIN_DAYS}d PnL > 0 (have $pnl)"
+            log "advance: stage 3 → 4; ratio $STAGE4_RATIO  (${STAGE4_MIN_DAYS}d PnL=$pnl)"
+            patch_config "$STAGE4_RATIO" false
+            py_state set_stage 4 "$STAGE4_RATIO" "month1_pnl=$pnl"
             ;;
         4)
             log "already at stage 4 (max ratio 0.99) — nothing to advance"

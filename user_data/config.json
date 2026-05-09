@@ -13,6 +13,12 @@
     "bot_name": "freqtrade-meanrev",
     "initial_state": "running",
     "force_entry_enable": false,
+    "minimal_roi": {
+        "0":  0.030,
+        "20": 0.015,
+        "40": 0.008,
+        "60": 0
+    },
     "unfilledtimeout": {
         "entry": 60,
         "exit": 60,
@@ -173,27 +179,54 @@
     "logfile": "user_data/logs/freqtrade.log",
     "db_url": "__OVERRIDDEN_BY__FREQTRADE__DB_URL__",
     "regime_gating": {
-        "_doc": "Per-regime tuning. entry_delta values are added to entry_threshold; exit_delta values are added to exit_threshold. null means 'hard-block long entries in this regime'. Override at runtime with FREQTRADE__REGIME_GATING__<KEY> env vars.",
+        "_doc": "Per-regime tuning. entry_delta values are added to entry_threshold; exit_delta values are added to exit_threshold. null means 'hard-block long entries in this regime'. Override at runtime with FREQTRADE__REGIME_GATING__<KEY> env vars. AGGRESSIVE first-30-day stance for $1k/mo target — risk_management floor (8% DD, 3% daily, 5-loss breaker, Kelly 0.5) is unchanged.",
         "entry_delta": {
-            "trending_up": -0.05,
-            "mean_reverting": 0.0,
-            "high_volatility": 0.15,
-            "trending_down": 0.2,
-            "unknown": 0.0
+            "trending_up":     -0.08,
+            "mean_reverting":   0.00,
+            "high_volatility":  0.08,
+            "trending_down":    0.15,
+            "unknown":          0.00
         },
         "exit_delta": {
-            "mean_reverting": -0.1,
-            "trending_up": 0.05,
-            "high_volatility": 0.0,
-            "trending_down": -0.2,
-            "unknown": 0.0
+            "mean_reverting":  -0.10,
+            "trending_up":      0.05,
+            "high_volatility":  0.00,
+            "trending_down":   -0.20,
+            "unknown":          0.00
         },
-        "high_vol_stake_factor": 0.5,
-        "high_vol_min_confidence": 0.75,
-        "mean_rev_take_profit": 0.015,
-        "trending_up_trail_trigger": 0.03,
-        "trending_up_trail_distance": -0.025,
-        "tft_min_confidence": 0.4,
-        "meta_min_confidence": 0.4
+        "high_vol_stake_factor":      0.7,
+        "high_vol_min_confidence":    0.65,
+        "mean_rev_take_profit":       0.012,
+        "trending_up_trail_trigger":  0.025,
+        "trending_up_trail_distance": -0.02,
+        "tft_min_confidence":         0.35,
+        "meta_min_confidence":        0.35
+    },
+    "capital_allocation": {
+        "_doc": "Weights determine max capital allocation per pair. Pairs below min_sharpe_for_trading are data-only (model still trains, no entries). The strategy reads rolling 14-day Sharpe from trade_journal at bot_loop_start cadence; when fewer than `rebalance_after_days` of live data exist the trained val_sharpe is used as a bootstrap. Auto-rebalance recomputes weights on the rebalance_after_days schedule.",
+        "mode": "performance_weighted",
+        "min_sharpe_for_trading": 0.7,
+        "pair_weights": {
+            "BTC/USD":   0.40,
+            "ETH/USD":   0.40,
+            "SOL/USD":   0.15,
+            "ADA/USD":   0.05,
+            "MATIC/USD": 0.00
+        },
+        "rebalance_after_days": 14
+    },
+    "ept_evolution": {
+        "_doc": "EPT evolution — accelerated cadence for first-30-day push toward champion convergence. Larger population (12) for diversity; tighter cycle (12h train + 24h eval = 36h gen) for faster generations. risk_governor still gates every trade.",
+        "population_size":         12,
+        "train_hours":             12,
+        "eval_hours":              24,
+        "elite_count":              4,
+        "children_count":           5,
+        "random_inject_count":      3,
+        "mutation_sigma_initial":   0.15,
+        "mutation_sigma_decay":     0.95,
+        "min_sharpe_for_champion":  0.8,
+        "auto_demote_rolling_window": 3,
+        "auto_demote_sharpe_floor":   0.5
     }
 }

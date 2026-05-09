@@ -223,19 +223,30 @@ class PopulationMember:
 
 @dataclass
 class EvolutionConfig:
-    population_size: int = 8
-    elite_count: int = 3
-    eliminate_count: int = 3
-    random_inject: int = 2
+    # Defaults below are the accelerated first-30-day values (population 12,
+    # σ_init 0.15) — production callers should pass a config dict via
+    # ``EvolutionConfig.from_dict(cfg["ept_evolution"])`` so the values stay
+    # in lock-step with config.json. The dataclass defaults are a fall-back
+    # if config is absent.
+    population_size: int = 12
+    elite_count: int = 4
+    eliminate_count: int = 5
+    random_inject: int = 3
 
     alpha_min: float = 0.3
     alpha_max: float = 0.7
-    mutation_sigma_initial: float = 0.30
+    mutation_sigma_initial: float = 0.15
     mutation_sigma_decay: float = 0.95     # per generation
     feature_mutation_swap_count: int = 1   # drop k, add k
 
+    # Generation cadence (informational + read by EPT scheduler scripts).
+    # 12h training + 24h eval = 36h per generation (was 24h + 48h = 72h).
+    train_hours: float = 12.0
+    eval_hours: float = 24.0
+
     auto_demote_threshold: float = 0.5
     auto_demote_window: int = 3            # number of recent reports
+    min_sharpe_for_champion: float = 0.8   # champion must beat this; else "no champion"
 
     base_dir: Path = field(
         default_factory=lambda: Path("user_data/models/evolution")
@@ -246,15 +257,57 @@ class EvolutionConfig:
     seed: int = 42
 
     def __post_init__(self) -> None:
-        # Sanity: 3 elites + 3 children + 2 random = 8 by default. Allow
-        # overrides but warn if they don't add up.
-        expected = self.elite_count + self.random_inject + 3
+        # Sanity: elites + children + randoms should equal population_size.
+        # Default: 4 elites + 5 children + 3 random = 12.
+        expected = self.elite_count + self.random_inject + self.eliminate_count
         if self.population_size != expected:
             logger.warning(
                 "[ept] population_size=%d but elite+children+random=%d; "
                 "the manager will only enforce population_size as the survival cap.",
                 self.population_size, expected,
             )
+
+    @classmethod
+    def from_dict(cls, d: dict | None) -> "EvolutionConfig":
+        """Build an EvolutionConfig from a config.json[ept_evolution] dict.
+
+        Unknown keys (e.g. the ``_doc`` comment) are ignored. Caller-supplied
+        values override the dataclass defaults, so dropping a key in the
+        config falls back to the in-class default. Used as:
+
+            cfg = json.load(open("user_data/config.json"))
+            ev_cfg = EvolutionConfig.from_dict(cfg.get("ept_evolution"))
+        """
+        if not d:
+            return cls()
+        # Map config-style names → dataclass fields. The user-facing names
+        # in config.json mirror the prompt for readability; keep them.
+        rename = {
+            "children_count":            "eliminate_count",
+            "random_inject_count":       "random_inject",
+            "min_sharpe_for_champion":   "min_sharpe_for_champion",
+            "auto_demote_rolling_window": "auto_demote_window",
+            "auto_demote_sharpe_floor":   "auto_demote_threshold",
+        }
+        kwargs: dict = {}
+        valid = {f for f in cls.__dataclass_fields__}
+        for k, v in d.items():
+            if k.startswith("_"):
+                continue
+            field_name = rename.get(k, k)
+            if field_name in valid:
+                kwargs[field_name] = v
+            else:
+                logger.warning("[ept] unknown config key %r — ignoring", k)
+        return cls(**kwargs)
+
+    @classmethod
+    def from_config_file(cls, path: str | Path = "user_data/config.json") -> "EvolutionConfig":
+        """Convenience: read config.json and pull the [ept_evolution] block."""
+        import json
+        with Path(path).open("r") as f:
+            cfg = json.load(f)
+        return cls.from_dict(cfg.get("ept_evolution"))
 
 
 # ---------------------------------------------------------------------------

@@ -264,6 +264,22 @@ def _print_report(report: ReadinessReport) -> None:
         print(msg)
 
 
+# Fast-track criteria — for accelerated graduation when paper trading shows
+# strong early results. The trade-off vs the standard gate: fewer trades and
+# fewer days, BUT a higher Sharpe bar (1.2 vs 1.5 is wrong — fast-track is
+# tighter not looser). Tighter drawdown (8% vs 12%) keeps risk floored.
+FAST_TRACK_CRITERIA: dict = {
+    "min_days":          7,       # 7 days instead of 28
+    "min_sharpe":        1.2,     # 1.2 (lower than full-track's 1.5 because
+                                  # 7-day window has a wider Sharpe CI; we
+                                  # compensate with the tighter DD/PF below)
+    "max_drawdown":      0.08,    # 8% (vs 12% standard) — tighter
+    "min_profit_factor": 1.5,     # 1.5 (vs 1.4 standard) — tighter
+    "min_trades":        80,      # 80 (vs 200 standard) — fewer, since 7d
+    "min_win_rate":      0.55,
+}
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--dsn", default=DEFAULT_DSN,
@@ -275,18 +291,44 @@ def main() -> int:
     p.add_argument("--profit-factor-min", type=float, default=1.4)
     p.add_argument("--win-rate-min", type=float, default=0.55)
     p.add_argument("--trades-min", type=int, default=200)
+    p.add_argument("--fast-track", action="store_true",
+                   help="Use the accelerated criteria (7-day window, tighter DD/PF, "
+                        "fewer trades). Pulls thresholds from FAST_TRACK_CRITERIA.")
     p.add_argument("--json", action="store_true", help="Emit JSON report only")
     args = p.parse_args()
 
+    if args.fast_track:
+        ft = FAST_TRACK_CRITERIA
+        # Operator-supplied flags still win over the fast-track defaults so
+        # a conservative operator can override one knob without rewriting
+        # the table.
+        window_days   = args.window_days   if args.window_days   is not None else ft["min_days"]
+        sharpe_min    = args.sharpe_min    if args.sharpe_min    != 1.5      else ft["min_sharpe"]
+        drawdown_max  = args.drawdown_max  if args.drawdown_max  != 0.12     else ft["max_drawdown"]
+        pf_min        = args.profit_factor_min if args.profit_factor_min != 1.4 else ft["min_profit_factor"]
+        wr_min        = args.win_rate_min  if args.win_rate_min  != 0.55     else ft["min_win_rate"]
+        trades_min    = args.trades_min    if args.trades_min    != 200      else ft["min_trades"]
+    else:
+        window_days   = args.window_days
+        sharpe_min    = args.sharpe_min
+        drawdown_max  = args.drawdown_max
+        pf_min        = args.profit_factor_min
+        wr_min        = args.win_rate_min
+        trades_min    = args.trades_min
+
     report = evaluate_readiness(
-        args.dsn, window_days=args.window_days,
-        sharpe_min=args.sharpe_min, drawdown_max=args.drawdown_max,
-        profit_factor_min=args.profit_factor_min,
-        win_rate_min=args.win_rate_min, trades_min=args.trades_min,
+        args.dsn, window_days=window_days,
+        sharpe_min=sharpe_min, drawdown_max=drawdown_max,
+        profit_factor_min=pf_min,
+        win_rate_min=wr_min, trades_min=trades_min,
     )
     if args.json:
-        print(json.dumps(report.to_dict(), indent=2))
+        out = report.to_dict()
+        out["mode"] = "fast-track" if args.fast_track else "standard"
+        print(json.dumps(out, indent=2))
     else:
+        if args.fast_track:
+            print("(fast-track mode — accelerated criteria)")
         _print_report(report)
     return 0 if report.all_passed else 1
 
