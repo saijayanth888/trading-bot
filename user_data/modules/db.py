@@ -64,7 +64,12 @@ def dsn() -> str:
     if explicit:
         return explicit
     user = os.environ.get("POSTGRES_USER", "tradebot")
-    password = os.environ.get("POSTGRES_PASSWORD", "tradebot-change-me")
+    password = os.environ.get("POSTGRES_PASSWORD", "")
+    if not password:
+        raise RuntimeError(
+            "POSTGRES_PASSWORD env var is required. "
+            "Set it in .env or export it before starting."
+        )
     host = os.environ.get("POSTGRES_HOST", "postgres")
     port = os.environ.get("POSTGRES_PORT", "5432")
     db = os.environ.get("POSTGRES_DB", "tradebot")
@@ -148,8 +153,17 @@ def ensure_schema() -> None:
 
 
 def _redacted_dsn() -> str:
-    """DSN with the password masked, for log lines."""
-    raw = dsn()
+    """DSN with the password masked, for log lines.
+
+    Used by diagnostic / skip-message paths. If dsn() can't be assembled
+    (e.g. POSTGRES_PASSWORD unset during a test run with no DB available),
+    return a placeholder so log/skip output stays useful — the strict raise
+    still happens on real connection attempts via pool() / connect().
+    """
+    try:
+        raw = dsn()
+    except RuntimeError as exc:
+        return f"<dsn unavailable: {exc}>"
     try:
         # postgresql://user:pass@host:port/db
         if "://" in raw and "@" in raw:

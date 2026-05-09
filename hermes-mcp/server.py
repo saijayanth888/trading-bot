@@ -37,6 +37,7 @@ Port 8089 (configurable via HERMES_MCP_PORT).
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -111,6 +112,25 @@ def _audit(tool: str, args: dict, result_summary: str = "ok") -> None:
              tool, json.dumps(args, default=str)[:300], result_summary[:200])
 
 
+def _require_auth(fn):
+    """Decorator: reject mutating MCP tool calls when HERMES_MCP_KEY is unset.
+
+    FastMCP doesn't yet support transport-level auth headers, so this is a
+    server-side gate: if the key isn't configured, the call is refused
+    outright. When transport-level token validation lands, replace the body
+    of this wrapper with the per-request check.
+    """
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        if not HERMES_MCP_KEY:
+            log.warning("BLOCKED %s — HERMES_MCP_KEY not configured", fn.__name__)
+            return {"error": "MCP authentication not configured. "
+                             "Set HERMES_MCP_KEY in .env to enable mutating tools."}
+        _audit(fn.__name__, {"auth": "key_present"}, "authorized")
+        return await fn(*args, **kwargs)
+    return wrapper
+
+
 # ---------------------------------------------------------------------------
 # DSN resolution (URL-encoded password — same pattern as modules/db.py)
 # ---------------------------------------------------------------------------
@@ -121,7 +141,12 @@ def _dsn() -> str:
     if explicit:
         return explicit
     user = os.environ.get("POSTGRES_USER", "tradebot")
-    password = os.environ.get("POSTGRES_PASSWORD", "tradebot-change-me")
+    password = os.environ.get("POSTGRES_PASSWORD", "")
+    if not password:
+        raise RuntimeError(
+            "POSTGRES_PASSWORD env var is required for hermes-mcp. "
+            "Set it in .env or export it before starting."
+        )
     host = os.environ.get("POSTGRES_HOST", "localhost")
     port = os.environ.get("POSTGRES_PORT", "5434")
     db = os.environ.get("POSTGRES_DB", "tradebot")
@@ -348,8 +373,9 @@ async def get_evolution_status() -> dict:
 
 
 @mcp.tool()
+@_require_auth
 async def trigger_evolution_cycle() -> dict:
-    """Kick off a new EPT generation — calls scripts/train_drl.py via shell."""
+    """❗ Kick off a new EPT generation — calls scripts/train_drl.py via shell."""
     script = ROOT_DIR / "user_data" / "scripts" / "train_drl.py"
     if not script.exists():
         return {"error": f"script missing: {script}"}
@@ -401,6 +427,7 @@ async def get_risk_status() -> dict:
 
 
 @mcp.tool()
+@_require_auth
 async def pause_trading(reason: str = "manual_pause_via_mcp") -> dict:
     """❗ Flip dry_run=true in config.json. Reversible via resume_trading."""
     try:
@@ -418,6 +445,7 @@ async def pause_trading(reason: str = "manual_pause_via_mcp") -> dict:
 
 
 @mcp.tool()
+@_require_auth
 async def resume_trading(confirm: bool = False) -> dict:
     """❗ Flip dry_run=false. Requires confirm=True for safety."""
     if not confirm:
@@ -557,7 +585,12 @@ async def get_regime_history(days: int = 30) -> list[dict]:
 
 def _check_auth() -> None:
     if not HERMES_MCP_KEY:
-        log.warning("HERMES_MCP_KEY not set — running without authentication")
+        log.warning(
+            "⚠️  HERMES_MCP_KEY not set — mutating tools (pause/resume/trigger) "
+            "are DISABLED. Set HERMES_MCP_KEY in .env to enable."
+        )
+    else:
+        log.info("MCP auth configured — mutating tools enabled")
 
 
 # ---------------------------------------------------------------------------

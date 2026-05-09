@@ -1,6 +1,13 @@
 """
 FreqAI integration for the Temporal Fusion Transformer.
 
+GPU memory budget on DGX Spark (128 GB unified):
+  ModelForge:    ~25 GB (20% during campaigns)
+  Hermes 3 70B:  ~40 GB (evicts between 15-min sentiment polls)
+  Hermes 3 8B:   ~5 GB  (stays warm)
+  TFT training:  ~38 GB cap (this model, set_per_process_memory_fraction=0.3)
+  Headroom:      ~20 GB for OS + Docker + spikes
+
 Inherits from BasePyTorchClassifier so the existing strategy keeps using
 `dataframe["up"]` / `dataframe["down"]` columns. Adds a `tft_confidence`
 column derived from the quantile spread of an auxiliary regression head.
@@ -64,6 +71,20 @@ from freqaimodels.tft_architecture import (   # noqa: E402
     TemporalFusionTransformer,
     pinball_loss,
 )
+
+# Defensive sys.modules aliases: torch.save's serializer for the
+# TFTTrainerWrapper instance saved inside fit() needs the class to be
+# reachable via its declared __module__ string. Whether freqai's resolver
+# imports this file as the bare "TFTModel" or as "freqaimodels.TFTModel"
+# varies between freqtrade releases, so we register both aliases pointing
+# at the currently-loaded module. Without this, the model save crashes
+# mid-training with:
+#     _PicklingError: Can't ... <class 'TFTModel.TFTTrainerWrapper'>:
+#         No module named 'TFTModel'
+# and freqai never writes pair_dictionary.json — so load_data() returns
+# None for every pair forever and the strategy gets null predictions.
+sys.modules.setdefault("TFTModel", sys.modules[__name__])
+sys.modules.setdefault("freqaimodels.TFTModel", sys.modules[__name__])
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +177,17 @@ class TFTModel(BasePyTorchClassifier):
     # ---------------------------------------------------------------
 
     def fit(self, data_dictionary: dict, dk: FreqaiDataKitchen, **kwargs) -> Any:
+        # Guard against ballooning past our GPU budget. The Spark's 128 GB
+        # unified memory is shared with ModelForge + Hermes 3 70B/8B; without
+        # a cap, TFT's autograd cache can drift past 50 GB on large windows
+        # and starve the Ollama inference path. Cap to 30% (~38 GB).
+        try:
+            if str(self.device) == "cuda":
+                torch.cuda.set_per_process_memory_fraction(0.3)
+                logger.info("GPU memory fraction capped at 30%% (~38 GB of 128 GB unified)")
+        except Exception as exc:
+            logger.warning("Could not set GPU memory fraction: %s", exc)
+
         class_names = self.get_class_names()
         self.convert_label_column_to_int(data_dictionary, dk, class_names)
 

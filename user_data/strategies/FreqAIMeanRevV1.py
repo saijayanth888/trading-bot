@@ -101,17 +101,10 @@ except Exception as exc:
     RiskGovernor = None
     _RISK_AVAILABLE = False
 
-try:
-    from modules.slack_alerts import SlackAlerter
-    from modules.trade_journal import TradeJournal
-    from modules.metrics_writer import MetricsWriter
-    _MONITOR_AVAILABLE = True
-except Exception as exc:
-    logger.warning("monitoring modules unavailable: %s", exc)
-    SlackAlerter = None
-    TradeJournal = None
-    MetricsWriter = None
-    _MONITOR_AVAILABLE = False
+# Monitoring (Slack alerts + trade journal + Influx metrics) lives in a
+# mixin so this file can stay focused on signal logic. The mixin handles
+# its own graceful-degradation (no-op if any monitoring module fails).
+from modules.monitoring_mixin import MonitoringMixin
 
 
 _ONCHAIN_NEUTRAL = {
@@ -266,7 +259,7 @@ def _attach_regime(dataframe: DataFrame, pair: str) -> DataFrame:
     return merged
 
 
-class FreqAIMeanRevV1(IStrategy):
+class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
     INTERFACE_VERSION = 3
 
     minimal_roi = {
@@ -365,19 +358,10 @@ class FreqAIMeanRevV1(IStrategy):
 
     # Risk governor instance — populated in bot_start. Gates every entry.
     _risk_governor: object | None = None
-    # Trade-id → True so we only record each closed trade once.
-    _recorded_closed_trades: set = set()
-
-    # Monitoring instances (lazy, populated in bot_start)
-    _slack: object | None = None
-    _journal: object | None = None
-    _metrics: object | None = None
-    # external_trade_id → journal_id mapping for entry → exit linking
-    _journal_id_by_trade: dict = {}
-    # Daily-summary scheduler state
-    _last_daily_summary_date: str | None = None
-    # Risk-alert thresholds we've already alerted on (to avoid spam)
-    _risk_alert_state: dict = {}
+    # Monitoring state (_slack / _journal / _metrics / _recorded_closed_trades /
+    # _journal_id_by_trade / _last_daily_summary_date / _risk_alert_state /
+    # _last_metric_hour) is owned by MonitoringMixin and initialised in
+    # _init_monitoring().
 
     # ------------------------------------------------------------------
     # FreqAI feature engineering
@@ -489,42 +473,9 @@ class FreqAIMeanRevV1(IStrategy):
         else:
             self._risk_governor = None
 
-        if _MONITOR_AVAILABLE:
-            try:
-                self._slack = SlackAlerter.from_env()
-                if self._slack and self._slack.enabled:
-                    logger.info("[strategy] slack alerts enabled")
-                    # One-shot startup ping so the operator sees the wiring alive
-                    # without waiting for the first trade.
-                    try:
-                        mode = "DRY-RUN (paper)" if self.config.get("dry_run", True) else "LIVE"
-                        ratio = self.config.get("tradable_balance_ratio", 1.0)
-                        self._slack.notify_error(
-                            component="bot_start",
-                            exc=f"FreqAIMeanRevV1 booted — mode={mode}, "
-                                f"tradable_balance_ratio={ratio}, "
-                                f"strategy={type(self).__name__}",
-                            context={"timeframe": self.timeframe,
-                                     "max_open_trades": self.config.get("max_open_trades")},
-                        )
-                    except Exception:
-                        pass
-            except Exception as exc:
-                logger.warning("[strategy] slack init failed: %s", exc)
-                self._slack = None
-            try:
-                self._journal = TradeJournal()
-                logger.info("[strategy] trade journal opened")
-            except Exception as exc:
-                logger.warning("[strategy] trade journal init failed: %s", exc)
-                self._journal = None
-            try:
-                self._metrics = MetricsWriter()
-                if self._metrics and self._metrics.enabled:
-                    logger.info("[strategy] influx metrics writer enabled")
-            except Exception as exc:
-                logger.warning("[strategy] metrics writer init failed: %s", exc)
-                self._metrics = None
+        # MonitoringMixin owns Slack/journal/metrics setup. Safe no-op if
+        # any of the optional monitoring modules failed to import.
+        self._init_monitoring(self.config)
 
     def bot_loop_start(self, current_time, **kwargs) -> None:
         """
@@ -540,161 +491,25 @@ class FreqAIMeanRevV1(IStrategy):
         except Exception:
             pass
 
-        # Risk threshold alerts (warning at 5% drawdown, critical at 8%)
-        if gov is not None and self._slack is not None:
-            try:
-                st = gov.status()
-                dd = float(st.get("drawdown_pct", 0.0) or 0.0)
-                if dd >= 0.08 and self._risk_alert_state.get("dd_critical") != True:
-                    self._slack.notify_risk_critical("portfolio_drawdown", dd, 0.08)
-                    self._risk_alert_state["dd_critical"] = True
-                elif dd >= 0.05 and self._risk_alert_state.get("dd_warning") != True:
-                    self._slack.notify_risk_warning("portfolio_drawdown", dd, 0.05)
-                    self._risk_alert_state["dd_warning"] = True
-                # Reset latches once we recover well below the warning
-                if dd < 0.03:
-                    self._risk_alert_state.pop("dd_warning", None)
-                    self._risk_alert_state.pop("dd_critical", None)
-            except Exception as exc:
-                logger.debug("risk alert check failed: %s", exc)
+        # Risk-threshold alerts (warning at 5% DD, critical at 8%) — mixin
+        # owns the latch state so we don't spam.
+        self._send_risk_alert(gov)
 
-        # Drain newly-closed trades into governor + journal + slack + metrics
+        # Drain newly-closed trades. The mixin's _record_trade_exit is
+        # idempotent per trade-id and also calls gov.record_trade_close so
+        # risk + monitoring share the once-per-trade gate.
         try:
             from freqtrade.persistence import Trade
             closed = Trade.get_trades_proxy(is_open=False)
         except Exception:
             closed = []
         for t in closed:
-            tid = getattr(t, "id", None)
-            if tid is None or tid in self._recorded_closed_trades:
-                continue
-            self._recorded_closed_trades.add(tid)
-            pair = str(getattr(t, "pair", ""))
-            pnl_quote = float(getattr(t, "close_profit_abs", 0.0) or 0.0)
-            pnl_pct = float(getattr(t, "close_profit", 0.0) or 0.0)
-            close_date = getattr(t, "close_date_utc", None) or getattr(t, "close_date", None)
-            entry_price = float(getattr(t, "open_rate", 0.0) or 0.0)
-            exit_price = float(getattr(t, "close_rate", 0.0) or 0.0)
-            exit_reason = str(getattr(t, "exit_reason", "") or "")
-            duration_min = 0.0
-            try:
-                td = getattr(t, "trade_duration", None)
-                if td is not None:
-                    duration_min = float(td) / 60.0
-            except Exception:
-                pass
+            self._record_trade_exit(t, gov=gov)
 
-            if gov is not None:
-                try:
-                    gov.record_trade_close(pair, pnl_quote, pnl_pct, close_date)
-                except Exception as exc:
-                    logger.debug("record_trade_close failed for %s: %s", pair, exc)
-
-            if self._slack is not None:
-                try:
-                    self._slack.notify_trade_exit(
-                        pair=pair, entry_price=entry_price, exit_price=exit_price,
-                        pnl=pnl_quote, pnl_pct=pnl_pct,
-                        exit_reason=exit_reason, duration_minutes=duration_min,
-                    )
-                except Exception as exc:
-                    logger.debug("slack exit notify failed: %s", exc)
-
-            if self._journal is not None:
-                try:
-                    jid = self._journal_id_by_trade.pop(str(tid), None)
-                    if jid is None:
-                        jid = self._journal.find_open_by_external_id(str(tid))
-                    if jid is not None:
-                        self._journal.log_exit(
-                            jid, exit_price=exit_price, pnl=pnl_quote, pnl_pct=pnl_pct,
-                            exit_reason=exit_reason, duration_min=duration_min,
-                            closed_at=close_date,
-                        )
-                except Exception as exc:
-                    logger.debug("journal exit failed: %s", exc)
-
-            if self._metrics is not None:
-                try:
-                    self._metrics.write_trade(
-                        pair=pair, side="long",
-                        pnl=pnl_quote, pnl_pct=pnl_pct,
-                        duration_min=duration_min, ts=close_date,
-                    )
-                except Exception as exc:
-                    logger.debug("metrics trade failed: %s", exc)
-
-        # Hourly snapshot — use bot_loop_start cadence; gated by an in-memory
-        # "last hour we wrote" tag so we don't spam Influx every iteration.
+        # Hourly snapshot + daily summary — both gated internally so it's
+        # safe to call every iteration.
         self._maybe_write_hourly_snapshot(current_time, equity, gov)
         self._maybe_send_daily_summary(current_time, gov)
-
-    def _maybe_write_hourly_snapshot(self, now, equity: float, gov) -> None:
-        if self._metrics is None or not self._metrics.enabled:
-            return
-        try:
-            hour_key = now.strftime("%Y-%m-%dT%H")
-        except Exception:
-            return
-        if getattr(self, "_last_metric_hour", None) == hour_key:
-            return
-        self._last_metric_hour = hour_key
-        try:
-            stats = self._journal.stats() if self._journal is not None else {}
-            cumulative = float(stats.get("total_pnl", 0.0))
-            n = int(stats.get("trades", 0))
-            win_rate = float(stats.get("win_rate", 0.0)) if n > 0 else None
-            st = gov.status() if gov is not None else {}
-            self._metrics.write_hourly_snapshot(
-                equity=float(equity),
-                peak_equity=float(st.get("peak_equity", equity)),
-                drawdown=float(st.get("drawdown_pct", 0.0)),
-                daily_pnl=float(st.get("daily_realized_pnl", 0.0)),
-                cumulative_pnl=cumulative,
-                win_rate_30d=win_rate, win_rate_n=n,
-                ts=now,
-            )
-        except Exception as exc:
-            logger.debug("hourly snapshot failed: %s", exc)
-
-    def _maybe_send_daily_summary(self, now, gov) -> None:
-        if self._slack is None or self._journal is None:
-            return
-        try:
-            today = now.strftime("%Y-%m-%d")
-        except Exception:
-            return
-        # Send once per UTC day, after midnight crossing
-        if self._last_daily_summary_date == today:
-            return
-        # Wait until at least one minute past midnight UTC so the previous
-        # day's last trade has time to settle in the journal.
-        if not (0 <= getattr(now, "hour", 0) <= 1):
-            return
-        from datetime import datetime as _dt, timedelta, timezone as _tz
-        try:
-            day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            yesterday_start = day_start - timedelta(days=1)
-            stats = self._journal.stats(start=yesterday_start, end=day_start)
-            if stats.get("trades", 0) == 0:
-                # Nothing to summarise; mark as sent so we don't keep checking.
-                self._last_daily_summary_date = today
-                return
-            st = gov.status() if gov is not None else {}
-            equity = float(st.get("current_equity", 0.0) or 0.0)
-            self._slack.notify_daily_summary(
-                date_utc=yesterday_start.strftime("%Y-%m-%d"),
-                starting_equity=float(st.get("peak_equity", equity)),
-                ending_equity=equity,
-                total_pnl=float(stats.get("total_pnl", 0.0)),
-                num_trades=int(stats.get("trades", 0)),
-                wins=int(stats.get("wins", 0)),
-                losses=int(stats.get("losses", 0)),
-                max_drawdown=float(st.get("drawdown_pct", 0.0) or 0.0),
-            )
-            self._last_daily_summary_date = today
-        except Exception as exc:
-            logger.debug("daily summary failed: %s", exc)
 
     def _open_positions_snapshot(self) -> list[tuple[str, float]]:
         """Return [(pair, current_stake_in_quote), ...] for all open trades."""
@@ -772,63 +587,18 @@ class FreqAIMeanRevV1(IStrategy):
             )
             return False
 
-        # Approval — gather context for the journal + slack notification
+        # Approval — hand the context off to the monitoring mixin which
+        # fires Slack + journal log_entry + Influx regime/sentiment writes.
         latest = self._latest_signals_for(pair)
-
-        if self._slack is not None:
-            try:
-                self._slack.notify_trade_entry(
-                    pair=pair, signal=str(side or "long"),
-                    entry_price=float(rate), stake=proposed_stake_quote,
-                    confidence=float(meta_conf or 0.0),
-                    tft_probs=latest.get("tft_probs"),
-                    drl_votes=latest.get("drl_votes"),
-                    regime=latest.get("regime"),
-                    entry_tag=str(entry_tag or ""),
-                )
-            except Exception as exc:
-                logger.debug("slack entry notify failed: %s", exc)
-
-        if self._journal is not None:
-            try:
-                # Look up the freqtrade Trade row that's about to be created.
-                # Freqtrade hasn't assigned an ID at this point in the lifecycle,
-                # so we anchor on (pair, opened_at, entry_price). On exit, the
-                # bot_loop_start scan will match on `find_open_by_external_id`
-                # which is set later via on_trade_close (id-by-rate fallback).
-                jid = self._journal.log_entry(
-                    pair=pair, direction=str(side or "long"),
-                    entry_price=float(rate), stake=proposed_stake_quote,
-                    confidence=meta_conf,
-                    tft_probs=latest.get("tft_probs"),
-                    drl_votes=latest.get("drl_votes"),
-                    sentiment_score=latest.get("sentiment_score"),
-                    sentiment_confidence=latest.get("sentiment_confidence"),
-                    regime=latest.get("regime"),
-                    features_used=latest.get("features_used"),
-                    reasoning=latest.get("reasoning"),
-                    external_id=None,   # set on close via pair+price match below
-                )
-                # Stash on a marker we can correlate when the trade row exists.
-                self._journal_id_by_trade[f"{pair}@{float(rate):.10g}"] = jid
-            except Exception as exc:
-                logger.debug("journal entry failed: %s", exc)
-
-        if self._metrics is not None:
-            try:
-                rg = latest.get("regime")
-                if rg:
-                    self._metrics.write_regime(pair=pair, label=rg)
-                if latest.get("sentiment_score") is not None:
-                    self._metrics.write_sentiment(
-                        pair=pair,
-                        score=float(latest.get("sentiment_score") or 0.0),
-                        confidence=float(latest.get("sentiment_confidence") or 0.0),
-                        price=float(rate),
-                    )
-            except Exception as exc:
-                logger.debug("metrics on entry failed: %s", exc)
-
+        self._record_trade_entry(
+            pair=pair,
+            side=str(side or "long"),
+            rate=float(rate),
+            stake=proposed_stake_quote,
+            confidence=meta_conf,
+            latest=latest,
+            entry_tag=entry_tag,
+        )
         return True
 
     def _latest_signals_for(self, pair: str) -> dict:
