@@ -191,6 +191,9 @@ services:
       # Hermes MCP key — gates mutating tools (pause/resume/trigger_evolution)
       # via the /api/ops/mcp/* shim. Read-only tools work without it.
       - HERMES_MCP_KEY=${HERMES_MCP_KEY:-}
+      # Slack incoming webhook — used by /api/ops/slack_preview and any
+      # future dashboard-driven Slack posts. Same value the bot itself uses.
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
     healthcheck:
       test: ["CMD-SHELL", "python -c 'import urllib.request,sys;sys.exit(0 if urllib.request.urlopen(\"http://127.0.0.1:8081/api/pairs\", timeout=3).status==200 else 1)'"]
       interval: 30s
