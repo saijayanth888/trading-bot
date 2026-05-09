@@ -100,6 +100,7 @@
     .qa-btn.qa-regime { background: #0a3036; border-color: #2a8c8c; color: #69d6cd; }
     .qa-btn.qa-readiness { background: #1c2840; border-color: #4a90e2; color: #6bb6ff; }
     .qa-btn.qa-rebalance { background: #2a1a3a; border-color: #b370c9; color: #d59ce8; }
+    .qa-btn.qa-config    { background: #21282e; border-color: #6c757d; color: #adb5bd; }
     .qa-spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: qa-spin 0.7s linear infinite; vertical-align: -1px; margin-right: 6px; }
     @keyframes qa-spin { to { transform: rotate(360deg); } }
     .qa-result { margin-top: 14px; padding: 12px 14px; background: #060a1c; border: 1px solid #1f2748; border-radius: 8px; max-height: 0; opacity: 0; overflow: hidden; transition: max-height 250ms ease, opacity 250ms ease; }
@@ -235,6 +236,7 @@
           <button class="btn qa-btn qa-readiness"  data-action="readiness"           >✅ Validate readiness</button>
           <button class="btn qa-btn qa-readiness"  data-action="readiness-ft"        >🚀 Readiness · fast-track</button>
           <button class="btn qa-btn qa-rebalance"  data-action="rebalance-dry"       >⚖ Rebalance · dry-run</button>
+          <button class="btn qa-btn qa-config"     data-action="config-overview"     >🔍 Config overview</button>
         </div>
         <div id="qa-result" class="qa-result" style="display:none;"></div>
       </section>

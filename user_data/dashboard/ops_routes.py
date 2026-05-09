@@ -620,6 +620,96 @@ async def resume(request: Request):
 
 
 # --------------------------------------------------------------------------
+# /api/ops/config — surface live config + relevant env vars to the dashboard
+# --------------------------------------------------------------------------
+#
+# One place to read every knob the bot is currently using. Helpful for new
+# operators who want to know "what's actually configured right now?" without
+# poking around config.json or env files. Sensitive values are redacted.
+
+
+# Env vars worth surfacing — operator visibility, not "everything in os.environ".
+_VISIBLE_ENV_VARS = (
+    # Sentiment / news pipeline
+    "SENTIMENT_POLL_INTERVAL_S", "SENTIMENT_HISTORY_DAYS", "SENTIMENT_MAX_HEADLINES_TO_LLM",
+    "OLLAMA_MODEL_FAST", "OLLAMA_MODEL_DEEP", "OLLAMA_HOST",
+    "PERPLEXITY_MODEL", "PERPLEXITY_RECENCY",
+    # Dashboard
+    "DASHBOARD_PAIRS", "DASHBOARD_TIMEFRAME", "DASHBOARD_WS_INTERVAL_SEC",
+    # Freqtrade
+    "FREQTRADE_API_URL", "FREQTRADE_API_USER",
+    # MCP
+    "HERMES_MCP_KEY", "HERMES_MCP_PORT", "HERMES_MCP_TRANSPORT",
+    # Postgres
+    "POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_USER", "POSTGRES_DB",
+    # Slack / Telegram (presence-only — never echo the value)
+    "SLACK_WEBHOOK_URL", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+)
+
+# These keys, if present in env, get reported as "<set>" / "<unset>" — never the value.
+_SECRET_ENV_VARS = {
+    "HERMES_MCP_KEY", "SLACK_WEBHOOK_URL", "TELEGRAM_BOT_TOKEN",
+    "FREQTRADE_API_PASS", "PERPLEXITY_API_KEY", "POSTGRES_PASSWORD",
+    "COINBASE_API_KEY", "COINBASE_API_SECRET",
+}
+
+
+@router.get("/config")
+async def config_overview():
+    """Live config + env-var presence map. Sensitive values are redacted."""
+    try:
+        cfg = json.loads(CONFIG_PATH.read_text())
+    except Exception as exc:
+        return _envelope("down", error=f"could not read config.json: {exc}")
+
+    # Pluck the most-asked-about blocks for prominence
+    summary = {
+        "trading": {
+            "dry_run":                 cfg.get("dry_run"),
+            "dry_run_wallet":          cfg.get("dry_run_wallet"),
+            "tradable_balance_ratio":  cfg.get("tradable_balance_ratio"),
+            "max_open_trades":         cfg.get("max_open_trades"),
+            "stake_currency":          cfg.get("stake_currency"),
+            "timeframe":               cfg.get("timeframe"),
+            "minimal_roi":             cfg.get("minimal_roi"),
+            "stoploss":                cfg.get("stoploss"),
+        },
+        "pairs": {
+            "whitelist":  ((cfg.get("exchange") or {}).get("pair_whitelist") or []),
+            "blacklist":  ((cfg.get("exchange") or {}).get("pair_blacklist") or []),
+        },
+        "capital_allocation": cfg.get("capital_allocation"),
+        "regime_gating":      cfg.get("regime_gating"),
+        "risk_management":    cfg.get("risk_management"),
+        "ept_evolution":      cfg.get("ept_evolution"),
+        "sentiment_sources":  cfg.get("sentiment_sources"),
+        "sentiment_pipeline": cfg.get("sentiment_pipeline"),
+        "news_sources_config": cfg.get("news_sources_config"),
+    }
+
+    # Env presence map (no secret values leak)
+    env_view: dict[str, Any] = {}
+    for key in _VISIBLE_ENV_VARS:
+        raw = os.environ.get(key, "")
+        if not raw:
+            env_view[key] = None
+            continue
+        if key in _SECRET_ENV_VARS:
+            env_view[key] = "<set>"
+        else:
+            env_view[key] = raw
+
+    return _envelope("ok", data={
+        "config": summary,
+        "env": env_view,
+        "config_path": str(CONFIG_PATH),
+        "_doc": "Live view of config.json + selected env vars. Edit config "
+                "via the regime-params editor or by committing config.json. "
+                "Secret env vars are reported as '<set>' / null only.",
+    })
+
+
+# --------------------------------------------------------------------------
 # /api/ops/readiness — go-live validation gate (UI button on Ops dashboard)
 # --------------------------------------------------------------------------
 #

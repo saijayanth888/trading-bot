@@ -62,7 +62,11 @@
             "BTC/USD",
             "ETH/USD",
             "SOL/USD",
-            "ADA/USD"
+            "ADA/USD",
+            "XRP/USD",
+            "DOGE/USD",
+            "AVAX/USD",
+            "LINK/USD"
         ],
         "pair_blacklist": []
     },
@@ -207,13 +211,41 @@
         "mode": "performance_weighted",
         "min_sharpe_for_trading": 0.7,
         "pair_weights": {
-            "BTC/USD":   0.40,
-            "ETH/USD":   0.40,
-            "SOL/USD":   0.15,
+            "BTC/USD":   0.35,
+            "ETH/USD":   0.35,
+            "SOL/USD":   0.10,
             "ADA/USD":   0.05,
-            "MATIC/USD": 0.00
+            "XRP/USD":   0.04,
+            "DOGE/USD":  0.04,
+            "AVAX/USD":  0.04,
+            "LINK/USD":  0.03
         },
         "rebalance_after_days": 14
+    },
+    "sentiment_pipeline": {
+        "_doc": "Sentiment-engine knobs that used to be hardcoded constants. All overridable via env vars (SENTIMENT_*) at runtime.",
+        "poll_interval_s":      900,
+        "max_headlines_to_llm": 60,
+        "history_days":         7,
+        "dedup_threshold":      0.80
+    },
+    "news_sources_config": {
+        "_doc": "Per-source endpoint config. Edit here (no code change) to add/remove subreddits, RSS feeds, or change watched pair symbols. Aggregator reads this on each poll cycle (15 min cadence).",
+        "watched_pairs": ["BTC", "ETH", "SOL", "ADA", "XRP", "DOGE", "AVAX", "LINK", "POL"],
+        "reddit_subs": [
+            {"sub": "cryptocurrency", "limit": 25},
+            {"sub": "bitcoin",        "limit": 25},
+            {"sub": "ethtrader",      "limit": 15},
+            {"sub": "altcoin",        "limit": 15},
+            {"sub": "cryptomarkets",  "limit": 15}
+        ],
+        "rss_feeds": [
+            {"name": "coindesk",     "url": "https://www.coindesk.com/arc/outboundfeeds/rss/"},
+            {"name": "cointelegraph", "url": "https://cointelegraph.com/rss"},
+            {"name": "theblock",     "url": "https://www.theblock.co/rss"},
+            {"name": "decrypt",      "url": "https://decrypt.co/feed"},
+            {"name": "bitcoinmag",   "url": "https://bitcoinmagazine.com/.rss/full/"}
+        ]
     },
     "sentiment_sources": {
         "_doc": "Per-source weights for the sentiment ensemble. The LLM scorers (Hermes-3 70B + 8B) read all sources together; weights are advisory for downstream consumers (e.g. market_research skill divergence checks). Six free sources, zero external API costs (Perplexity is freemium — gracefully degrades if PERPLEXITY_API_KEY is unset).",

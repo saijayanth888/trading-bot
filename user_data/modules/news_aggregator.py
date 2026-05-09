@@ -52,23 +52,56 @@ USER_AGENT = "trading-bot/1.0 (research; +https://github.com/local)"
 HTTP_TIMEOUT = aiohttp.ClientTimeout(total=20)
 PER_SOURCE_TIMEOUT = 15.0   # individual fetcher hard ceiling
 
-# Pairs we trade — used to tag headline relevance.
-WATCHED_PAIRS: tuple[str, str, ...] = (
-    "BTC", "ETH", "SOL", "ADA", "MATIC", "POL",
+
+def _load_config() -> dict:
+    """Read user_data/config.json once per call. Cheap; called per poll."""
+    import json
+    config_path = os.environ.get(
+        "FREQTRADE_CONFIG_PATH", "/freqtrade/user_data/config.json",
+    )
+    try:
+        with open(config_path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _config_or_fallback(cfg: dict, key: str, fallback: Any) -> Any:
+    block = (cfg.get("news_sources_config") or {})
+    return block.get(key, fallback)
+
+
+# Hardcoded fallbacks — used only when config.json[news_sources_config] is
+# missing or unreadable. Operators tune these via config.json, not here.
+_FALLBACK_WATCHED_PAIRS: tuple[str, ...] = (
+    "BTC", "ETH", "SOL", "ADA", "XRP", "DOGE", "AVAX", "LINK", "POL", "MATIC",
+)
+_FALLBACK_REDDIT_SUBS = (
+    {"sub": "cryptocurrency", "limit": 25},
+    {"sub": "bitcoin",        "limit": 25},
+    {"sub": "ethtrader",      "limit": 15},
+)
+_FALLBACK_RSS_FEEDS = (
+    {"name": "coindesk",      "url": "https://www.coindesk.com/arc/outboundfeeds/rss/"},
+    {"name": "cointelegraph", "url": "https://cointelegraph.com/rss"},
+    {"name": "theblock",      "url": "https://www.theblock.co/rss"},
+    {"name": "decrypt",       "url": "https://decrypt.co/feed"},
 )
 
-# RSS feeds that need no API key.
-RSS_FEEDS = (
-    ("coindesk",     "https://www.coindesk.com/arc/outboundfeeds/rss/"),
-    ("cointelegraph", "https://cointelegraph.com/rss"),
-    ("theblock",     "https://www.theblock.co/rss"),
-    ("decrypt",      "https://decrypt.co/feed"),
-)
 
-REDDIT_SUBS = (
-    ("cryptocurrency", 25),
-    ("bitcoin",        25),
-    ("ethtrader",      15),
+# Backwards-compatible module-level constants (used by the regex builder).
+# Refreshed at module import time; the live aggregator re-reads on each poll.
+_cfg_at_import = _load_config()
+WATCHED_PAIRS: tuple[str, ...] = tuple(
+    _config_or_fallback(_cfg_at_import, "watched_pairs", list(_FALLBACK_WATCHED_PAIRS))
+)
+REDDIT_SUBS: tuple[tuple[str, int], ...] = tuple(
+    (s["sub"], s["limit"])
+    for s in _config_or_fallback(_cfg_at_import, "reddit_subs", list(_FALLBACK_REDDIT_SUBS))
+)
+RSS_FEEDS: tuple[tuple[str, str], ...] = tuple(
+    (f["name"], f["url"])
+    for f in _config_or_fallback(_cfg_at_import, "rss_feeds", list(_FALLBACK_RSS_FEEDS))
 )
 
 CRYPTOCURRENCY_CV_BASE = os.environ.get(

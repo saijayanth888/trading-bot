@@ -575,6 +575,10 @@ async function qaButtonHandler(ev) {
       const r = await jsonFetch("/api/ops/rebalance");
       env = r.body;
       qaShowRebalance(env, /*isDry=*/true);
+    } else if (action === "config-overview") {
+      const r = await jsonFetch("/api/ops/config");
+      env = r.body;
+      qaShowConfig(env);
     }
   } catch (e) {
     env = {status: "down", error: String(e), data: null};
@@ -583,6 +587,81 @@ async function qaButtonHandler(ev) {
 
   btn.disabled = false;
   btn.innerHTML = original;
+}
+
+function qaShowConfig(env) {
+  const box = document.getElementById("qa-result");
+  box.style.display = "block";
+  requestAnimationFrame(() => box.classList.add("open"));
+
+  if (!env || !env.data) {
+    box.innerHTML = `<div><strong>Config overview</strong> · <span class="bad">${esc(env && env.status || "?")}</span></div>` +
+                    `<div class="bad">${esc(env && env.error || "no data")}</div>`;
+    return;
+  }
+  const d = env.data;
+  const cfg = d.config || {};
+  const trading = cfg.trading || {};
+  const pairs = cfg.pairs || {};
+  const cap = cfg.capital_allocation || {};
+  const weights = cap.pair_weights || {};
+
+  let html =
+    `<div><strong>Config overview</strong> · <span class="ok">live</span> · <span class="muted">${esc(d.config_path)}</span></div>`;
+
+  // Trading basics
+  html += `<h4 style="margin:10px 0 4px;font-size:13px;">Trading basics</h4>`;
+  html += `<table class="tape"><tbody>`;
+  for (const [k, v] of Object.entries(trading)) {
+    let val = v === null || v === undefined ? "—" : v;
+    if (typeof val === "object") val = JSON.stringify(val);
+    html += `<tr><td>${esc(k)}</td><td>${esc(val)}</td></tr>`;
+  }
+  html += `</tbody></table>`;
+
+  // Pair allocation
+  html += `<h4 style="margin:10px 0 4px;font-size:13px;">Pair allocation (${(pairs.whitelist || []).length} pairs)</h4>`;
+  html += `<table class="tape"><thead><tr><th>pair</th><th>weight</th><th>min Sharpe</th></tr></thead><tbody>`;
+  for (const p of (pairs.whitelist || [])) {
+    const w = weights[p];
+    const wStr = w === undefined ? "—" : `${(w * 100).toFixed(1)}%`;
+    html += `<tr><td>${esc(p)}</td><td>${wStr}</td><td>${esc(cap.min_sharpe_for_trading ?? "—")}</td></tr>`;
+  }
+  html += `</tbody></table>`;
+
+  // Sentiment sources
+  if (cfg.sentiment_sources) {
+    html += `<h4 style="margin:10px 0 4px;font-size:13px;">Sentiment sources</h4>`;
+    html += `<table class="tape"><thead><tr><th>source</th><th>enabled</th><th>weight</th></tr></thead><tbody>`;
+    for (const [k, v] of Object.entries(cfg.sentiment_sources)) {
+      if (k.startsWith("_")) continue;
+      const en = v.enabled ? "<span class=\"ok\">✓</span>" : "<span class=\"bad\">✗</span>";
+      html += `<tr><td>${esc(k)}</td><td>${en}</td><td>${esc(v.weight)}</td></tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+
+  // Env presence
+  if (d.env) {
+    html += `<h4 style="margin:10px 0 4px;font-size:13px;">Environment variables</h4>`;
+    html += `<table class="tape"><tbody>`;
+    for (const [k, v] of Object.entries(d.env)) {
+      const dispVal = v === null
+        ? `<span class="muted">unset</span>`
+        : v === "<set>"
+        ? `<span class="ok">&lt;set&gt;</span>`
+        : `<span class="muted">${esc(v)}</span>`;
+      html += `<tr><td>${esc(k)}</td><td>${dispVal}</td></tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+
+  // Full JSON below for the curious
+  html += `<details style="margin-top:8px;"><summary class="muted" style="cursor:pointer;font-size:11px;">Full raw JSON…</summary>` +
+          `<pre style="margin:6px 0 0;font-size:11px;background:#060a1c;padding:10px;border-radius:4px;max-height:300px;overflow:auto;">${esc(JSON.stringify(d, null, 2))}</pre>` +
+          `</details>`;
+
+  box.innerHTML = html;
 }
 
 function qaShowReadiness(env) {

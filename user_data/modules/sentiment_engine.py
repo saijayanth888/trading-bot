@@ -64,8 +64,11 @@ LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 # Tunables
 # ---------------------------------------------------------------------------
 
-POLL_INTERVAL_S = 15 * 60                                    # 15 minutes
-HISTORY_DAYS = 7                                             # rows returned by accessor
+# Tunable via env or config.json[sentiment_pipeline]; SENTIMENT_POLL_INTERVAL_S
+# is the standard freqtrade-style env override. Defaults match the prior
+# hardcoded values so nothing changes for existing deployments.
+POLL_INTERVAL_S = int(os.environ.get("SENTIMENT_POLL_INTERVAL_S", "900"))     # default 15 min
+HISTORY_DAYS = int(os.environ.get("SENTIMENT_HISTORY_DAYS", "7"))             # accessor lookback
 HTTP_TIMEOUT = aiohttp.ClientTimeout(total=60)
 
 PERPLEXITY_BASE = os.getenv("PERPLEXITY_BASE", "https://api.perplexity.ai").rstrip("/")
@@ -82,7 +85,7 @@ OLLAMA_MODEL_DEEP = os.getenv("OLLAMA_MODEL_DEEP", "hermes3:70b")
 OLLAMA_MODEL = OLLAMA_MODEL_FAST
 
 # Truncate the headline list passed to Ollama so prompts stay bounded.
-MAX_HEADLINES_TO_LLM = 60
+MAX_HEADLINES_TO_LLM = int(os.environ.get("SENTIMENT_MAX_HEADLINES_TO_LLM", "60"))
 
 # ---------------------------------------------------------------------------
 # Logger (file only)
