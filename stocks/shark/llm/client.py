@@ -451,19 +451,32 @@ def chat_json(
     # Tier-aware model selection — only meaningful for Ollama where we have
     # a fast/deep split. For paid providers (Anthropic / OpenAI / Google)
     # the env's CLAUDE_MODEL etc. is authoritative.
-    provider = (os.environ.get(
-        f"SHARK_{role.upper()}_LLM_PROVIDER", os.environ.get("SHARK_LLM_PROVIDER", "ollama"),
-    ) or "ollama").lower()
+    #
+    # Use `... or default` rather than `os.environ.get(..., default)` so an
+    # empty-string env var (which is a valid value, not "missing") falls
+    # through to the fallback. Also accept BOTH the new shark-side names
+    # (OLLAMA_FAST_MODEL, OLLAMA_MODEL) and the legacy crypto-sentiment
+    # names (OLLAMA_MODEL_FAST, OLLAMA_MODEL_DEEP) so a single .env line
+    # works for both subsystems.
+    provider = (
+        os.environ.get(f"SHARK_{role.upper()}_LLM_PROVIDER", "")
+        or os.environ.get("SHARK_LLM_PROVIDER", "")
+        or "ollama"
+    ).lower()
     if provider == "ollama":
         if tier == "fast":
-            model = os.environ.get(
-                f"SHARK_{role.upper()}_LLM_MODEL",
-                os.environ.get("OLLAMA_FAST_MODEL", "hermes3:8b"),
+            model = (
+                os.environ.get(f"SHARK_{role.upper()}_LLM_MODEL", "")
+                or os.environ.get("OLLAMA_FAST_MODEL", "")
+                or os.environ.get("OLLAMA_MODEL_FAST", "")     # legacy/crypto name
+                or "hermes3:8b"
             )
         else:
-            model = os.environ.get(
-                f"SHARK_{role.upper()}_LLM_MODEL",
-                os.environ.get("OLLAMA_MODEL", "hermes3:70b"),
+            model = (
+                os.environ.get(f"SHARK_{role.upper()}_LLM_MODEL", "")
+                or os.environ.get("OLLAMA_MODEL", "")
+                or os.environ.get("OLLAMA_MODEL_DEEP", "")     # legacy/crypto name
+                or "hermes3:70b"
             )
         client = get_llm_client(provider="ollama", model=model)
     else:
