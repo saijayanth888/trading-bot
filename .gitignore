@@ -115,3 +115,6 @@ stocks/wheel/state/candles_*.json
 stocks/wheel/state/.lock
 stocks/wheel/__pycache__/
 stocks/wheel/state/__pycache__/
+
+# LLM call tracker — append-only log, regenerates from runtime
+stocks/memory/llm-calls.jsonl

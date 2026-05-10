@@ -21,6 +21,8 @@ const REFRESH_MS = {
   live_trades:     5000,   // top hero strip — pulse on every fill
   stock_regime:   60000,   // SPY MA bands move slowly
   gates:          15000,   // gates change with each candle
+  combined:       30000,   // unified crypto + stocks portfolio
+  llm:            60000,   // LLM tracker stats
 };
 
 const REGIME_ARROW = {
@@ -336,6 +338,159 @@ async function refreshTrades() {
     }
     html += `</tbody></table>`;
   }
+
+  body.innerHTML = html;
+}
+
+// ─── Combined portfolio (crypto + stocks unified view) ───────────
+function fmtUsdAbs(n) {
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  return "$" + Math.abs(Number(n)).toLocaleString("en-US", {
+    maximumFractionDigits: 0, minimumFractionDigits: 0,
+  });
+}
+function fmtPctSigned(n) {
+  if (n === null || n === undefined) return "—";
+  const v = Number(n);
+  return (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(2) + "%";
+}
+async function refreshCombined() {
+  const r = await jsonFetch("/api/ops/combined_portfolio");
+  const env = r.body;
+  setStatus("card-combined", env.status || "down");
+  const ageEl = document.getElementById("combined-age");
+  const body = document.getElementById("combined-body");
+  if (!body) return;
+  if (!env.data) {
+    body.textContent = env.error || "—";
+    if (ageEl) ageEl.textContent = env.error || "—";
+    return;
+  }
+  const d = env.data;
+  if (ageEl) {
+    const breaker = d.circuit_breaker_active ? " · BREAKER TRIPPED" : "";
+    ageEl.textContent = `${d.combined_open_positions} open${breaker}`;
+    ageEl.style.color = d.circuit_breaker_active ? "#f85149" : "";
+  }
+
+  // 4-up KPI grid: crypto / stocks / total / drawdown
+  const ddPct = d.combined_drawdown_pct;
+  const thresh = d.threshold_pct;
+  const ddClass = d.circuit_breaker_active ? "is-neg"
+    : (ddPct > thresh * 0.7 ? "is-neg" : ddPct > 0.01 ? "" : "is-pos");
+  const ddBarPct = Math.min(100, (ddPct / thresh) * 100);
+
+  let html = `<div class="ks-grid">` +
+    `<div><div class="kpi-label">Crypto equity · freqtrade</div>` +
+    `<div class="kpi-value">${esc(fmtUsdAbs(d.crypto_equity))}</div>` +
+    `<div class="kpi-sub">${esc(d.crypto_open_positions)} open · realised ${esc(fmtPctSigned(d.crypto_drawdown_pct))} DD</div></div>` +
+
+    `<div><div class="kpi-label">Stocks equity · Alpaca</div>` +
+    `<div class="kpi-value">${esc(fmtUsdAbs(d.stocks_equity))}</div>` +
+    `<div class="kpi-sub">${esc(d.stocks_open_positions)} open · ${d.sources && d.sources.stocks_paper ? "PAPER" : "LIVE"}</div></div>` +
+
+    `<div><div class="kpi-label">Total equity · combined</div>` +
+    `<div class="kpi-value">${esc(fmtUsdAbs(d.total_equity))}</div>` +
+    `<div class="kpi-sub">peak ${esc(fmtUsdAbs(d.combined_peak_equity))}</div></div>` +
+
+    `<div><div class="kpi-label">Combined drawdown</div>` +
+    `<div class="kpi-value ${ddClass}">${esc(fmtPctSigned(-ddPct))}</div>` +
+    `<div class="kpi-sub">threshold ${esc(thresh.toFixed(1))}% · ${d.circuit_breaker_active ? "BREAKER ACTIVE" : "clear"}</div></div>` +
+    `</div>`;
+
+  // Drawdown bar — visualises distance to the 10% trip threshold
+  html += `<div class="dd-bar"><i style="width:${ddBarPct.toFixed(1)}%;"></i></div>` +
+    `<div class="muted" style="font-size:11px; display:flex; justify-content:space-between;">` +
+    `<span>0%</span><span>${esc(ddPct.toFixed(2))}% of ${esc(thresh.toFixed(1))}% threshold</span><span>tripped</span></div>`;
+
+  // Source breakdown — small print
+  const s = d.sources || {};
+  const snapAge = d.snapshot_age_seconds;
+  const snapAgeStr = snapAge == null ? "—"
+    : snapAge < 60 ? `${snapAge}s ago`
+    : snapAge < 3600 ? `${Math.floor(snapAge/60)}m ago`
+    : `${Math.floor(snapAge/3600)}h ago`;
+  html += `<p class="muted" style="margin:14px 0 0;font-size:11px;font-family:var(--mono);">` +
+    `crypto: starting=${esc(fmtUsdAbs(s.crypto_starting_equity))} realised=${esc(fmtUsdAbs(s.crypto_realised_pnl))} unrealised=${esc(fmtUsdAbs(s.crypto_unrealised_pnl))} · ` +
+    `stocks snapshot ${esc(snapAgeStr)}</p>`;
+
+  body.innerHTML = html;
+}
+
+// ─── LLM inference monitor (cost saved vs Anthropic API) ──────────
+async function refreshLLMStats() {
+  const r = await jsonFetch("/api/ops/llm_stats");
+  const env = r.body;
+  setStatus("card-llm", env.status || "down");
+  const ageEl = document.getElementById("llm-age");
+  const body = document.getElementById("llm-body");
+  if (!body) return;
+  if (!env.data) {
+    body.textContent = env.error || "—";
+    return;
+  }
+  const d = env.data;
+  const shark = d.shark || {};
+  const crypto = d.crypto || {};
+  const provider = d.provider || "ollama";
+  const isLocal = d.is_local;
+
+  if (ageEl) {
+    ageEl.textContent = `provider: ${provider} · ${shark.total_calls || 0} shark calls 24h · ${crypto.calls_24h || 0} crypto calls 24h`;
+  }
+
+  const providerBadge = isLocal
+    ? `<span class="pill-local">● LOCAL · ZERO COST</span>`
+    : `<span class="pill-paid">● PAID API</span>`;
+  const totalSaved = Number(shark.total_api_cost_saved_usd || 0);
+  const monthlyProj = totalSaved * 30;
+
+  let html = `<div class="ks-grid">` +
+    `<div><div class="kpi-label">Provider</div>` +
+    `<div class="kpi-value" style="font-size:14px;">${providerBadge}</div>` +
+    `<div class="kpi-sub">model: ${esc(Object.keys(shark.by_model || {})[0] || "—")}</div></div>` +
+
+    `<div><div class="kpi-label">Calls · 24h (shark)</div>` +
+    `<div class="kpi-value">${esc(shark.total_calls || 0)}</div>` +
+    `<div class="kpi-sub">avg ${esc((shark.avg_latency_seconds || 0).toFixed(1))}s · ${esc(shark.by_tier?.fast || 0)} fast / ${esc(shark.by_tier?.deep || 0)} deep</div></div>` +
+
+    `<div><div class="kpi-label">Tokens · 24h (shark)</div>` +
+    `<div class="kpi-value">${esc(((shark.total_prompt_tokens||0) + (shark.total_completion_tokens||0)).toLocaleString())}</div>` +
+    `<div class="kpi-sub">${esc((shark.total_prompt_tokens||0).toLocaleString())} in · ${esc((shark.total_completion_tokens||0).toLocaleString())} out</div></div>` +
+
+    `<div><div class="kpi-label">Cost saved · 24h</div>` +
+    `<div class="kpi-value is-pos">+$${esc(totalSaved.toFixed(2))}</div>` +
+    `<div class="kpi-sub">~$${esc(monthlyProj.toFixed(0))}/mo at this rate</div></div>` +
+    `</div>`;
+
+  // Per-agent breakdown
+  const agents = shark.by_agent || {};
+  const agentRows = Object.entries(agents).sort((a, b) => (b[1].calls||0) - (a[1].calls||0));
+  if (agentRows.length) {
+    html += `<h4 style="margin:14px 0 6px;font-size:13px;">Per-agent breakdown</h4>`;
+    html += `<table class="tape"><thead><tr><th>agent</th><th>model(s)</th><th>calls</th><th>avg latency</th><th>max latency</th><th>tokens</th></tr></thead><tbody>`;
+    // Find the max latency for the bar visual
+    const maxLat = Math.max(1, ...agentRows.map(([,v]) => v.max_latency || 0));
+    for (const [agent, info] of agentRows) {
+      const barPct = ((info.avg_latency || 0) / maxLat * 100).toFixed(0);
+      html += `<tr><td>${esc(agent)}</td>` +
+        `<td class="muted" style="font-family:var(--mono);font-size:11px;">${esc((info.models||[]).join(", "))}</td>` +
+        `<td>${esc(info.calls)}</td>` +
+        `<td><span class="lat-bar" style="width:80px;"><i style="width:${barPct}%;"></i></span> ${esc(info.avg_latency)}s</td>` +
+        `<td>${esc(info.max_latency)}s</td>` +
+        `<td>${esc((info.total_tokens || 0).toLocaleString())}</td></tr>`;
+    }
+    html += `</tbody></table>`;
+  } else {
+    html += `<p class="muted" style="margin:8px 0 0;font-size:12px;">— no shark calls in last 24h — fire a shark phase to populate this card —</p>`;
+  }
+
+  // Crypto sentiment row (separate — sentiment_log has different shape)
+  html += `<h4 style="margin:14px 0 6px;font-size:13px;">Crypto sentiment engine · 24h</h4>`;
+  html += `<table class="tape"><thead><tr><th>source</th><th>calls</th><th>note</th></tr></thead><tbody>`;
+  html += `<tr><td>sentiment_log</td><td>${esc(crypto.calls_24h || 0)}</td>` +
+    `<td class="muted" style="font-size:11px;">${esc(crypto.latency_note || "")}</td></tr>`;
+  html += `</tbody></table>`;
 
   body.innerHTML = html;
 }
@@ -1516,6 +1671,8 @@ document.addEventListener("DOMContentLoaded", () => {
   // First-paint refreshes
   refreshLiveTrades();
   refreshGates();
+  refreshCombined();
+  refreshLLMStats();
   refreshRegime().then(refreshSentiment);
   refreshStockRegime();
   refreshServices(); refreshTraining(); refreshMcp(); refreshTrades();
@@ -1527,6 +1684,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
   setInterval(refreshLiveTrades, REFRESH_MS.live_trades);
   setInterval(refreshGates, REFRESH_MS.gates);
+  setInterval(refreshCombined, REFRESH_MS.combined);
+  setInterval(refreshLLMStats, REFRESH_MS.llm);
   setInterval(() => { refreshRegime().then(refreshSentiment); }, REFRESH_MS.regime);
   setInterval(refreshStockRegime, REFRESH_MS.stock_regime);
   setInterval(refreshServices, REFRESH_MS.services);

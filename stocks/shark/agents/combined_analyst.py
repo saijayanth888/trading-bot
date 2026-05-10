@@ -339,6 +339,8 @@ Rules: Only set decision=BUY if confidence >= 0.70 AND risk_reward_ratio >= 2.0.
             user_message=user_prompt,
             max_tokens=1200,
             temperature=0.2,
+            tier="deep",
+            agent="combined_analyst",
         )
         raw = (raw or "").strip()
         if raw.startswith("```"):

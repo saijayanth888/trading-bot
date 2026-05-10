@@ -114,6 +114,8 @@ Return ONLY this JSON:
             max_tokens=600,
             temperature=0.3,
             role="risk",
+            tier="deep",
+            agent=f"risk_debate.{perspective}",
         )
         raw = (raw or "").strip()
         if raw.startswith("```"):
@@ -177,6 +179,8 @@ Return ONLY this JSON:
             max_tokens=600,
             temperature=0.2,
             role="arbiter",
+            tier="deep",
+            agent="risk_debate.judge",
         )
         raw = (raw or "").strip()
         if raw.startswith("```"):

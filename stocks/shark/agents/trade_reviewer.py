@@ -105,6 +105,8 @@ Grading: A=great execution, B=good but improvable, C=mediocre, D=poor execution,
         user_message=prompt,
         max_tokens=600,
         temperature=0.3,
+        tier="fast",
+        agent="trade_reviewer",
     )
     raw = (raw or "").strip()
     if raw.startswith("```"):

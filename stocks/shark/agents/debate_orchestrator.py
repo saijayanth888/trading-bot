@@ -112,6 +112,9 @@ Return ONLY this JSON:
   "counter_to_bear": "<specific rebuttal to bear's strongest point, or empty if first round>"
 }}"""
 
+    # First N-1 rounds run on the fast model (quick exploratory arguments).
+    # Final round runs on the deep model so the synthesis carries weight.
+    bull_tier = "deep" if round_num >= total_rounds else "fast"
     try:
         raw, _usage, _model = chat_json(
             system_prompt=_BULL_SYSTEM,
@@ -119,6 +122,8 @@ Return ONLY this JSON:
             max_tokens=800,
             temperature=0.4,
             role="debate",
+            tier=bull_tier,
+            agent=f"debate.bull.r{round_num}",
         )
         raw = (raw or "").strip()
         if raw.startswith("```"):
@@ -186,6 +191,7 @@ Return ONLY this JSON:
   "counter_to_bull": "<specific rebuttal to bull's strongest point>"
 }}"""
 
+    bear_tier = "deep" if round_num >= total_rounds else "fast"
     try:
         raw, _usage, _model = chat_json(
             system_prompt=_BEAR_SYSTEM,
@@ -193,6 +199,8 @@ Return ONLY this JSON:
             max_tokens=800,
             temperature=0.4,
             role="debate",
+            tier=bear_tier,
+            agent=f"debate.bear.r{round_num}",
         )
         raw = (raw or "").strip()
         if raw.startswith("```"):
@@ -274,6 +282,8 @@ Rules:
             max_tokens=1000,
             temperature=0.2,
             role="arbiter",
+            tier="deep",
+            agent="debate.arbiter",
         )
         raw = (raw or "").strip()
         if raw.startswith("```"):

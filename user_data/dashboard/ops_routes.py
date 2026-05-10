@@ -2039,6 +2039,158 @@ async def live_trades():
     return _envelope("ok", data={"trades": out, "summary": summary})
 
 
+@router.get("/llm_stats")
+async def llm_stats():
+    """LLM inference monitor — latency, model routing, counterfactual cost.
+
+    Reads two sources:
+      1. stocks/memory/llm-calls.jsonl  (shark agents, written by
+         shark.llm.tracker on every chat_json call)
+      2. sentiment_log table             (crypto sentiment engine, latency
+         derived from prompt_eval + eval counts that the engine logs)
+
+    Returns a single envelope so one card on /ops can render everything.
+    """
+    import json as _json
+
+    # ── Shark side: rolling 24h window of the JSONL ─────────────────
+    shark_log = STOCKS_ROOT / "memory" / "llm-calls.jsonl"
+    shark_summary: dict = {
+        "total_calls": 0, "total_latency_seconds": 0.0,
+        "avg_latency_seconds": 0.0, "total_api_cost_saved_usd": 0.0,
+        "by_model": {}, "by_agent": {}, "by_tier": {"fast": 0, "deep": 0},
+    }
+    cutoff = datetime.now(timezone.utc).timestamp() - 86400
+    if shark_log.is_file():
+        try:
+            calls = []
+            with shark_log.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    try:
+                        rec = _json.loads(line)
+                    except _json.JSONDecodeError:
+                        continue
+                    ts = rec.get("timestamp") or ""
+                    try:
+                        when = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+                    except (ValueError, TypeError):
+                        continue
+                    if when < cutoff:
+                        continue
+                    calls.append(rec)
+            if calls:
+                p_toks = sum(int(c.get("prompt_tokens") or 0) for c in calls)
+                c_toks = sum(int(c.get("completion_tokens") or 0) for c in calls)
+                # Counterfactual cost: $3/M prompt + $15/M completion (Sonnet 4.6)
+                saved = (p_toks * 3.0 + c_toks * 15.0) / 1_000_000
+                total_lat = sum(float(c.get("latency_seconds") or 0) for c in calls)
+
+                # By agent
+                by_agent: dict = {}
+                for c in calls:
+                    agent = c.get("agent", "unknown")
+                    rec = by_agent.setdefault(agent, {"calls": 0, "latencies": [], "models": set()})
+                    rec["calls"] += 1
+                    rec["latencies"].append(float(c.get("latency_seconds") or 0))
+                    rec["models"].add(c.get("model", "?"))
+                for agent, rec in by_agent.items():
+                    lats = rec["latencies"]
+                    rec["avg_latency"] = round(sum(lats) / len(lats), 2)
+                    rec["max_latency"] = round(max(lats), 2)
+                    rec["models"] = sorted(rec["models"])
+                    del rec["latencies"]
+
+                # By model + tier
+                by_model: dict = {}
+                by_tier = {"fast": 0, "deep": 0}
+                for c in calls:
+                    m = c.get("model", "?")
+                    by_model[m] = by_model.get(m, 0) + 1
+                    t = c.get("tier", "deep")
+                    if t in by_tier:
+                        by_tier[t] += 1
+
+                shark_summary = {
+                    "total_calls": len(calls),
+                    "total_latency_seconds": round(total_lat, 1),
+                    "avg_latency_seconds": round(total_lat / len(calls), 2),
+                    "total_prompt_tokens": p_toks,
+                    "total_completion_tokens": c_toks,
+                    "total_api_cost_saved_usd": round(saved, 4),
+                    "by_model": dict(sorted(by_model.items(), key=lambda kv: -kv[1])),
+                    "by_agent": by_agent,
+                    "by_tier": by_tier,
+                    "log_path": str(shark_log),
+                    "log_size_bytes": shark_log.stat().st_size,
+                }
+        except Exception as exc:
+            logger.warning("llm_stats: shark log read failed: %s", exc)
+
+    # ── Crypto side: sentiment-engine call counts from sentiment_log ────
+    crypto_summary: dict = {"calls_24h": 0, "avg_latency_seconds": None}
+    if ops_db._HAVE_PG:
+        try:
+            with ops_db._connect() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) AS n, "
+                    "       SUM(COALESCE(claude_score,0) * 0 + 1) AS x "  # sentinel
+                    "FROM sentiment_log "
+                    "WHERE ts > NOW() - INTERVAL '24 hours'"
+                )
+                row = cur.fetchone() or {}
+                crypto_summary["calls_24h"] = int(row.get("n") or 0)
+                # Sentiment engine doesn't currently persist latency. Note that.
+                crypto_summary["latency_note"] = (
+                    "sentiment_log doesn't carry per-call latency yet; row count is the proxy."
+                )
+        except Exception as exc:
+            logger.warning("llm_stats: sentiment query failed: %s", exc)
+
+    provider = os.environ.get("SHARK_LLM_PROVIDER", "ollama")
+    return _envelope("ok", data={
+        "provider": provider,
+        "is_local": provider == "ollama",
+        "shark": shark_summary,
+        "crypto": crypto_summary,
+    })
+
+
+@router.get("/combined_portfolio")
+async def combined_portfolio():
+    """Combined crypto + stocks portfolio + drawdown, for the unified card."""
+    try:
+        # The unified_risk module lives in the freqtrade-side path tree;
+        # it's read-only and doesn't import freqtrade itself.
+        import sys as _sys
+        repo_root = STOCKS_ROOT.parent
+        if str(repo_root) not in _sys.path:
+            _sys.path.insert(0, str(repo_root))
+        from user_data.modules.unified_risk import get_combined_risk_status
+    except ImportError as exc:
+        return _envelope("down", error=f"unified_risk import failed: {exc}")
+
+    try:
+        loop = asyncio.get_running_loop()
+        status = await asyncio.wait_for(
+            loop.run_in_executor(None, get_combined_risk_status),
+            timeout=ENDPOINT_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        return _envelope("down", error="combined_risk query timed out")
+    except Exception as exc:
+        logger.exception("combined_portfolio: %s", exc)
+        return _envelope("down", error=str(exc))
+
+    # Promote the breaker flag to the envelope status
+    return _envelope(
+        "degraded" if status.get("circuit_breaker_active") else "ok",
+        data=status,
+        error="combined breaker tripped" if status.get("circuit_breaker_active") else None,
+    )
+
+
 @router.get("/stock_regime")
 async def stock_regime():
     """SPY-driven simple regime classifier for the dashboard.

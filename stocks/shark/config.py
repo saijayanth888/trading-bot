@@ -145,8 +145,8 @@ class Settings:
     # want Claude for higher decision quality; cost is ~$0.50/day at typical
     # cadence (see docs/SETUP-GUIDE.md).
     llm_provider: str
-    ollama_model: str
-    ollama_fast_model: str
+    ollama_model: str           # deep model — alias surfaced via .llm_model_deep
+    ollama_fast_model: str      # fast model — alias surfaced via .llm_model_fast
     ollama_base_url: str
 
     # ----- Notifications -----
@@ -158,6 +158,18 @@ class Settings:
     gmail_app_password: str
     resend_api_key: str
     resend_from_email: str
+
+    @property
+    def llm_model_fast(self) -> str:
+        """Tier alias — fast model (default hermes3:8b) used by bull/bear/
+        reviewer/early-debate agents. Same as ollama_fast_model."""
+        return self.ollama_fast_model
+
+    @property
+    def llm_model_deep(self) -> str:
+        """Tier alias — deep model (default hermes3:70b or whatever
+        OLLAMA_MODEL points to) used by arbiter/combined/risk/final-debate."""
+        return self.ollama_model
 
     @property
     def is_paper(self) -> bool:

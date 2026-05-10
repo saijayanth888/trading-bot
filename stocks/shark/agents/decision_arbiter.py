@@ -129,6 +129,8 @@ Rules:
             max_tokens=800,
             temperature=0.2,
             role="arbiter",
+            tier="deep",
+            agent="decision_arbiter",
         )
         raw_text = (raw_text or "").strip()
 

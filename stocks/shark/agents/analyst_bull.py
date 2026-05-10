@@ -79,6 +79,8 @@ Be specific about price levels based on the market data provided. Do not include
             user_message=user_prompt,
             max_tokens=1000,
             temperature=0.3,
+            tier="fast",
+            agent="analyst_bull",
         )
         raw_text = (raw_text or "").strip()
 

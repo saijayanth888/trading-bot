@@ -421,26 +421,54 @@ def chat_json(
     max_tokens: int = 1000,
     temperature: float = 0.3,
     role: str = "default",
+    tier: str = "deep",
+    agent: str = "unknown",
     schema_hint: str = "",
 ) -> tuple[str, dict[str, int], str]:
     """One-shot helper: run a chat against the configured provider and return
-    raw text + usage + model name. Caller does its own JSON parsing (matches
-    the existing agent code's robustness around markdown-fenced responses).
+    raw text + usage + model name. Caller does its own JSON parsing.
 
-    role: "default" | "debate" | "arbiter" | "risk" — picks the right env-var
-          override. Falls back to SHARK_LLM_PROVIDER if no role-specific one.
-    schema_hint: optional JSON-schema text appended to the user message so
-          local models (Hermes-3) reliably return parseable output. Empty
-          string = caller already embeds the schema in user_message.
+    role:  "default" | "debate" | "arbiter" | "risk" — picks role-specific
+           provider override (SHARK_DEBATE_LLM_PROVIDER etc.).
+    tier:  "fast" (use OLLAMA_FAST_MODEL, default hermes3:8b — bull, bear,
+           reviewer, debate rounds 1-2) or "deep" (use OLLAMA_MODEL, default
+           hermes3:70b — arbiter, combined, risk, final synthesis).
+    agent: caller's name — used by the LLM tracker for per-agent stats.
     """
+    import time
     role = (role or "default").lower()
+    tier = (tier or "deep").lower()
+
+    # Pick the provider. For Ollama, also pick the model by tier.
     pickers = {
         "default": get_llm_client,
         "debate":  get_debate_client,
         "arbiter": get_arbiter_client,
         "risk":    get_risk_client,
     }
-    client = pickers.get(role, get_llm_client)()
+    picker = pickers.get(role, get_llm_client)
+
+    # Tier-aware model selection — only meaningful for Ollama where we have
+    # a fast/deep split. For paid providers (Anthropic / OpenAI / Google)
+    # the env's CLAUDE_MODEL etc. is authoritative.
+    provider = (os.environ.get(
+        f"SHARK_{role.upper()}_LLM_PROVIDER", os.environ.get("SHARK_LLM_PROVIDER", "ollama"),
+    ) or "ollama").lower()
+    if provider == "ollama":
+        if tier == "fast":
+            model = os.environ.get(
+                f"SHARK_{role.upper()}_LLM_MODEL",
+                os.environ.get("OLLAMA_FAST_MODEL", "hermes3:8b"),
+            )
+        else:
+            model = os.environ.get(
+                f"SHARK_{role.upper()}_LLM_MODEL",
+                os.environ.get("OLLAMA_MODEL", "hermes3:70b"),
+            )
+        client = get_llm_client(provider="ollama", model=model)
+    else:
+        client = picker()
+
     user = user_message
     if schema_hint and client.provider_name == "ollama":
         user = (
@@ -448,12 +476,32 @@ def chat_json(
             f"Respond with a single JSON object matching this exact schema "
             f"(no prose, no markdown, no code-fence):\n{schema_hint}"
         )
+
+    start = time.monotonic()
     resp = client.chat(
         system_prompt=system_prompt,
         user_message=user,
         max_tokens=max_tokens,
         temperature=temperature,
     )
+    elapsed = time.monotonic() - start
+
+    # Best-effort tracker emit — never let tracking break the agent path.
+    try:
+        from shark.llm.tracker import get_tracker
+        get_tracker().record(
+            agent=agent,
+            model=client.model,
+            provider=client.provider_name,
+            latency_seconds=elapsed,
+            prompt_tokens=int(resp.usage.get("input_tokens", 0) or resp.usage.get("prompt_tokens", 0) or 0),
+            completion_tokens=int(resp.usage.get("output_tokens", 0) or resp.usage.get("completion_tokens", 0) or 0),
+            tier=tier,
+            role=role,
+        )
+    except Exception as exc:  # pragma: no cover
+        logger.debug("tracker emit failed: %s", exc)
+
     return resp.content, resp.usage, client.model
 
 

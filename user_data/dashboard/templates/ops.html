@@ -842,6 +842,66 @@
         }
       </style>
 
+      <!-- ── Combined portfolio: unified crypto + stocks ──────── -->
+      <section class="ops-card wide-card" id="card-combined" data-status="ok">
+        <div class="card-head">
+          <h3 data-num="12">Combined portfolio · crypto + stocks</h3>
+          <span class="age" id="combined-age">—</span>
+        </div>
+        <div id="combined-body">Loading…</div>
+      </section>
+
+      <!-- ── LLM inference monitor ────────────────────────────── -->
+      <section class="ops-card wide-card" id="card-llm" data-status="ok">
+        <div class="card-head">
+          <h3 data-num="13">LLM inference · cost saved vs Anthropic</h3>
+          <span class="age" id="llm-age">—</span>
+        </div>
+        <div id="llm-body">Loading…</div>
+      </section>
+
+      <style>
+        /* Combined portfolio + LLM card layouts share these primitives. */
+        .ks-grid {
+          display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px;
+          margin-bottom: 14px;
+        }
+        .ks-grid .kpi-label {
+          font-size: 11px; color: var(--text-muted);
+          text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px;
+        }
+        .ks-grid .kpi-value {
+          font-size: 22px; font-weight: 600;
+          font-variant-numeric: tabular-nums; color: var(--text-primary);
+        }
+        .ks-grid .kpi-value.is-pos  { color: #3fb950; }
+        .ks-grid .kpi-value.is-neg  { color: #f85149; }
+        .ks-grid .kpi-sub { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+        .pill-local {
+          display: inline-block; padding: 2px 8px; border-radius: 999px;
+          font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+          background: rgba(63,185,80,0.10); color: #3fb950;
+          border: 1px solid rgba(63,185,80,0.35);
+        }
+        .pill-paid {
+          display: inline-block; padding: 2px 8px; border-radius: 999px;
+          font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+          background: rgba(244,185,66,0.10); color: #f4b942;
+          border: 1px solid rgba(244,185,66,0.35);
+        }
+        .lat-bar { display: inline-block; height: 8px; background: var(--bg-inset); border-radius: 4px; vertical-align: middle; }
+        .lat-bar > i { display: block; height: 100%; border-radius: 4px; background: linear-gradient(90deg, #6ea2ff, #ffd49a); }
+        .dd-bar {
+          height: 8px; background: var(--bg-inset); border-radius: 4px;
+          margin: 6px 0 4px; position: relative; overflow: hidden;
+        }
+        .dd-bar > i {
+          display: block; height: 100%; border-radius: 4px;
+          background: linear-gradient(90deg, #3fb950, #f4b942, #f85149);
+          transition: width 200ms;
+        }
+      </style>
+
       <!-- ── Stocks: shark momentum + wheel income on Alpaca ──── -->
       <section class="ops-card wide-card" id="card-stocks" data-status="ok">
         <div class="card-head">
@@ -1033,7 +1093,7 @@
       tick(); setInterval(tick, 1000);
     })();
   </script>
-  {% if effects_enabled %}<script src="/static/js/effects.js?v=20260510-3" defer></script>{% endif %}
-  <script src="/static/js/ops.js?v=20260510-3" defer></script>
+  {% if effects_enabled %}<script src="/static/js/effects.js?v=20260510-4" defer></script>{% endif %}
+  <script src="/static/js/ops.js?v=20260510-4" defer></script>
 </body>
 </html>
