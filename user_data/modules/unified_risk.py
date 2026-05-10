@@ -87,12 +87,19 @@ def _load_json(path: Path) -> Optional[dict]:
 
 
 def _crypto_starting_equity() -> float:
-    """Paper-mode starting wallet from config.json. Live mode would override."""
+    """Crypto baseline equity for drawdown computation.
+
+    Reads dry_run_wallet from the merged config (config.json +
+    config-private.json — both passed to freqtrade). Returns whichever
+    is set, regardless of the dry_run flag — the wallet number is the
+    DD baseline whether we're paper-trading or live (live would also
+    query the exchange, but having a hard floor keeps DD math sane).
+    """
     cfg = _load_json(_CONFIG_JSON) or {}
-    if cfg.get("dry_run", True):
-        return float(cfg.get("dry_run_wallet") or 0.0)
-    # Live: would query the exchange. For now return 0 (caller falls back).
-    return 0.0
+    private_path = _CONFIG_JSON.parent / "config-private.json"
+    private = _load_json(private_path) or {}
+    wallet = cfg.get("dry_run_wallet") or private.get("dry_run_wallet") or 0.0
+    return float(wallet)
 
 
 def _crypto_realised_pnl_usd() -> float:

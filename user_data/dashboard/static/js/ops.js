@@ -348,6 +348,83 @@ async function refreshTrades() {
   body.innerHTML = html;
 }
 
+// ─── Stocks ML — TFT training status card ────────────────────────
+async function refreshStocksML() {
+  const r = await jsonFetch("/api/ops/stocks_ml");
+  const env = r.body;
+  setStatus("card-stocks-ml", env.status || "down");
+  const body = document.getElementById("stocks-ml-body");
+  const ageEl = document.getElementById("stocks-ml-age");
+  if (!body) return;
+  if (!env.data) { body.textContent = env.error || "—"; return; }
+  const d = env.data;
+
+  // Status pill in header
+  if (ageEl) {
+    const enabled = d.ml_enabled ? "🟢 INFLUENCING TRADES" : "⚪ COMPUTE ONLY";
+    const age = d.weights_age_seconds == null
+      ? "no model yet"
+      : d.weights_age_seconds < 86400
+        ? `${Math.floor(d.weights_age_seconds/3600)}h old`
+        : `${Math.floor(d.weights_age_seconds/86400)}d old`;
+    ageEl.textContent = `${enabled} · model ${age}${d.ml_alpha ? " · ALPHA" : ""}`;
+    ageEl.style.color = d.ml_enabled ? "#3fb950" : "var(--text-muted)";
+  }
+
+  // 4-up KPI: model present, val acc, training samples, next train
+  const ok = d.weights_present && d.best_val_acc != null;
+  const valAcc = d.best_val_acc != null ? (d.best_val_acc * 100).toFixed(1) + "%" : "—";
+  const baseline = "33.3%"; // 3-class random baseline
+  const valColor = ok && d.best_val_acc > 0.40 ? "#3fb950" : ok && d.best_val_acc > 0.36 ? "#f4b942" : "#f85149";
+
+  let html = `<div class="ks-grid">` +
+    `<div><div class="kpi-label">Model</div>` +
+    `<div class="kpi-value">${ok ? "stock_tft_v1" : "<span class=\"muted\">not trained yet</span>"}</div>` +
+    `<div class="kpi-sub">device: ${esc(d.device || "cpu")} · best ep ${esc(d.best_epoch || "—")}</div></div>` +
+
+    `<div><div class="kpi-label">Validation accuracy</div>` +
+    `<div class="kpi-value" style="color:${valColor};">${esc(valAcc)}</div>` +
+    `<div class="kpi-sub">3-class random = ${baseline} · target ≥45%</div></div>` +
+
+    `<div><div class="kpi-label">Train / val samples</div>` +
+    `<div class="kpi-value">${esc(d.n_train ?? "—")}</div>` +
+    `<div class="kpi-sub">val ${esc(d.n_val ?? "—")} · ${esc(d.n_tickers ?? 0)} tickers</div></div>` +
+
+    `<div><div class="kpi-label">Next training</div>` +
+    `<div class="kpi-value" style="font-size:14px;">${esc(d.next_train_cron || "—")}</div>` +
+    `<div class="kpi-sub">cron: stocks_ml_train</div></div>` +
+    `</div>`;
+
+  // Training history (sparkline-ish)
+  if (d.history && d.history.length) {
+    html += `<h4 style="margin:14px 0 6px;font-size:13px;">Recent epochs</h4>`;
+    html += `<table class="tape"><thead><tr><th>epoch</th><th>train loss</th><th>val acc</th><th>elapsed</th></tr></thead><tbody>`;
+    for (const h of d.history) {
+      html += `<tr><td>${esc(h.epoch)}</td><td>${esc(h.train_loss)}</td><td>${esc((h.val_acc * 100).toFixed(1))}%</td><td>${esc(h.elapsed_s)}s</td></tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+
+  // EPT generation log
+  if (d.evolution && d.evolution.length) {
+    html += `<h4 style="margin:14px 0 6px;font-size:13px;">Evolution generations</h4>`;
+    html += `<table class="tape"><thead><tr><th>gen</th><th>week ending</th><th>champion</th><th>members</th></tr></thead><tbody>`;
+    for (const g of d.evolution) {
+      html += `<tr><td>${esc(g.generation)}</td><td>${esc(g.week_ending)}</td><td>${esc(g.champion_id || "—")}</td><td>${esc((g.members||[]).length)}</td></tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+
+  // Log tail (collapsed by default)
+  if (d.log_tail && d.log_tail.length) {
+    html += `<details style="margin-top:14px;"><summary class="muted" style="cursor:pointer;font-size:11px;">last training run · log tail (${d.log_tail.length} lines)</summary>` +
+            `<pre style="background:var(--bg-inset);padding:10px 12px;font-size:11px;overflow-x:auto;border-radius:6px;margin-top:6px;">${esc(d.log_tail.join("\n"))}</pre>` +
+            `</details>`;
+  }
+
+  body.innerHTML = html;
+}
+
 // ─── LLM circuit breakers (Ollama primary + Anthropic fallback) ──
 async function refreshCircuitBreakers() {
   const [cbResp, ohResp] = await Promise.all([
@@ -1768,6 +1845,7 @@ document.addEventListener("DOMContentLoaded", () => {
   refreshCombined();
   refreshLLMStats();
   refreshCircuitBreakers();
+  refreshStocksML();
   refreshRegime().then(refreshSentiment);
   refreshStockRegime();
   refreshServices(); refreshTraining(); refreshMcp(); refreshTrades();
@@ -1781,7 +1859,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const REFRESH_LS_KEY = "ops.refresh_interval_ms";
   const ALL_REFRESHERS = [
     refreshLiveTrades, refreshGates, refreshCombined, refreshLLMStats,
-    refreshCircuitBreakers,
+    refreshCircuitBreakers, refreshStocksML,
     () => refreshRegime().then(refreshSentiment),
     refreshStockRegime,
     refreshServices, refreshTraining, refreshMcp, refreshTrades,

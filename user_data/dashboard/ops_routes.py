@@ -2245,6 +2245,71 @@ async def combined_portfolio():
     )
 
 
+@router.get("/stocks_ml")
+async def stocks_ml():
+    """Stocks ML pipeline status — TFT model freshness, val_acc, generation log.
+
+    ALPHA. Reads:
+      stocks/kb/models/tft/stock_tft_v1_summary.json   (training summary)
+      stocks/kb/models/evolution_log.json              (EPT generation history)
+      stocks/memory/cron-stocks-ml-train.log           (last few lines)
+    """
+    summary_path = STOCKS_ROOT / "kb" / "models" / "tft" / "stock_tft_v1_summary.json"
+    weights_path = STOCKS_ROOT / "kb" / "models" / "tft" / "stock_tft_v1.pt"
+    evolution_path = STOCKS_ROOT / "kb" / "models" / "evolution_log.json"
+    log_path = STOCKS_ROOT / "memory" / "cron-stocks-ml-train.log"
+
+    summary = _read_json(summary_path) or {}
+    evolution = _read_json(evolution_path) or []
+    if not isinstance(evolution, list):
+        evolution = []
+
+    weights_age_seconds = _file_age_seconds(weights_path)
+    weights_exists = weights_path.is_file()
+
+    # Last 20 lines of the train log so the operator can see what happened
+    log_tail: list[str] = []
+    if log_path.is_file():
+        try:
+            with log_path.open(errors="replace") as f:
+                lines = f.readlines()
+            log_tail = [l.rstrip() for l in lines[-20:]]
+        except OSError:
+            pass
+
+    # Build a quick "ML enabled" signal from env (operator-flippable)
+    import os as _os
+    ml_enabled = _os.environ.get("STOCKS_ML_ENABLED", "0").strip() in {"1", "true", "True"}
+
+    payload = {
+        "ml_alpha": True,  # always — we're in alpha until validated
+        "ml_enabled": ml_enabled,  # whether trades actually use the predictions
+        "weights_present": weights_exists,
+        "weights_age_seconds": weights_age_seconds,
+        "best_val_acc": summary.get("best_val_acc"),
+        "best_epoch": summary.get("best_epoch"),
+        "n_train": summary.get("n_train"),
+        "n_val": summary.get("n_val"),
+        "n_tickers": summary.get("n_tickers"),
+        "device": summary.get("device"),
+        "history": (summary.get("history") or [])[-10:],
+        "evolution": evolution[-5:],
+        "log_tail": log_tail,
+        "next_train_cron": "0 23 * * 0  (Sun 11 PM ET)",
+    }
+
+    if not weights_exists:
+        return _envelope(
+            "degraded",
+            data=payload,
+            error="No trained model yet — first training fires Sunday 11 PM ET.",
+        )
+    if weights_age_seconds is not None and weights_age_seconds > 14 * 86400:
+        return _envelope("degraded", data=payload,
+                         error=f"Model is {weights_age_seconds // 86400}d old — retraining stale.")
+    return _envelope("ok", data=payload)
+
+
 @router.get("/stock_regime")
 async def stock_regime():
     """SPY-driven simple regime classifier for the dashboard.
