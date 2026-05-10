@@ -101,6 +101,10 @@ user_data/config-private.json
 user_data/config.json.bak-*
 user_data/config.json.tmp
 
+# Unified risk peak — runtime state, regenerates on first call
+user_data/data/unified_risk_peak.json
+user_data/data/unified_risk_peak.json.tmp
+
 # Wheel module — runtime state regenerates, but trade log stays
 stocks/wheel/state/positions.json
 stocks/wheel/state/cash_log.jsonl
