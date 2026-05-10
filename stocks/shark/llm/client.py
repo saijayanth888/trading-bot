@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
@@ -414,6 +415,82 @@ def get_llm_client(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_ollama_model(role: str, tier: str) -> str:
+    """Pick the Ollama model honouring per-role overrides + legacy var names."""
+    if tier == "fast":
+        return (
+            os.environ.get(f"SHARK_{role.upper()}_LLM_MODEL", "")
+            or os.environ.get("OLLAMA_FAST_MODEL", "")
+            or os.environ.get("OLLAMA_MODEL_FAST", "")     # legacy/crypto name
+            or "hermes3:8b"
+        )
+    return (
+        os.environ.get(f"SHARK_{role.upper()}_LLM_MODEL", "")
+        or os.environ.get("OLLAMA_MODEL", "")
+        or os.environ.get("OLLAMA_MODEL_DEEP", "")         # legacy/crypto name
+        or "hermes3:70b"
+    )
+
+
+def _emit_tracker(
+    agent: str, model: str, provider: str, elapsed: float,
+    usage: dict, tier: str, role: str,
+) -> None:
+    """Best-effort tracker emit — never let tracking break the agent path."""
+    try:
+        from shark.llm.tracker import get_tracker
+        get_tracker().record(
+            agent=agent, model=model, provider=provider,
+            latency_seconds=elapsed,
+            prompt_tokens=int(
+                (usage or {}).get("input_tokens", 0)
+                or (usage or {}).get("prompt_tokens", 0)
+                or 0
+            ),
+            completion_tokens=int(
+                (usage or {}).get("output_tokens", 0)
+                or (usage or {}).get("completion_tokens", 0)
+                or 0
+            ),
+            tier=tier, role=role,
+        )
+    except Exception as exc:  # pragma: no cover
+        logger.debug("tracker emit failed: %s", exc)
+
+
+_FALLBACK_ALERT_LAST_TS = 0.0
+_FALLBACK_ALERT_COOLDOWN_S = 300  # 5-minute dedup so we don't spam Slack
+
+
+def _maybe_alert_fallback_active(agent: str, primary_status: dict) -> None:
+    """Slack-alert when we're using Anthropic — we're paying real money now."""
+    global _FALLBACK_ALERT_LAST_TS
+    now = time.time()
+    if now - _FALLBACK_ALERT_LAST_TS < _FALLBACK_ALERT_COOLDOWN_S:
+        return
+    _FALLBACK_ALERT_LAST_TS = now
+    try:
+        # Slack via direct webhook — avoids importing freqtrade-side modules
+        # that may not be on PYTHONPATH for the shark process.
+        import json as _json
+        webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
+        if not webhook:
+            return
+        import requests
+        text = (
+            f":rotating_light: *LLM failover active — paying for Anthropic*\n"
+            f"Ollama breaker `{primary_status.get('name', '?')}` is "
+            f"`{primary_status.get('state', '?')}` "
+            f"(p95 latency {primary_status.get('p95_latency_s')}s, "
+            f"{primary_status.get('failure_count', 0)} failures). "
+            f"Agent `{agent}` just used the Anthropic API. "
+            f"Investigate Ollama on the Spark."
+        )
+        requests.post(webhook, json={"text": text}, timeout=5)
+    except Exception:
+        pass
+
+
 def chat_json(
     system_prompt: str,
     user_message: str,
@@ -425,63 +502,136 @@ def chat_json(
     agent: str = "unknown",
     schema_hint: str = "",
 ) -> tuple[str, dict[str, int], str]:
-    """One-shot helper: run a chat against the configured provider and return
-    raw text + usage + model name. Caller does its own JSON parsing.
+    """LLM call with automatic Ollama → Anthropic failover.
 
-    role:  "default" | "debate" | "arbiter" | "risk" — picks role-specific
-           provider override (SHARK_DEBATE_LLM_PROVIDER etc.).
-    tier:  "fast" (use OLLAMA_FAST_MODEL, default hermes3:8b — bull, bear,
-           reviewer, debate rounds 1-2) or "deep" (use OLLAMA_MODEL, default
-           hermes3:70b — arbiter, combined, risk, final synthesis).
-    agent: caller's name — used by the LLM tracker for per-agent stats.
+    Order of attempts:
+      1. Ollama (unless its circuit breaker is OPEN)
+      2. Anthropic (when ANTHROPIC_API_KEY is set and its breaker isn't OPEN)
+      3. If both fail, raise RuntimeError so the caller's agent-side
+         deterministic fallback can take over.
+
+    The breaker is per (provider, tier) — the 70B can fail without affecting
+    8B-tier calls. Latency-based trip means slow responses also fail over;
+    a slow response is functionally an outage for live trading.
+
+    Args
+      role:   "default" | "debate" | "arbiter" | "risk" — env-var override key.
+      tier:   "fast" (8B/cheaper) or "deep" (70B/quality).
+      agent:  caller's name (for tracker stats).
     """
-    import time
+    from shark.llm.circuit_breaker import get_breaker
+
     role = (role or "default").lower()
     tier = (tier or "deep").lower()
 
-    # Pick the provider. For Ollama, also pick the model by tier.
-    pickers = {
-        "default": get_llm_client,
-        "debate":  get_debate_client,
-        "arbiter": get_arbiter_client,
-        "risk":    get_risk_client,
-    }
-    picker = pickers.get(role, get_llm_client)
-
-    # Tier-aware model selection — only meaningful for Ollama where we have
-    # a fast/deep split. For paid providers (Anthropic / OpenAI / Google)
-    # the env's CLAUDE_MODEL etc. is authoritative.
-    #
-    # Use `... or default` rather than `os.environ.get(..., default)` so an
-    # empty-string env var (which is a valid value, not "missing") falls
-    # through to the fallback. Also accept BOTH the new shark-side names
-    # (OLLAMA_FAST_MODEL, OLLAMA_MODEL) and the legacy crypto-sentiment
-    # names (OLLAMA_MODEL_FAST, OLLAMA_MODEL_DEEP) so a single .env line
-    # works for both subsystems.
-    provider = (
+    # ── Resolve provider preference + models ──────────────────────────
+    requested_provider = (
         os.environ.get(f"SHARK_{role.upper()}_LLM_PROVIDER", "")
         or os.environ.get("SHARK_LLM_PROVIDER", "")
         or "ollama"
     ).lower()
-    if provider == "ollama":
-        if tier == "fast":
-            model = (
-                os.environ.get(f"SHARK_{role.upper()}_LLM_MODEL", "")
-                or os.environ.get("OLLAMA_FAST_MODEL", "")
-                or os.environ.get("OLLAMA_MODEL_FAST", "")     # legacy/crypto name
-                or "hermes3:8b"
-            )
-        else:
-            model = (
-                os.environ.get(f"SHARK_{role.upper()}_LLM_MODEL", "")
-                or os.environ.get("OLLAMA_MODEL", "")
-                or os.environ.get("OLLAMA_MODEL_DEEP", "")     # legacy/crypto name
-                or "hermes3:70b"
-            )
-        client = get_llm_client(provider="ollama", model=model)
-    else:
-        client = picker()
 
+    ollama_model = _resolve_ollama_model(role, tier)
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    anthropic_model = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
+    has_anthropic = bool(anthropic_key)
+
+    # Per-role explicit Anthropic-only routing skips the failover dance
+    if requested_provider == "anthropic" and has_anthropic:
+        client = get_llm_client(provider="anthropic", model=anthropic_model)
+        return _direct_call(client, system_prompt, user_message, schema_hint,
+                            max_tokens, temperature, agent, tier, role)
+
+    # ── Build prompt; schema hint helps Ollama (Anthropic does JSON natively) ──
+    user = user_message
+    if schema_hint:
+        user = (
+            f"{user_message}\n\n"
+            f"Respond with a single JSON object matching this exact schema "
+            f"(no prose, no markdown, no code-fence):\n{schema_hint}"
+        )
+
+    primary_breaker = get_breaker(f"ollama:{tier}", tier=tier)
+    fallback_breaker = get_breaker(f"anthropic:{tier}", tier=tier)
+    last_error: Optional[Exception] = None
+
+    # ── Attempt 1: Ollama (primary) ───────────────────────────────────
+    can_primary, reason = primary_breaker.can_execute()
+    if can_primary:
+        try:
+            client = get_llm_client(provider="ollama", model=ollama_model)
+            start = time.monotonic()
+            resp = client.chat(
+                system_prompt=system_prompt, user_message=user,
+                max_tokens=max_tokens, temperature=temperature,
+            )
+            elapsed = time.monotonic() - start
+            primary_breaker.record_success(elapsed)
+            _emit_tracker(agent, client.model, client.provider_name,
+                          elapsed, resp.usage, tier, role)
+            return resp.content, resp.usage, client.model
+        except Exception as exc:
+            primary_breaker.record_failure(str(exc))
+            last_error = exc
+            logger.warning(
+                "Ollama call failed (agent=%s): %s — trying Anthropic fallback",
+                agent, exc,
+            )
+    else:
+        logger.info(
+            "Ollama breaker for %s tier is %s — using Anthropic fallback",
+            tier, reason,
+        )
+
+    # ── Attempt 2: Anthropic (fallback) ───────────────────────────────
+    if not has_anthropic:
+        if last_error:
+            raise RuntimeError(
+                f"Ollama unavailable and ANTHROPIC_API_KEY not configured. "
+                f"Last Ollama error: {last_error}"
+            ) from last_error
+        raise RuntimeError(
+            f"Ollama breaker {primary_breaker.get_status()['state']} "
+            f"and ANTHROPIC_API_KEY not configured — no LLM path available."
+        )
+
+    can_fallback, _ = fallback_breaker.can_execute()
+    if not can_fallback:
+        raise RuntimeError(
+            f"BOTH PROVIDERS DOWN. Ollama: {primary_breaker.get_status()['state']}, "
+            f"Anthropic: {fallback_breaker.get_status()['state']}. "
+            f"Last Ollama error: {last_error}"
+        )
+
+    try:
+        client = get_llm_client(provider="anthropic", model=anthropic_model)
+        start = time.monotonic()
+        # Anthropic does JSON output natively — strip the schema hint suffix
+        # since the AnthropicClient.chat() doesn't need it.
+        resp = client.chat(
+            system_prompt=system_prompt, user_message=user_message,
+            max_tokens=max_tokens, temperature=temperature,
+        )
+        elapsed = time.monotonic() - start
+        fallback_breaker.record_success(elapsed)
+        _maybe_alert_fallback_active(agent, primary_breaker.get_status())
+        _emit_tracker(agent, client.model, client.provider_name,
+                      elapsed, resp.usage, tier, role)
+        return resp.content, resp.usage, client.model
+    except Exception as exc:
+        fallback_breaker.record_failure(str(exc))
+        raise RuntimeError(
+            f"BOTH PROVIDERS FAILED. Ollama: {last_error}. Anthropic: {exc}"
+        ) from exc
+
+
+def _direct_call(
+    client: LLMClient, system_prompt: str, user_message: str,
+    schema_hint: str, max_tokens: int, temperature: float,
+    agent: str, tier: str, role: str,
+) -> tuple[str, dict, str]:
+    """Single-provider call with no failover — used when operator pinned a
+    specific provider via SHARK_*_LLM_PROVIDER=anthropic."""
     user = user_message
     if schema_hint and client.provider_name == "ollama":
         user = (
@@ -489,32 +639,14 @@ def chat_json(
             f"Respond with a single JSON object matching this exact schema "
             f"(no prose, no markdown, no code-fence):\n{schema_hint}"
         )
-
     start = time.monotonic()
     resp = client.chat(
-        system_prompt=system_prompt,
-        user_message=user,
-        max_tokens=max_tokens,
-        temperature=temperature,
+        system_prompt=system_prompt, user_message=user,
+        max_tokens=max_tokens, temperature=temperature,
     )
     elapsed = time.monotonic() - start
-
-    # Best-effort tracker emit — never let tracking break the agent path.
-    try:
-        from shark.llm.tracker import get_tracker
-        get_tracker().record(
-            agent=agent,
-            model=client.model,
-            provider=client.provider_name,
-            latency_seconds=elapsed,
-            prompt_tokens=int(resp.usage.get("input_tokens", 0) or resp.usage.get("prompt_tokens", 0) or 0),
-            completion_tokens=int(resp.usage.get("output_tokens", 0) or resp.usage.get("completion_tokens", 0) or 0),
-            tier=tier,
-            role=role,
-        )
-    except Exception as exc:  # pragma: no cover
-        logger.debug("tracker emit failed: %s", exc)
-
+    _emit_tracker(agent, client.model, client.provider_name,
+                  elapsed, resp.usage, tier, role)
     return resp.content, resp.usage, client.model
 
 
