@@ -142,6 +142,10 @@ class SlackAlerter:
         blocks = _blocks(
             header=f"{EMOJI['entry']}  Trade entry — {pair}",
             fields=fields,
+            delta=f"position opened at {_fmt_price(entry_price)} · "
+                  f"stake {_fmt_money(stake)} · "
+                  f"{signal.lower()} on {confidence:.0%} model confidence",
+            action="monitor — bot will manage exits per strategy rules",
         )
         return self._post(
             text=f"Trade entry on {pair} @ {_fmt_price(entry_price)}",
@@ -179,9 +183,18 @@ class SlackAlerter:
         if confidence is not None:
             fields.append(("Conf @ entry", f"{confidence:.1%}"))
 
+        ret_pct = (exit_price / entry_price - 1.0) if entry_price else 0.0
+        delta = f"{_fmt_pct(ret_pct, signed=True)} on {pair} after {_fmt_duration(duration_minutes)}"
+        action = (
+            "no action — exit per rule"
+            if exit_reason in ("trailing_stop_loss", "roi", "stop_loss") else
+            f"review — exit reason `{exit_reason}` is unusual"
+        )
         blocks = _blocks(
             header=f"{EMOJI[emoji_key]}  {headline} — {pair}",
             fields=fields,
+            delta=delta,
+            action=action,
         )
         return self._post(
             text=f"Trade closed {pair} P&L={_fmt_pnl(pnl)}",
@@ -216,9 +229,20 @@ class SlackAlerter:
         if max_drawdown is not None:
             fields.append(("Max drawdown", _fmt_pct(max_drawdown)))
 
+        delta = (
+            f"{_fmt_pct(total_pnl / max(starting_equity, 1), signed=True)} day · "
+            f"{num_trades} trades · {win_rate:.0%} win rate"
+        )
+        action = (
+            "review — drawdown approaching limit"
+            if max_drawdown is not None and max_drawdown < -0.05
+            else "no action — within targets"
+        )
         blocks = _blocks(
             header=f"{EMOJI['daily']}  Daily summary — {date_utc}",
             fields=fields,
+            delta=delta,
+            action=action,
         )
         return self._post(
             text=f"Daily summary {date_utc}: {_fmt_pnl(total_pnl)} ({num_trades} trades)",
@@ -260,10 +284,13 @@ class SlackAlerter:
         if lineage:
             fields.append(("Lineage", " → ".join(f"`{m}`" for m in lineage[-5:])))
 
+        delta = f"generation {generation} · champion fitness {champion_fitness:.3f}"
         blocks = _blocks(
             header=f"{EMOJI['evolution']}  Weekly evolution — gen {generation}",
             fields=fields,
             sections=[("Leaderboard", leaderboard)],
+            delta=delta,
+            action="no action — bot will use champion genome next cycle",
         )
         return self._post(
             text=f"Evolution gen {generation} — champion {champion_id} ({champion_fitness:.3f})",
@@ -296,6 +323,8 @@ class SlackAlerter:
             header=f"{EMOJI['error']}  System error — {component}",
             fields=fields,
             sections=sections,
+            delta=tb[:200],
+            action=f"investigate `{component}` — check logs and traceback",
         )
         return self._post(
             text=f"ERROR in {component}: {tb}",
@@ -336,7 +365,22 @@ class SlackAlerter:
             ("Threshold", _fmt_pct(threshold) if abs(threshold) <= 1 else f"{threshold:.4f}"),
             ("Severity", level.upper()),
         ]
-        blocks = _blocks(header=f"{EMOJI[emoji_key]}  {headline}", fields=fields)
+        delta = (
+            f"{_fmt_pct(value, signed=True) if abs(value) <= 1 else f'{value:.4f}'}"
+            f" vs limit "
+            f"{_fmt_pct(threshold) if abs(threshold) <= 1 else f'{threshold:.4f}'}"
+        )
+        action = (
+            "halt trading — kill switch armed"
+            if level == "critical"
+            else "review positions — approaching limit"
+        )
+        blocks = _blocks(
+            header=f"{EMOJI[emoji_key]}  {headline}",
+            fields=fields,
+            delta=delta,
+            action=action,
+        )
         return self._post(
             text=f"RISK {level.upper()}: {metric}={value:.4f} (limit {threshold:.4f})",
             blocks=blocks,
@@ -397,7 +441,19 @@ def _blocks(
     header: str,
     fields: Iterable[tuple[str, str]] = (),
     sections: Iterable[tuple[str, str]] = (),
+    *,
+    delta: str | None = None,
+    action: str | None = None,
 ) -> list[dict]:
+    """Production Block-Kit shape.
+
+    Every notification answers four questions in 2 seconds:
+      header        WHAT happened
+      fields        the numbers
+      delta         WHAT CHANGED since last time (vs yesterday / last hour)
+      action        WHAT TO DO right now ("monitor", "no action", "investigate")
+      context       when it fired (UTC clock)
+    """
     out: list[dict] = [{"type": "header", "text": {"type": "plain_text", "text": header[:150]}}]
     pairs = list(fields)
     if pairs:
@@ -410,6 +466,16 @@ def _blocks(
                     {"type": "mrkdwn", "text": f"*{k}*\n{v}"} for k, v in chunk
                 ],
             })
+    if delta:
+        out.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"_Δ_  {delta[:2900]}"},
+        })
+    if action:
+        out.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*Action:*  {action[:2900]}"},
+        })
     for title, body in sections:
         out.append({"type": "divider"})
         out.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*{title}*\n{body}"[:2900]}})

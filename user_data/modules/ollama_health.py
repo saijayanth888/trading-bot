@@ -188,18 +188,35 @@ def run_check() -> HealthStatus:
 
 
 def _alert_slack(level: str, title: str, msg: str) -> None:
-    """Best-effort Slack notification. Never raises."""
+    """Best-effort dual-channel alert (Slack + Telegram). Never raises."""
     try:
-        webhook = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
-        if not webhook:
-            return
-        import httpx
-        emoji = {"CRITICAL": ":rotating_light:", "WARNING": ":warning:"}.get(level, ":bell:")
-        text = f"{emoji} *[{level}] {title}*\n{msg}"
-        with httpx.Client(timeout=5.0) as c:
-            c.post(webhook, json={"text": text})
+        from .notifier import notify
+        if level == "CRITICAL":
+            notify.critical("ollama_down", title=title, message=msg,
+                            consecutive_failures=int(re_extract_int(msg)))
+        else:
+            notify.warning("ollama_down", title=title, message=msg)
     except Exception:
-        pass
+        # Last-resort: raw webhook so we still get a Slack ping if notifier
+        # import fails (e.g. circular import during early bootstrap).
+        try:
+            webhook = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
+            if not webhook:
+                return
+            import httpx
+            emoji = {"CRITICAL": ":rotating_light:", "WARNING": ":warning:"}.get(level, ":bell:")
+            text = f"{emoji} *[{level}] {title}*\n{msg}"
+            with httpx.Client(timeout=5.0) as c:
+                c.post(webhook, json={"text": text})
+        except Exception:
+            pass
+
+
+def re_extract_int(s: str) -> int:
+    """Pull the first integer out of a string; 0 if none."""
+    import re
+    m = re.search(r"\d+", s or "")
+    return int(m.group(0)) if m else 0
 
 
 def main() -> int:

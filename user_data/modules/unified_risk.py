@@ -395,18 +395,18 @@ def trip_combined_kill_switch(reason: str) -> dict:
     except Exception as exc:
         logger.warning("unified_risk: crypto pause call failed: %s", exc)
 
-    # 3. Slack notification (best-effort; doesn't fail the trip)
+    # 3. Notification via unified router (Slack + Telegram both fire on critical)
     try:
-        from .slack_alerts import SlackAlerter
-        alerter = SlackAlerter.from_env()
-        alerter.notify_risk_critical(
-            metric="combined_drawdown",
-            value=COMBINED_DD_THRESHOLD_PCT,  # actual value passed via reason
+        from .notifier import notify
+        notify.critical(
+            "kill_switch",
+            reason=reason,
+            actions=dict(actions),
             threshold=COMBINED_DD_THRESHOLD_PCT,
         )
         actions["slack_sent"] = True
     except Exception as exc:
-        logger.warning("unified_risk: slack alert failed: %s", exc)
+        logger.warning("unified_risk: notifier failed: %s", exc)
 
     logger.warning(
         "UNIFIED_RISK: tripped — %s — actions=%s", reason, actions,

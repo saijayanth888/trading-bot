@@ -68,6 +68,16 @@ class UnifiedNotifier:
                     value=float(kwargs.get("value") or 0),
                     threshold=float(kwargs.get("threshold") or 0),
                 )
+            elif kind == "ollama_down":
+                fails = int(kwargs.get("consecutive_failures") or 0)
+                results["slack"] = self.slack.notify_info(
+                    component="ollama_unreachable",
+                    message=str(kwargs.get("message")
+                                or f"{fails} consecutive failures — Anthropic fallback active"),
+                )
+                results["telegram"] = self.telegram.notify_ollama_down(
+                    consecutive_failures=fails,
+                )
             elif kind == "flash_crash":
                 # Slack via the generic info channel — flash crash isn't part
                 # of the SlackAlerter built-in surface.
@@ -75,7 +85,7 @@ class UnifiedNotifier:
                 mag = float(kwargs.get("magnitude_pct") or 0)
                 tf = str(kwargs.get("timeframe", "?"))
                 results["slack"] = self.slack.notify_info(
-                    title=f"Flash crash · {pair}",
+                    component=f"flash_crash:{pair}",
                     message=f"Dropped {mag:.2f}% in {tf}. Positions auto-protected.",
                 )
                 results["telegram"] = self.telegram.notify_flash_crash(
@@ -85,7 +95,7 @@ class UnifiedNotifier:
                 # Unknown critical kind — fall through with title/message
                 title = kwargs.get("title", kind)
                 message = kwargs.get("message", str(kwargs))
-                results["slack"] = self.slack.notify_info(title=title, message=message)
+                results["slack"] = self.slack.notify_info(component=title, message=message)
                 results["telegram"] = self.telegram.notify_system_alert(title, message)
         except Exception as exc:
             logger.exception("notifier.critical(%s) failed: %s", kind, exc)
@@ -112,7 +122,7 @@ class UnifiedNotifier:
             elif kind == "ollama_down":
                 fails = int(kwargs.get("consecutive_failures") or 0)
                 results["slack"] = self.slack.notify_info(
-                    title="Ollama unhealthy",
+                    component="ollama_unhealthy",
                     message=f"{fails} consecutive failures. Failover to Anthropic active.",
                 )
                 results["telegram"] = self.telegram.notify_ollama_down(
@@ -123,7 +133,7 @@ class UnifiedNotifier:
                 to = str(kwargs.get("to_provider", "?"))
                 reason = str(kwargs.get("reason", ""))
                 results["slack"] = self.slack.notify_info(
-                    title=f"LLM failover: {frm} → {to}",
+                    component=f"llm_failover_{frm}_to_{to}",
                     message=reason,
                 )
                 results["telegram"] = self.telegram.notify_provider_failover(
@@ -132,7 +142,7 @@ class UnifiedNotifier:
             else:
                 title = kwargs.get("title", f"Warning: {kind}")
                 message = kwargs.get("message", str(kwargs))
-                results["slack"] = self.slack.notify_info(title=title, message=message)
+                results["slack"] = self.slack.notify_info(component=title, message=message)
                 results["telegram"] = self.telegram.notify_system_alert(title, message)
         except Exception as exc:
             logger.exception("notifier.warning(%s) failed: %s", kind, exc)
@@ -172,7 +182,7 @@ class UnifiedNotifier:
 
     def info(self, title: str, message: str) -> bool:
         try:
-            return self.slack.notify_info(title=title, message=message)
+            return self.slack.notify_info(component=title, message=message)
         except Exception as exc:
             logger.warning("notifier.info failed: %s", exc)
             return False
