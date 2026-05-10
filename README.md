@@ -39,7 +39,8 @@ supervise it.
 11. [Tech stack](#11-tech-stack)
 12. [Validation framework](#12-validation-framework)
 13. [Hardware + cost economics](#13-hardware--cost-economics)
-14. [References](#14-references)
+14. [Known limitations & next steps](#14-known-limitations--next-steps) — *what's deferred and the unblocker*
+15. [References](#15-references)
 
 ---
 
@@ -900,7 +901,102 @@ the AI Safety Institute, 2024][aisi]).
 
 ---
 
-## 14. References
+## 14. Known limitations & next steps
+
+Items deliberately deferred so we don't lose track. Each has a clear
+unblocker; nothing here is silently broken — the design is honest about
+its current state and the path to production-grade.
+
+### 14.1 EPT — per-agent fitness evaluation
+
+**Current state.** `user_data/scripts/run_ept_generation.py` initialises
+a 12-genome population and writes `evolution.json` every cron tick
+(02:00 ET). Per-member fitness uses **`mock_eval_fn`** — a deterministic
+synthetic surrogate from `modules/ept_evolution.py` that scores genomes
+against their own hyperparameters (lookback, learning rate, feature
+subset shape). The `--mode live` path is implemented but falls back to
+mock when n < `--min-trades` trades exist in the window, which is the
+case until paper-pilot accumulates real fills.
+
+**Why it's not "real" yet.** The crypto strategy runs as a single
+freqtrade instance with one set of hyperparameters, so all 8 genomes
+would currently see the *same* trade journal. Real per-agent fitness
+needs 8 parallel paper-trading bots (one freqtrade per genome) feeding
+8 segregated trade journals. That's a separate ~1-day architecture
+piece, not a tonight job.
+
+**Unblock when.** Either (a) ≥ 200 trades have closed on the single bot
+and we're willing to evaluate all genomes against the same stream
+(useful smoke test, not real evolution), or (b) we run 8 parallel
+docker-compose freqtrade instances on different config slices.
+
+### 14.2 TFT calibration — temperature scaling
+
+**Current state.** TFT confidence is now `max(P_up, P_down)` from the
+classification head (Section 4 Layer 2), gated at `tft_min_confidence: 0.50`.
+This is correct *but uncalibrated* — the raw softmax of a deep classifier
+is well-known to be over- or under-confident (Guo et al. 2017,
+arXiv:1706.04599).
+
+**Why it's not added tonight.** Temperature scaling needs a clean
+held-out validation slice that the model never saw. The freshest fit
+was today's 24h FreqAI refresh; any "validation" slice we could carve
+out now is data the model already trained on. False calibration is
+worse than no calibration.
+
+**Unblock when.** ~1–2 weeks of post-fix live predictions have
+accumulated. The implementation is small (single scalar `T`, fit on
+held-out NLL, ~20 LOC in a new `shark/ml/calibration.py` or
+`freqaimodels/temperature.py`). Then re-derive `tft_min_confidence`
+from the 70th percentile of post-calibration empirical confidence.
+
+### 14.3 Stocks venue — per-regime entry/exit deltas
+
+**Current state.** Stocks regime is detected (`/api/ops/stock_regime`,
+SPY MA cross / golden-cross structure / 20d realised vol) and visible
+on `/ops`. Wheel cron jobs respect a global "no entries when SPY
+regime=trending_down" check.
+
+**What's missing.** Per-regime *tuning* of CSP / covered-call selection
+the way crypto has `regime_gating.entry_delta` / `exit_delta`. Today
+the wheel uses the same delta thresholds in `trending_up` and
+`mean_reverting` — the strategy doesn't yet tighten in choppy markets.
+
+**Unblock when.** Add `stocks_regime_gating` block to `config.json`
+mirroring the crypto schema, plumb it through `stocks/shark/signals/`
+wheel selectors, and surface in the regime-config UI form
+(`/api/ops/regime_config` already validates ranges generically).
+
+### 14.4 Position markers on candlestick charts
+
+**Current state.** `/charts` renders TradingView Lightweight Charts
+for both venues but doesn't overlay entry / exit markers from the
+live trade journal.
+
+**Unblock when.** Pull entries/exits from `trade_journal` for the
+selected pair, render `Marker` objects on the candle series with
+shape=entry-arrow-up / exit-arrow-down. Small JS change in
+`static/js/app.js`; trade-journal query already exists.
+
+### 14.5 EPT cron: drop the LLM wrapper
+
+**Current state.** The `ept_training_daily` Hermes cron prompts the
+Hermes-3 70B agent to "call `trigger_evolution_cycle` MCP tool and
+report the fitness scores". Pre-tonight, the MCP tool didn't actually
+run anything and the LLM was hallucinating numbers. After tonight's
+fix, the tool returns a real JSON summary — but the LLM is still in
+the loop, adding latency and a small hallucination surface for the
+report wording.
+
+**Unblock when.** Convert the cron from agent-driven to
+`script`-driven (`deliver: telegram`, `script: ept_run.sh` that calls
+`run_ept_generation.py --mode mock` and pipes the JSON into a
+formatted message). Hermes Gateway supports this — see other
+`*.sh` script entries in `~/.hermes/cron/jobs.json`.
+
+---
+
+## 15. References
 
 [freqtrade]: https://github.com/freqtrade/freqtrade "Freqtrade — Free, open-source crypto trading bot in Python"
 [freqai]: https://www.freqtrade.io/en/stable/freqai/ "FreqAI documentation — Freqtrade's machine-learning extension"
