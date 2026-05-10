@@ -278,8 +278,16 @@ class TFTModel(BasePyTorchClassifier):
                         logits, quantiles, _ = underlying.forward_with_quantiles(xb)
 
                     p = torch.softmax(logits.float(), dim=-1)
-                    spread = (quantiles[:, -1] - quantiles[:, 0]).abs().float()
-                    conf = 1.0 / (1.0 + spread)
+                    # Directional confidence — max of P(up), P(down) from the
+                    # classification head. Replaces the previous quantile-spread
+                    # formula `1/(1+|P90-P10|)`, which conflated return-magnitude
+                    # uncertainty with directional-class confidence and produced
+                    # uniformly chance-level (~0.33) values across all pairs.
+                    # See Guo et al. 2017 (arXiv:1706.04599) on calibration.
+                    # Class order is ["down","flat","up"] (idx 0/1/2).
+                    p_down = p[:, 0]
+                    p_up = p[:, 2] if p.shape[1] >= 3 else p[:, 1]
+                    conf = torch.maximum(p_up, p_down)
                     all_probs.append(p.cpu().numpy())
                     all_conf.append(conf.cpu().numpy())
 

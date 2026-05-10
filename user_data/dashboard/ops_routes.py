@@ -1556,10 +1556,18 @@ async def gates():
     """
     from .data_sources import fetch_freqtrade_candles, latest_state_from_df
 
-    # Strategy constants — keep in sync with FreqAIMeanRevV1.py defaults
-    TFT_MIN = 0.40
-    META_MIN = 0.40
-    HIGH_VOL_MIN = 0.75
+    # Strategy constants — read live from config so dashboard mirrors the
+    # actual gate the strategy enforces. Falls back to the strategy defaults
+    # (FreqAIMeanRevV1._DEFAULT_REGIME_GATING) when keys are missing.
+    _rg_live = {}
+    try:
+        import json as _json
+        _rg_live = (_json.loads(CONFIG_PATH.read_text()).get("regime_gating") or {})
+    except Exception:
+        pass
+    TFT_MIN = float(_rg_live.get("tft_min_confidence", 0.40))
+    META_MIN = float(_rg_live.get("meta_min_confidence", 0.40))
+    HIGH_VOL_MIN = float(_rg_live.get("high_vol_min_confidence", 0.75))
     BASE_ENTRY = 0.62
     REGIME_DELTA = {
         "trending_up":      -0.05,
