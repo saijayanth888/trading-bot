@@ -1,0 +1,646 @@
+"""
+shark/data/alpaca_data.py
+--------------------------
+Thin wrappers around the Alpaca Python SDK (alpaca-py) for account info,
+positions, historical OHLCV bars, and live quotes.
+
+Environment variables required
+-------------------------------
+ALPACA_API_KEY      – Alpaca public key
+ALPACA_SECRET_KEY   – Alpaca secret key
+ALPACA_BASE_URL     – (optional) defaults to https://paper-api.alpaca.markets
+
+Clients are initialised lazily — module import will not raise even if
+the environment variables are absent; the error is deferred until the first
+function call.
+"""
+
+from __future__ import annotations
+
+import functools
+import logging
+import os
+import time
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, TypeVar
+
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+F = TypeVar("F", bound=Callable[..., Any])
+
+# Alpaca SDK error class — used to retry on HTTP 429 / 5xx
+try:
+    from alpaca.common.exceptions import APIError as _AlpacaAPIError  # type: ignore[import]
+except ImportError:
+    class _AlpacaAPIError(Exception):  # type: ignore[no-redef]
+        """Placeholder when alpaca-py is not installed."""
+
+
+# ---------------------------------------------------------------------------
+# Retry with exponential backoff — protects against transient API failures
+# ---------------------------------------------------------------------------
+
+def _retry(
+    max_attempts: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 30.0,
+    retryable: tuple[type[Exception], ...] = (OSError, ConnectionError, TimeoutError, _AlpacaAPIError),
+) -> Callable[[F], F]:
+    """Decorator: retry on transient errors with exponential backoff.
+
+    Non-retryable exceptions (ValueError, EnvironmentError, ImportError)
+    propagate immediately.
+    """
+    def decorator(fn: F) -> F:
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            last_exc: Exception | None = None
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    return fn(*args, **kwargs)
+                except retryable as exc:
+                    last_exc = exc
+                    if attempt == max_attempts:
+                        break
+                    delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+                    logger.warning(
+                        "%s attempt %d/%d failed (%s) — retrying in %.1fs",
+                        fn.__name__, attempt, max_attempts, exc, delay,
+                    )
+                    time.sleep(delay)
+                except Exception:
+                    raise  # non-retryable: propagate immediately
+            raise RuntimeError(
+                f"{fn.__name__} failed after {max_attempts} attempts: {last_exc}"
+            ) from last_exc
+        return wrapper  # type: ignore[return-value]
+    return decorator
+
+# ---------------------------------------------------------------------------
+# Lazy client initialisation
+# ---------------------------------------------------------------------------
+
+_trading_client: Any = None   # alpaca.trading.client.TradingClient
+_data_client: Any = None      # alpaca.data.historical.StockHistoricalDataClient
+
+
+def _enum_val(v: Any) -> str:
+    """Extract string value from an alpaca-py enum or passthrough."""
+    return v.value if hasattr(v, "value") else str(v or "")
+
+
+def _get_api_keys() -> tuple[str, str, str]:
+    """Return (api_key, secret_key, base_url) or raise EnvironmentError."""
+    api_key = os.environ.get("ALPACA_API_KEY", "")
+    secret_key = os.environ.get("ALPACA_SECRET_KEY", "")
+    base_url = os.environ.get(
+        "ALPACA_BASE_URL", "https://paper-api.alpaca.markets"
+    )
+    if not api_key:
+        raise EnvironmentError(
+            "ALPACA_API_KEY environment variable is not set. "
+            "Set it to your Alpaca public key before calling any data function."
+        )
+    if not secret_key:
+        raise EnvironmentError(
+            "ALPACA_SECRET_KEY environment variable is not set. "
+            "Set it to your Alpaca secret key before calling any data function."
+        )
+    return api_key, secret_key, base_url
+
+
+def _get_trading_client() -> Any:
+    """Return (and lazily create) the Alpaca TradingClient."""
+    global _trading_client
+    if _trading_client is not None:
+        return _trading_client
+
+    api_key, secret_key, base_url = _get_api_keys()
+
+    try:
+        from alpaca.trading.client import TradingClient  # type: ignore[import]
+    except ImportError as exc:
+        raise ImportError(
+            "alpaca-py is not installed. Run: pip install alpaca-py"
+        ) from exc
+
+    paper = "paper" in base_url.lower()
+    _trading_client = TradingClient(
+        api_key=api_key,
+        secret_key=secret_key,
+        paper=paper,
+    )
+    logger.debug("Alpaca TradingClient initialised (paper=%s)", paper)
+    return _trading_client
+
+
+def _get_data_client() -> Any:
+    """Return (and lazily create) the Alpaca StockHistoricalDataClient."""
+    global _data_client
+    if _data_client is not None:
+        return _data_client
+
+    api_key, secret_key, _ = _get_api_keys()
+
+    try:
+        from alpaca.data.historical import StockHistoricalDataClient  # type: ignore[import]
+    except ImportError as exc:
+        raise ImportError(
+            "alpaca-py is not installed. Run: pip install alpaca-py"
+        ) from exc
+
+    _data_client = StockHistoricalDataClient(
+        api_key=api_key,
+        secret_key=secret_key,
+    )
+    logger.debug("Alpaca StockHistoricalDataClient initialised")
+    return _data_client
+
+
+# ---------------------------------------------------------------------------
+# Timeframe mapping
+# ---------------------------------------------------------------------------
+
+_SUPPORTED_TIMEFRAMES = {"1Min", "5Min", "15Min", "1Hour", "1Day"}
+
+
+def _resolve_timeframe(tf_str: str) -> Any:
+    """Map user-facing timeframe string to an alpaca-py TimeFrame object."""
+    from alpaca.data.timeframe import TimeFrame, TimeFrameUnit  # type: ignore[import]
+
+    _map = {
+        "1Min": TimeFrame.Minute,
+        "5Min": TimeFrame(5, TimeFrameUnit.Minute),
+        "15Min": TimeFrame(15, TimeFrameUnit.Minute),
+        "1Hour": TimeFrame.Hour,
+        "1Day": TimeFrame.Day,
+    }
+    tf = _map.get(tf_str)
+    if tf is None:
+        raise ValueError(
+            f"Unsupported timeframe '{tf_str}'. "
+            f"Choose from: {sorted(_SUPPORTED_TIMEFRAMES)}"
+        )
+    return tf
+
+
+# ---------------------------------------------------------------------------
+# Public functions
+# ---------------------------------------------------------------------------
+
+
+def _safe_float(value: Any, *, default: float = 0.0) -> float:
+    """Tolerant float coercion — handles None/empty without raising."""
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value: Any, *, default: int = 0) -> int:
+    """Tolerant int coercion — handles None/empty/floats without raising."""
+    if value is None or value == "":
+        return default
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+@_retry(max_attempts=3, base_delay=1.0)
+def get_account() -> dict[str, Any]:
+    """Return key account metrics from Alpaca.
+
+    Defensive: tolerates missing / null fields by coercing to safe defaults
+    so a transient Alpaca outage that returns partial data cannot crash the
+    market-open path. Validates that portfolio_value > 0; if it is not we
+    raise so callers (Guardrails) refuse to size new positions against
+    apparently-empty equity.
+
+    Returns
+    -------
+    dict
+        Keys: ``equity`` (float), ``cash`` (float),
+        ``buying_power`` (float), ``portfolio_value`` (float),
+        ``daytrade_count`` (int).
+
+    Raises
+    ------
+    EnvironmentError
+        If API keys are missing.
+    RuntimeError
+        If Alpaca reports portfolio_value <= 0 (account closed or stale
+        response). Trading on bad equity data is unsafe.
+    """
+    client = _get_trading_client()
+    acct = client.get_account()
+
+    portfolio_value = _safe_float(getattr(acct, "portfolio_value", None))
+    if portfolio_value <= 0:
+        raise RuntimeError(
+            "Alpaca returned non-positive portfolio_value="
+            f"{getattr(acct, 'portfolio_value', None)!r} — refusing to "
+            "trade on suspect account data."
+        )
+
+    return {
+        "equity": _safe_float(getattr(acct, "equity", None)),
+        "cash": _safe_float(getattr(acct, "cash", None)),
+        "buying_power": _safe_float(getattr(acct, "buying_power", None)),
+        "portfolio_value": portfolio_value,
+        "daytrade_count": _safe_int(getattr(acct, "daytrade_count", None)),
+    }
+
+
+@_retry(max_attempts=3, base_delay=1.0)
+def get_positions() -> list[dict[str, Any]]:
+    """Return all open positions.
+
+    Returns
+    -------
+    list[dict]
+        Each dict contains: ``symbol``, ``qty`` (float),
+        ``avg_entry_price`` (float), ``current_price`` (float),
+        ``unrealized_pl`` (float), ``unrealized_plpc`` (float),
+        ``market_value`` (float), ``side`` (str).
+        Returns an empty list when there are no open positions.
+
+    Raises
+    ------
+    EnvironmentError
+        If API keys are missing.
+    """
+    client = _get_trading_client()
+
+    try:
+        positions = client.get_all_positions()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to fetch positions: %s", exc)
+        return []
+
+    result: list[dict[str, Any]] = []
+    for pos in positions:
+        result.append(
+            {
+                "symbol": getattr(pos, "symbol", None),
+                "qty": _safe_float(getattr(pos, "qty", None)),
+                "avg_entry_price": _safe_float(getattr(pos, "avg_entry_price", None)),
+                "current_price": _safe_float(getattr(pos, "current_price", None)),
+                "unrealized_pl": _safe_float(getattr(pos, "unrealized_pl", None)),
+                "unrealized_plpc": _safe_float(getattr(pos, "unrealized_plpc", None)),
+                "market_value": _safe_float(getattr(pos, "market_value", None)),
+                "side": _enum_val(getattr(pos, "side", "")),
+            }
+        )
+
+    return result
+
+
+@_retry(max_attempts=3, base_delay=1.5)
+def get_bars(
+    symbol: str,
+    timeframe: str = "1Day",
+    limit: int = 60,
+) -> pd.DataFrame:
+    """Fetch historical OHLCV bars for a symbol.
+
+    Parameters
+    ----------
+    symbol:
+        Uppercase ticker symbol, e.g. ``"AAPL"``.
+    timeframe:
+        One of ``"1Min"``, ``"5Min"``, ``"15Min"``, ``"1Hour"``, ``"1Day"``.
+        Defaults to ``"1Day"``.
+    limit:
+        Number of bars to retrieve. Defaults to 60.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``timestamp`` (datetime, UTC), ``open``, ``high``,
+        ``low``, ``close``, ``volume`` (all float).  Index is a plain
+        RangeIndex; bars are sorted oldest-first.
+
+    Raises
+    ------
+    ValueError
+        If *timeframe* is not one of the supported values.
+    EnvironmentError
+        If API keys are missing.
+    """
+    tf = _resolve_timeframe(timeframe)
+    client = _get_data_client()
+
+    from alpaca.data.requests import StockBarsRequest  # type: ignore[import]
+    from alpaca.data.enums import DataFeed, Adjustment  # type: ignore[import]
+
+    # Calculate a safe start date — Alpaca can return 0 bars without one.
+    # Use a generous calendar-day multiplier to cover weekends/holidays.
+    _tf_day_multiplier = {
+        "1Day": 1.8, "1Hour": 0.15, "15Min": 0.04, "5Min": 0.015, "1Min": 0.003,
+    }
+    cal_days = int(limit * _tf_day_multiplier.get(timeframe, 2.0)) + 10
+    start_dt = datetime.now(timezone.utc) - timedelta(days=cal_days)
+
+    # Explicit feed: free-tier accounts only have IEX access; SIP requires paid.
+    # Override with ALPACA_DATA_FEED env var (e.g. "sip" for paid accounts).
+    feed_str = os.environ.get("ALPACA_DATA_FEED", "iex").lower()
+    feed_map = {"iex": DataFeed.IEX, "sip": DataFeed.SIP, "otc": DataFeed.OTC}
+    feed = feed_map.get(feed_str, DataFeed.IEX)
+
+    request = StockBarsRequest(
+        symbol_or_symbols=symbol,
+        timeframe=tf,
+        start=start_dt,
+        limit=limit,
+        feed=feed,
+        adjustment=Adjustment.ALL,  # split + dividend adjusted (CRITICAL for backtesting)
+    )
+    bars_response = client.get_stock_bars(request)
+    bars = bars_response.df
+
+    if bars.empty:
+        logger.warning("No bars returned for symbol=%s timeframe=%s", symbol, timeframe)
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+
+    # alpaca-py returns a multi-index DataFrame (symbol, timestamp).
+    # For a single symbol, drop the symbol level.
+    if isinstance(bars.index, pd.MultiIndex):
+        bars = bars.droplevel(0)
+
+    bars = bars.reset_index()
+
+    # Rename columns to our standard schema
+    rename_map: dict[str, str] = {}
+    for col in bars.columns:
+        col_lower = col.lower()
+        if col_lower in ("t", "timestamp", "time"):
+            rename_map[col] = "timestamp"
+        elif col_lower == "o":
+            rename_map[col] = "open"
+        elif col_lower == "h":
+            rename_map[col] = "high"
+        elif col_lower == "l":
+            rename_map[col] = "low"
+        elif col_lower == "c":
+            rename_map[col] = "close"
+        elif col_lower == "v":
+            rename_map[col] = "volume"
+        # keep other columns as-is
+
+    bars = bars.rename(columns=rename_map)
+
+    # Ensure standard columns exist; fill missing ones with NaN
+    for col in ("timestamp", "open", "high", "low", "close", "volume"):
+        if col not in bars.columns:
+            bars[col] = float("nan")
+
+    bars = bars[["timestamp", "open", "high", "low", "close", "volume"]].copy()
+
+    # Cast numeric columns
+    for col in ("open", "high", "low", "close", "volume"):
+        bars[col] = pd.to_numeric(bars[col], errors="coerce")
+
+    # Ensure timestamp is tz-aware UTC
+    if not pd.api.types.is_datetime64_any_dtype(bars["timestamp"]):
+        bars["timestamp"] = pd.to_datetime(bars["timestamp"], utc=True)
+    elif bars["timestamp"].dt.tz is None:
+        bars["timestamp"] = bars["timestamp"].dt.tz_localize("UTC")
+
+    bars = bars.sort_values("timestamp").reset_index(drop=True)
+    return bars
+
+
+@_retry(max_attempts=3, base_delay=2.0)
+def get_bars_multi(
+    symbols: list[str],
+    timeframe: str = "1Day",
+    limit: int = 504,
+    batch_size: int = 100,
+) -> dict[str, pd.DataFrame]:
+    """Fetch OHLCV bars for many symbols in batches — used by KB seeding.
+
+    Splits *symbols* into batches of *batch_size* and makes one Alpaca request
+    per batch. Returns a dict {symbol: DataFrame}. Symbols with no data are
+    omitted from the returned dict.
+
+    Parameters
+    ----------
+    symbols:
+        List of uppercase ticker symbols (typically 30–500 tickers).
+    timeframe:
+        Bar timeframe. Defaults to "1Day".
+    limit:
+        Approx number of bars per symbol. Defaults to 504 (~2 years of daily).
+    batch_size:
+        Symbols per HTTP request. Default 100 — well under Alpaca's 200 limit.
+
+    Returns
+    -------
+    dict[str, pd.DataFrame]
+        Mapping of symbol to its OHLCV DataFrame.
+    """
+    if not symbols:
+        return {}
+
+    tf = _resolve_timeframe(timeframe)
+    client = _get_data_client()
+
+    from alpaca.data.requests import StockBarsRequest  # type: ignore[import]
+    from alpaca.data.enums import DataFeed, Adjustment  # type: ignore[import]
+
+    # Generous start date for the requested limit
+    _tf_day_multiplier = {
+        "1Day": 1.8, "1Hour": 0.15, "15Min": 0.04, "5Min": 0.015, "1Min": 0.003,
+    }
+    cal_days = int(limit * _tf_day_multiplier.get(timeframe, 2.0)) + 30
+    start_dt = datetime.now(timezone.utc) - timedelta(days=cal_days)
+
+    feed_str = os.environ.get("ALPACA_DATA_FEED", "iex").lower()
+    feed_map = {"iex": DataFeed.IEX, "sip": DataFeed.SIP, "otc": DataFeed.OTC}
+    feed = feed_map.get(feed_str, DataFeed.IEX)
+    adjustment = Adjustment.ALL  # split + dividend adjusted (CRITICAL for backtesting)
+
+    out: dict[str, pd.DataFrame] = {}
+    total = len(symbols)
+    for batch_idx in range(0, total, batch_size):
+        batch = symbols[batch_idx:batch_idx + batch_size]
+        logger.info(
+            "get_bars_multi: batch %d-%d of %d symbols",
+            batch_idx + 1, min(batch_idx + batch_size, total), total,
+        )
+        try:
+            request = StockBarsRequest(
+                symbol_or_symbols=batch,
+                adjustment=adjustment,
+                timeframe=tf,
+                start=start_dt,
+                feed=feed,
+            )
+            response = client.get_stock_bars(request)
+            df = response.df
+        except Exception as exc:
+            logger.warning("Batch %d failed: %s — falling back to per-symbol", batch_idx, exc)
+            for sym in batch:
+                try:
+                    out[sym] = get_bars(sym, timeframe=timeframe, limit=limit)
+                except Exception as inner_exc:
+                    logger.warning("Per-symbol fallback failed for %s: %s", sym, inner_exc)
+            continue
+
+        if df is None or df.empty:
+            logger.warning("Batch %d returned empty DataFrame", batch_idx)
+            continue
+
+        # Multi-symbol response is indexed by (symbol, timestamp)
+        if isinstance(df.index, pd.MultiIndex):
+            for sym in batch:
+                if sym not in df.index.get_level_values(0):
+                    continue
+                sym_df = df.xs(sym, level=0).reset_index()
+                out[sym] = _normalize_bars_df(sym_df)
+        else:
+            # Single-symbol response (only one ticker actually had data)
+            sym = batch[0] if len(batch) == 1 else None
+            if sym:
+                out[sym] = _normalize_bars_df(df.reset_index())
+
+    return out
+
+
+def _normalize_bars_df(bars: pd.DataFrame) -> pd.DataFrame:
+    """Convert raw Alpaca bars DataFrame into our standard OHLCV schema."""
+    if bars.empty:
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+
+    rename_map: dict[str, str] = {}
+    for col in bars.columns:
+        cl = col.lower()
+        if cl in ("t", "timestamp", "time"):
+            rename_map[col] = "timestamp"
+        elif cl == "o":
+            rename_map[col] = "open"
+        elif cl == "h":
+            rename_map[col] = "high"
+        elif cl == "l":
+            rename_map[col] = "low"
+        elif cl == "c":
+            rename_map[col] = "close"
+        elif cl == "v":
+            rename_map[col] = "volume"
+    bars = bars.rename(columns=rename_map)
+
+    for col in ("timestamp", "open", "high", "low", "close", "volume"):
+        if col not in bars.columns:
+            bars[col] = float("nan")
+
+    bars = bars[["timestamp", "open", "high", "low", "close", "volume"]].copy()
+    for col in ("open", "high", "low", "close", "volume"):
+        bars[col] = pd.to_numeric(bars[col], errors="coerce")
+
+    if not pd.api.types.is_datetime64_any_dtype(bars["timestamp"]):
+        bars["timestamp"] = pd.to_datetime(bars["timestamp"], utc=True)
+    elif bars["timestamp"].dt.tz is None:
+        bars["timestamp"] = bars["timestamp"].dt.tz_localize("UTC")
+
+    return bars.sort_values("timestamp").reset_index(drop=True)
+
+
+@_retry(max_attempts=2, base_delay=1.0)
+def get_watchlist_snapshot(tickers: list[str]) -> list[dict[str, Any]]:
+    """Fetch the latest quote snapshot for each ticker in *tickers*.
+
+    Uses batch API when possible — single request for up to 200 symbols.
+    Individual tickers that produce an error are skipped with a warning.
+
+    Parameters
+    ----------
+    tickers:
+        List of uppercase ticker symbols.
+
+    Returns
+    -------
+    list[dict]
+        Each dict contains: ``symbol``, ``bid`` (float), ``ask`` (float),
+        ``last_price`` (float), ``change_pct`` (float), ``volume`` (float).
+
+    Raises
+    ------
+    EnvironmentError
+        If API keys are missing.
+    """
+    if not tickers:
+        return []
+
+    client = _get_data_client()
+    result: list[dict[str, Any]] = []
+
+    from alpaca.data.requests import StockSnapshotRequest  # type: ignore[import]
+
+    # Batch request — one HTTP call for all tickers
+    try:
+        snapshots = client.get_stock_snapshot(
+            StockSnapshotRequest(symbol_or_symbols=tickers)
+        )
+        if not isinstance(snapshots, dict):
+            # Single ticker returns a Snapshot object, not a dict
+            snapshots = {tickers[0]: snapshots}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Batch snapshot request failed, falling back to per-ticker: %s", exc)
+        snapshots = {}
+        for ticker in tickers:
+            try:
+                snap = client.get_stock_snapshot(
+                    StockSnapshotRequest(symbol_or_symbols=ticker)
+                )
+                if isinstance(snap, dict):
+                    snapshots.update(snap)
+                else:
+                    snapshots[ticker] = snap
+            except Exception as inner_exc:  # noqa: BLE001
+                logger.warning("Skipping ticker %s — snapshot fetch failed: %s", ticker, inner_exc)
+
+    for ticker in tickers:
+        snapshot = snapshots.get(ticker)
+        if snapshot is None:
+            logger.warning("No snapshot data for %s", ticker)
+            continue
+
+        try:
+            last_price: float = float(
+                snapshot.latest_trade.price if snapshot.latest_trade else 0.0
+            )
+            bid: float = float(
+                snapshot.latest_quote.bid_price if snapshot.latest_quote else 0.0
+            )
+            ask: float = float(
+                snapshot.latest_quote.ask_price if snapshot.latest_quote else 0.0
+            )
+            daily_open: float = float(
+                snapshot.daily_bar.open if snapshot.daily_bar else 0.0
+            )
+            volume: float = float(
+                snapshot.daily_bar.volume if snapshot.daily_bar else 0.0
+            )
+
+            if daily_open and daily_open != 0:
+                change_pct = round((last_price - daily_open) / daily_open * 100, 4)
+            else:
+                change_pct = 0.0
+
+            result.append({
+                "symbol": ticker.upper(),
+                "bid": bid,
+                "ask": ask,
+                "last_price": last_price,
+                "change_pct": change_pct,
+                "volume": volume,
+            })
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Error parsing snapshot for %s: %s", ticker, exc)
+
+    return result

@@ -1,0 +1,119 @@
+{
+  "computed_at": "2026-05-01T21:15:13.921440Z",
+  "source_ticker": "SPY",
+  "lookback_bars": 503,
+  "day_of_week": {
+    "Mon": {
+      "n": 96,
+      "avg_return_pct": 0.1913,
+      "win_rate": 0.6875,
+      "median_return_pct": 0.1952
+    },
+    "Tue": {
+      "n": 105,
+      "avg_return_pct": 0.0536,
+      "win_rate": 0.5429,
+      "median_return_pct": 0.0654
+    },
+    "Wed": {
+      "n": 102,
+      "avg_return_pct": 0.2391,
+      "win_rate": 0.6078,
+      "median_return_pct": 0.242
+    },
+    "Thu": {
+      "n": 98,
+      "avg_return_pct": -0.1379,
+      "win_rate": 0.4694,
+      "median_return_pct": -0.0182
+    },
+    "Fri": {
+      "n": 102,
+      "avg_return_pct": 0.046,
+      "win_rate": 0.5686,
+      "median_return_pct": 0.1269
+    }
+  },
+  "month_of_year": {
+    "Jan": {
+      "n": 40,
+      "avg_return_pct": 0.1053,
+      "win_rate": 0.575
+    },
+    "Feb": {
+      "n": 38,
+      "avg_return_pct": -0.0529,
+      "win_rate": 0.5
+    },
+    "Mar": {
+      "n": 43,
+      "avg_return_pct": -0.2446,
+      "win_rate": 0.4186
+    },
+    "Apr": {
+      "n": 43,
+      "avg_return_pct": 0.1981,
+      "win_rate": 0.6279
+    },
+    "May": {
+      "n": 44,
+      "avg_return_pct": 0.2614,
+      "win_rate": 0.6591
+    },
+    "Jun": {
+      "n": 39,
+      "avg_return_pct": 0.2189,
+      "win_rate": 0.6667
+    },
+    "Jul": {
+      "n": 44,
+      "avg_return_pct": 0.0796,
+      "win_rate": 0.5909
+    },
+    "Aug": {
+      "n": 43,
+      "avg_return_pct": 0.1078,
+      "win_rate": 0.5116
+    },
+    "Sep": {
+      "n": 41,
+      "avg_return_pct": 0.1397,
+      "win_rate": 0.6098
+    },
+    "Oct": {
+      "n": 46,
+      "avg_return_pct": 0.0332,
+      "win_rate": 0.587
+    },
+    "Nov": {
+      "n": 39,
+      "avg_return_pct": 0.1578,
+      "win_rate": 0.6923
+    },
+    "Dec": {
+      "n": 43,
+      "avg_return_pct": -0.0519,
+      "win_rate": 0.4651
+    }
+  },
+  "fomc_drift": {
+    "pre_fomc_day": {
+      "n": 11,
+      "avg_return_pct": -0.1435,
+      "win_rate": 0.2727,
+      "median_return_pct": -0.0202
+    },
+    "fomc_day": {
+      "n": 11,
+      "avg_return_pct": 0.0815,
+      "win_rate": 0.4545,
+      "median_return_pct": -0.2048
+    },
+    "post_fomc_day": {
+      "n": 11,
+      "avg_return_pct": -0.0961,
+      "win_rate": 0.5455,
+      "median_return_pct": 0.0323
+    }
+  }
+}

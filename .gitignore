@@ -87,3 +87,10 @@ user_data/data/*.tar.gz
 
 # Hermes runtime heartbeat / pid / lock files
 user_data/state/
+
+# Stocks subsystem (shark) — runtime / cache that should be regenerated, not committed
+stocks/venv/
+stocks/kb/historical_bars/*.json
+stocks/memory/CONTEXT-BRIEFING.md
+stocks/memory/error.log
+stocks/memory/.*.lock
