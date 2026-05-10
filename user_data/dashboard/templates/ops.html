@@ -679,7 +679,7 @@
   <!-- ── KPI strip (under header, sticky-adjacent) ─────────────── -->
   <section class="stat-strip" aria-label="Live KPIs">
     <div>
-      <div class="stat-label">Daily P&amp;L · UTC</div>
+      <div class="stat-label">Daily P&amp;L · ET</div>
       <div class="stat-value" id="stat-pnl" data-flash>—</div>
     </div>
     <div>
@@ -727,7 +727,7 @@
           </div>
         </div>
         <div class="hero-slot hero-clock">
-          <div class="hero-eyebrow">System time · UTC</div>
+          <div class="hero-eyebrow">System time · ET (NYSE)</div>
           <div class="hero-clock-time" id="hero-clock-time">—— : —— : ——</div>
           <div class="hero-clock-date" id="hero-clock-date">—</div>
         </div>
@@ -1084,16 +1084,20 @@
       const MONTHS = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
       function tick() {
         const now = new Date();
-        const hh = String(now.getUTCHours()).padStart(2, "0");
-        const mm = String(now.getUTCMinutes()).padStart(2, "0");
-        const ss = String(now.getUTCSeconds()).padStart(2, "0");
-        t.textContent = `${hh}:${mm}:${ss}`;
-        d.textContent = `${MONTHS[now.getUTCMonth()]} ${String(now.getUTCDate()).padStart(2,"0")} · ${now.getUTCFullYear()}`;
+        // Render in America/New_York (NYSE) — handles EST/EDT automatically.
+        const parts = new Intl.DateTimeFormat("en-US", {
+          timeZone: "America/New_York",
+          hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+          month: "short", day: "2-digit", year: "numeric",
+          timeZoneName: "short",
+        }).formatToParts(now).reduce((m, p) => (m[p.type] = p.value, m), {});
+        t.textContent = `${parts.hour}:${parts.minute}:${parts.second}`;
+        d.textContent = `${parts.month.toUpperCase()} ${parts.day} · ${parts.year} · ${parts.timeZoneName}`;
       }
       tick(); setInterval(tick, 1000);
     })();
   </script>
-  {% if effects_enabled %}<script src="/static/js/effects.js?v=20260510-4" defer></script>{% endif %}
-  <script src="/static/js/ops.js?v=20260510-4" defer></script>
+  {% if effects_enabled %}<script src="/static/js/effects.js?v=20260510-5" defer></script>{% endif %}
+  <script src="/static/js/ops.js?v=20260510-5" defer></script>
 </body>
 </html>
