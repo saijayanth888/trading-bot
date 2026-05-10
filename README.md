@@ -1,22 +1,45 @@
-# Trading bot — TFT + DRL ensemble + EPT evolution
+# Trading bot — TFT + DRL ensemble + EPT evolution (crypto + stocks)
 
-A self-hosted, end-to-end algorithmic crypto trading system that combines deep
-learning for price-direction forecasting, an ensemble of reinforcement-learning
-agents for entry decisions, evolutionary population training of full strategy
-genomes, a hard-gating risk governor, and a multi-source sentiment pipeline
-that runs entirely on local language models. Built on top of
-[Freqtrade][freqtrade] and operated through a control plane that exposes every
-internal signal to a [Model Context Protocol][mcp] surface so an autonomous
-agent ([Hermes Agent][hermes]) can supervise it.
+A self-hosted, dual-venue algorithmic trading system that combines deep learning
+for price-direction forecasting, an ensemble of reinforcement-learning agents
+for entry decisions, evolutionary population training of full strategy genomes,
+a hard-gating risk governor, and a multi-source sentiment pipeline that runs
+entirely on local language models. Built on top of [Freqtrade][freqtrade] for
+crypto and a custom **Shark / wheel** stack for equities + options, operated
+through a control plane that exposes every internal signal to a [Model Context
+Protocol][mcp] surface so an autonomous agent ([Hermes Agent][hermes]) can
+supervise it.
 
-> **Status:** Paper trading on $19,000 starting equity in Coinbase Advanced
-> Trade. The validation gate (Sharpe ≥ 1.5, MaxDD < 12%, PF > 1.4, win-rate
-> > 55%, ≥ 200 closed trades) is the one decision that is **not** automated —
-> graduation from paper to live capital is gated on the operator clicking
-> through `scripts/go_live.sh`.
+> **Status:** Paper trading on **$19,000** starting equity in Coinbase Advanced
+> Trade (crypto) **and** $100,000 paper equity in Alpaca (SOFI wheel — covered
+> calls / cash-secured puts on a 6-symbol stock book). The validation gate
+> (Sharpe ≥ 1.5, MaxDD < 12%, PF > 1.4, win-rate > 55%, ≥ 200 closed trades)
+> is the one decision that is **not** automated — graduation from paper to
+> live capital is gated on the operator clicking through `scripts/go_live.sh`.
 >
 > **Hardware:** NVIDIA [DGX Spark][dgx] (GB10 Blackwell, 128 GB unified memory).
 > All AI inference is local; no proprietary model APIs in the trading hot path.
+> Anthropic Claude is wired in as a *failover-only* backstop behind a circuit
+> breaker (Section 8) — used when Ollama is unhealthy, never in steady state.
+
+---
+
+## Contents
+
+1. [Executive summary](#1-executive-summary)
+2. [System thesis with academic grounding](#2-system-thesis-with-academic-grounding)
+3. [Deployment topology](#3-deployment-topology) — *containers, ports, bind-mounts*
+4. [Architecture](#4-architecture) — *8-layer flowchart*
+5. [The risk governor in detail](#5-the-risk-governor-in-detail) — *8 hard gates*
+6. [Trade lifecycle (end-to-end sequence)](#6-trade-lifecycle-end-to-end-sequence) — *sequence diagram*
+7. [Stocks venue — SOFI wheel + Shark TFT](#7-stocks-venue--sofi-wheel--shark-tft) — *parallel pipeline*
+8. [LLM reasoning layer — failover + circuit breaker](#8-llm-reasoning-layer--failover--circuit-breaker) — *state machine*
+9. [The sentiment + market-intelligence pipeline](#9-the-sentiment--market-intelligence-pipeline)
+10. [Operations](#10-operations) — *full cron schedule, daily checklist, emergency playbook*
+11. [Tech stack](#11-tech-stack)
+12. [Validation framework](#12-validation-framework)
+13. [Hardware + cost economics](#13-hardware--cost-economics)
+14. [References](#14-references)
 
 ---
 
@@ -97,7 +120,86 @@ Three decisions distinguish this system from a single-model bot:
 
 ---
 
-## 3. Architecture
+## 3. Deployment topology
+
+The system runs as **5 Docker containers** on a single host (DGX Spark), plus
+**3 host-side daemons** (Hermes Gateway, Hermes MCP, Ollama). All communication
+between containers and host crosses a bridge network or a Unix socket; nothing
+trading-critical leaves the box.
+
+```mermaid
+flowchart TB
+    subgraph host["DGX Spark host (Linux, NVIDIA GB10)"]
+        subgraph compose["docker-compose bridge network"]
+            FT[freqtrade<br/>:8080<br/>crypto strategy + FreqAI TFT]
+            DASH[dashboard<br/>:8081<br/>FastAPI + Jinja2 + plain JS]
+            PG[(tradebot-postgres<br/>TimescaleDB :5434<br/>trade journal · regime log<br/>sentiment · on-chain)]
+            INFLUX[(influxdb<br/>:8086<br/>metrics · gauges · histograms)]
+            GRAF[grafana<br/>:3000<br/>time-series dashboards]
+        end
+
+        subgraph hostproc["Host-side daemons"]
+            HGW[Hermes Gateway<br/>cron scheduler<br/>~20 jobs · ET-local TZ]
+            HMCP[Hermes MCP server<br/>40+ tools — crypto + stocks]
+            OLL[Ollama<br/>:11434<br/>hermes3:8b · hermes3:70b]
+            STKS[(stocks/ — Shark + wheel<br/>SOFI portfolio<br/>Alpaca paper broker)]
+        end
+
+        subgraph statefs["Shared filesystem"]
+            TMP[/tmp shared state<br/>circuit-breaker JSON<br/>ollama-health.json<br/>hermes-*.alive heartbeats/]
+            CFG[user_data/config.json<br/>config-private.json<br/>secrets via env]
+        end
+    end
+
+    OPER[Operator browser<br/>localhost:8081] --> DASH
+    FT --> PG
+    FT --> INFLUX
+    DASH --> PG
+    DASH --> INFLUX
+    DASH -.MCP HTTP.-> HMCP
+    HGW --> HMCP
+    HMCP --> FT
+    HMCP --> STKS
+    HMCP --> OLL
+    FT --> OLL
+    STKS --> OLL
+    HMCP -.failover.-> ANTHRO[Anthropic API<br/>claude-haiku-4-5<br/>circuit-breaker gated]
+    OLL --> TMP
+    HMCP --> TMP
+    DASH --> TMP
+    STKS --> ALPACA[Alpaca paper API<br/>stocks + options]
+    FT --> CB[Coinbase Advanced<br/>OHLCV + orders]
+    GRAF --> INFLUX
+    GRAF --> PG
+
+    classDef container fill:#1e293b,stroke:#475569,color:#e2e8f0
+    classDef host fill:#0f172a,stroke:#64748b,color:#cbd5e1
+    classDef external fill:#3b0764,stroke:#a855f7,color:#f3e8ff
+    class FT,DASH,PG,INFLUX,GRAF container
+    class HGW,HMCP,OLL,STKS,TMP,CFG host
+    class OPER,ANTHRO,ALPACA,CB external
+```
+
+| Container / daemon | Port | Role |
+|---|---|---|
+| `freqtrade` | 8080 | Crypto strategy loop + FreqAI TFT retraining (24 h cadence, 730 d window) |
+| `dashboard` | 8081 | Operator console (`/`, `/ops`, `/charts`) + REST API (35+ `/api/ops/*` endpoints) |
+| `tradebot-postgres` | 5434 | TimescaleDB hypertables — single source of truth for trades, regime, sentiment |
+| `influxdb` | 8086 | High-cardinality metrics for Grafana |
+| `grafana` | 3000 | Time-series visualisation |
+| `hermes-gateway` (host) | — | Cron scheduler with ET timezone; ~20 jobs (Section 10.1) |
+| `hermes-mcp` (host) | — | MCP server exposing 40+ tools across crypto + stocks venues |
+| `ollama` (host) | 11434 | Local LLM runtime — hermes3:8b (warm) + hermes3:70b (evicts between polls) |
+
+**Cross-process state coordination:** `/tmp` is bind-mounted read-only into
+the freqtrade container as `/host-tmp` so the strategy can observe the
+circuit-breaker state file written by the host-side LLM client and the Ollama
+health snapshot written by the `ollama_health` cron — without either side
+needing a network round-trip.
+
+---
+
+## 4. Architecture
 
 ```mermaid
 flowchart TB
@@ -134,7 +236,7 @@ flowchart TB
     end
 
     subgraph "Layer 5 · Risk governance"
-        R{8 hard gates<br/>see Section 4}
+        R{8 hard gates<br/>see Section 5}
         E[Coinbase Advanced limit-orders-only<br/>0.30% slippage gate<br/>3-attempt exponential-backoff retry]
     end
 
@@ -145,16 +247,16 @@ flowchart TB
     end
 
     subgraph "Layer 7 · Observability"
-        S[Slack block-kit alerts]
+        S[UnifiedNotifier<br/>Slack block-kit + Telegram MarkdownV2<br/>severity-routed delta + action lines]
         J[trade_journal in TimescaleDB]
         I[InfluxDB → Grafana]
-        DASH[Ops console :8081]
+        DASH[Ops console :8081<br/>15 cards · auto-refresh 5/10/30s/1m]
     end
 
     subgraph "Layer 8 · Agent supervision"
-        HCRON[9 Hermes cron jobs<br/>every 15 min – 14 days]
-        HMCP[Hermes MCP server<br/>19 tools]
-        H[Hermes-3 70B agent]
+        HCRON[~20 Hermes cron jobs<br/>15 min – 14 days<br/>ET-local timezone]
+        HMCP[Hermes MCP server<br/>40+ tools — crypto + stocks]
+        H[Hermes-3 70B agent<br/>+ Claude Haiku failover<br/>behind circuit breaker]
         HCRON --> H
         H --> HMCP
         HMCP --> J
@@ -194,7 +296,7 @@ flowchart TB
   transactions from [Whale Alert][whalealert]. The use of on-chain flow as
   a leading indicator is grounded in [Wang & Vergne, 2017][wang] and
   [Chainalysis quantitative reports][chainalysis].
-- Sentiment: see Section 5.
+- Sentiment: see Section 9.
 - Regime: 4-state HMM following the framework in [Hardy, 2001][hardy] and
   [Bulla & Bulla, 2006][bulla]. The four states (`trending_up`,
   `trending_down`, `mean_reverting`, `high_volatility`) are widely used in
@@ -239,7 +341,7 @@ methods to align is more robust than trusting a single confident signal
 
 #### Layer 5 — Risk governance
 
-See Section 4 for the full gate inventory. Source lineage:
+See Section 5 for the full gate inventory. Source lineage:
 
 - **Drawdown auto-pause**: standard CTA risk-management practice, formalised
   in [Magdon-Ismail & Atiya, 2004][magdon].
@@ -272,26 +374,38 @@ crossover + σ-decaying Gaussian mutation.
 
 #### Layer 7 — Observability
 
-- [Slack Block Kit][slack_blocks] structured reports.
+- **UnifiedNotifier** (`user_data/modules/notifier.py`) — single facade over
+  [Slack Block Kit][slack_blocks] + Telegram MarkdownV2 with severity-based
+  routing: **CRITICAL / WARNING** → both channels (phone buzzes), **TRADE /
+  REPORT / INFO** → Slack only. Every alert carries a one-line `Δ` (what
+  changed) and `Action:` (what to do) so the on-call eye doesn't have to
+  derive intent from a wall of fields.
 - [TimescaleDB][timescaledb] hypertables on `ts` for `trade_journal`,
   `regime_log`, `sentiment_log`, `news_headlines`, `fear_greed_log`,
   `exchange_netflow`, `mvrv_ratio`, `whale_transactions`.
 - [InfluxDB 2.7][influxdb] + [Grafana][grafana] for time-series dashboards.
 - Self-hosted Ops console (FastAPI + [TradingView Lightweight
-  Charts][lwcharts]) at port 8081.
+  Charts][lwcharts]) at port 8081. **15 cards** including Combined
+  Portfolio, Regime, Gates, Circuit Breakers, LLM Provider Health, Stocks
+  ML, plus a top-bar **auto-refresh dropdown** (5 s / 10 s / 30 s / 1 min /
+  Off, persisted in `localStorage`).
 
 #### Layer 8 — Agent supervision
 
 [Hermes Agent][hermes] (Nous Research) runs locally with [Hermes-3 70B][hermes3]
 on [Ollama][ollama]. Communicates with the trading bot via the [Model Context
 Protocol][mcp] (Anthropic, 2024) over a streamable-HTTP transport implemented
-with [FastMCP][fastmcp]. Nine cron jobs cover real-time risk monitoring (15
-min), per-cycle EPT evaluation (36h), capital rebalancing (14d), weekly
-post-mortem analysis, and autonomous market research between sentiment polls.
+with [FastMCP][fastmcp]. **~20 cron jobs** cover real-time risk monitoring
+(15 min), 30-min market research polls, daily EPT training (02:00 ET),
+capital rebalancing (14 d), weekly post-mortem (Sun 01:00 ET), Sunday-night
+**stocks TFT training** (23:00 ET), Ollama health probes (5 min), Shark
+pre-market / market-open / midday / EOD scans (Mon–Fri NYSE hours), and the
+**wheel** strategy execution (sell CSPs Fri, sell covered calls Mon,
+profit-take twice daily) — see Section 10.1 for the full schedule.
 
 ---
 
-## 4. The risk governor in detail
+## 5. The risk governor in detail
 
 The risk governor is the only mandatory checkpoint between a meta-signal and
 a placed order. Its eight gates are evaluated in this order:
@@ -335,7 +449,190 @@ touching `config.json`.
 
 ---
 
-## 5. The sentiment + market-intelligence pipeline
+## 6. Trade lifecycle (end-to-end sequence)
+
+Every 5 minutes the strategy loop wakes up for each pair. The diagram below
+traces the **full request path** of a single candle close to either an
+approved order or a logged gate rejection. The same lifecycle runs in
+parallel for crypto (Freqtrade) and the SOFI wheel (Shark + Alpaca).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant FT as Freqtrade strategy<br/>(5-min candle close)
+    participant FA as FreqAI<br/>TFT inference
+    participant SE as SentimentEngine<br/>(15-min cache)
+    participant OC as OnChain feeds<br/>(60-min cache)
+    participant RG as RiskGovernor<br/>(8 hard gates)
+    participant CB as Coinbase API
+    participant DB as TimescaleDB<br/>trade_journal
+    participant SL as UnifiedNotifier<br/>(Slack + Telegram)
+    participant DASH as /ops dashboard
+
+    FT->>FA: predict(pair, features)
+    FA-->>FT: {up, flat, down, P10, P50, P90, conf}
+    FT->>SE: get_score(pair) — cache hit?
+    alt cache miss
+        SE->>SE: poll 6 sources<br/>Hermes-3 8B+70B vote
+    end
+    SE-->>FT: {bullish, bearish, agreement, confidence}
+    FT->>OC: get_features(pair)
+    OC-->>FT: {netflow_z, mvrv, whale_1h}
+    FT->>FT: regime-weighted meta blend<br/>(TFT × DRL × sentiment)
+    FT->>RG: evaluate(signal, equity, open_positions, regime)
+    alt all gates pass
+        RG-->>FT: APPROVED, size=Kelly·0.5
+        FT->>CB: place limit order (post-only, slip≤0.30%)
+        CB-->>FT: order_id, fill_price
+        FT->>DB: INSERT trade (full signal lineage)
+        FT->>SL: trade_entry block-kit (delta + action)
+        FT->>DASH: state.alive heartbeat
+    else any gate blocks
+        RG-->>FT: BLOCKED, blocking_constraint=<gate>
+        FT->>DB: INSERT signal_log (rejection reason)
+        FT->>DASH: gates.alive heartbeat
+        Note over SL: no Slack — rejections are silent<br/>visible only on /ops Gates card
+    end
+    DASH-->>FT: auto-refresh polls every 5/10/30s
+```
+
+The **complete signal lineage** (TFT probs, DRL votes, sentiment, regime,
+meta-confidence, blocking gate, fill price, slippage) is persisted on every
+attempt — approved *and* rejected — into a single TimescaleDB hypertable
+ordered by `(pair, ts)`. This is what powers the **explainability** view at
+`/ops/explainability/{base}/{quote}` and post-mortem reproducibility.
+
+---
+
+## 7. Stocks venue — SOFI wheel + Shark TFT
+
+The crypto stack has a parallel **stocks venue** that trades the *wheel*
+strategy (selling cash-secured puts → assignment → selling covered calls)
+on a fixed 6-symbol portfolio mapped to the operator's SoFi holdings. It
+shares the *risk governor*, *Hermes MCP supervision*, *dashboard*, and
+*UnifiedNotifier* infrastructure but runs on a **separate trading engine**
+(custom `stocks/shark/` package on Alpaca's paper API) with **its own TFT**
+and **its own DRL ensemble scaffold**.
+
+```mermaid
+flowchart TB
+    subgraph dataS["Data — daily bars (NYSE 9:30–16:00 ET)"]
+        AL[Alpaca market data API<br/>OHLCV + options chain]
+        SPY[SPY benchmark<br/>excess-return feature]
+    end
+
+    subgraph featS["Layer 1 — features (12 cols)"]
+        FS1[Returns 1d / 5d / 20d]
+        FS2[log-volume + 20d z-score]
+        FS3[RSI-14 · MACD · MACD-signal · MACD-hist]
+        FS4[Bollinger %-position]
+        FS5[20d realised vol]
+        FS6[SPY excess-return 5d]
+    end
+
+    subgraph mlS["Layer 2 — Stocks TFT (separate weights)"]
+        TS[StockTFT<br/>Linear 12→64 → 2-layer LSTM<br/>→ MultiHeadAttn 4-head<br/>→ 3-class head up/flat/down<br/>AdamW + cosine LR + AMP fp16]
+        DS[DRL ensemble scaffold<br/>tft_threshold · tft_confidence · tft_quantile<br/>real PPO/A2C/DQN deferred]
+    end
+
+    subgraph wheelS["Layer 3 — Wheel strategy"]
+        W1[Sell CSPs Fri 11:00 ET<br/>wheel_sell_csps.sh]
+        W2[Sell covered calls Mon 11:00 ET<br/>wheel_sell_covered_calls.sh]
+        W3[Profit-take 50% scan<br/>Mon-Fri 10:00 + 14:00 ET<br/>wheel_profit_take.sh]
+    end
+
+    subgraph riskS["Layer 4 — Shared risk + execution"]
+        URG[unified_risk.py<br/>combined DD across crypto + stocks<br/>kill switch trips BOTH venues]
+        EX[Alpaca paper executor<br/>options + equity orders]
+    end
+
+    AL --> FS1 & FS2 & FS3 & FS4 & FS5
+    SPY --> FS6
+    FS1 --> TS
+    FS2 --> TS
+    FS3 --> TS
+    FS4 --> TS
+    FS5 --> TS
+    FS6 --> TS
+    TS --> DS
+    DS --> W1 & W2 & W3
+    W1 --> URG
+    W2 --> URG
+    W3 --> URG
+    URG --> EX
+    URG -.kill flag.-> W1
+    URG -.kill flag.-> W2
+    URG -.kill flag.-> W3
+```
+
+### Why a second pipeline (not a unified one)
+
+- **Different signal cadence.** Crypto runs 24/7 on 5-min candles; stocks run
+  6.5 h/day on daily bars. A single TFT can't share normalisation parameters
+  across these regimes without sample-size pathologies.
+- **Different action space.** Crypto = long-only spot. Stocks = option premium
+  collection (theta-positive, delta-bounded). The reward shape and gate
+  semantics diverge.
+- **Different retrain cadence.** Crypto TFT retrains every 24 h on a 730-day
+  window (FreqAI built-in). Stocks TFT retrains weekly Sunday 23:00 ET
+  (`stocks_ml_train.sh`) on the full 5-yr history because daily bars
+  produce ~1700 samples — small enough that more frequent fits would just
+  refit to noise.
+
+### Unified risk floor
+
+The one piece that **is** shared is `user_data/modules/unified_risk.py`. It
+sums crypto equity ($19 k) + stocks equity ($100 k) into a combined book
+($119 k), computes a single drawdown, and trips a hard kill switch at 10 %
+combined DD. The kill flag is a file at `/host-tmp/stocks_KILL` watched by
+every Shark cron job + a `POST /api/ops/pause` to the dashboard for crypto
+— **one tripwire, both venues halted**.
+
+---
+
+## 8. LLM reasoning layer — failover + circuit breaker
+
+Every LLM call from the trading hot path (sentiment scoring, agent
+reasoning, structured prompt outputs) goes through a single client that
+tries **Ollama (local) first**, then **Anthropic Claude haiku** as a
+*failover-only* path behind a circuit breaker. The breaker keeps a
+*runaway* failure from cascading into a runaway Anthropic bill.
+
+```mermaid
+stateDiagram-v2
+    [*] --> CLOSED
+    CLOSED --> OPEN: 5 consecutive failures<br/>OR p95 latency<br/>> CB_FAST_LATENCY_THRESHOLD
+    OPEN --> HALF_OPEN: after RECOVERY_TIMEOUT_S<br/>(default 60s)
+    HALF_OPEN --> CLOSED: probe success
+    HALF_OPEN --> OPEN: probe failure
+    CLOSED --> CLOSED: success
+    OPEN --> OPEN: blocked — no calls<br/>route to Anthropic
+```
+
+**Behaviour summary:**
+
+| State | What happens to Ollama traffic | What happens to Anthropic traffic |
+|---|---|---|
+| `CLOSED` | All requests routed to Ollama | None (failover-only) |
+| `OPEN` | Blocked — no calls attempted | All requests | 
+| `HALF_OPEN` | One probe request | All others |
+
+**State is file-backed** at `${SHARK_CB_DIR:-/tmp}/circuit-breaker.json` so it
+survives process restarts and is observable from any container that mounts
+`/tmp`. The dashboard's `/api/ops/circuit_breakers` endpoint exposes the
+current state of all named breakers (one per (provider, route) pair) and
+the `/ops` Card #14 shows them as colour pills.
+
+A **separate `ollama_health` cron** (every 5 minutes) independently probes
+`/api/tags` + a 100-token `/api/generate` call to the FAST model. It alerts
+via the **UnifiedNotifier** (Slack + Telegram) at 3 consecutive failures, on
+missing-required-model events, or when probe latency exceeds 30 s. Wired
+through `unified_risk.trip_combined_kill_switch` → `notify.critical("kill_switch", …)`
+so the operator's phone buzzes immediately rather than waiting on Slack mobile.
+
+---
+
+## 9. The sentiment + market-intelligence pipeline
 
 ```mermaid
 flowchart LR
@@ -406,16 +703,49 @@ operator acts.
 
 ---
 
-## 6. Operations
+## 10. Operations
+
+### 10.1 Hermes cron schedule (full)
+
+All times in **America/New_York** (ET). The Hermes Gateway daemon runs the
+scheduler; jobs are also visible in the dashboard's `/api/ops/mcp/list_jobs`.
+
+| When | Job | Purpose | Channel |
+|---|---|---|---|
+| **Every 5 min** | `ollama_health` | Probe `/api/tags` + 100-tok latency on hermes3:8b; alert at 3 consecutive failures | Slack + Telegram via UnifiedNotifier |
+| **Every 15 min** | `risk_monitor_15min` | Check combined DD; warn >5%, critical >8% | Telegram |
+| **Every 30 min** | `market_research_30min` | Cross-source divergence scan; persist to `~/.hermes/state-snapshots/` | Telegram if `actionable_signal=true` |
+| **Hourly during crypto session** | FreqAI built-in TFT refresh | Per-pair retrain on 730-d sliding window | (silent) |
+| **Daily 00:00** | `daily_pnl_report` | Net P&L, Sharpe, win rate, regime distribution | Slack |
+| **Daily 02:00** | `ept_training_daily` | Run EPT evolution cycle on 8 agent genomes | Slack — champion report |
+| **Daily 06:00** | `sentiment_accuracy_audit` | Compare yesterday's sentiment vs realised PnL | Slack if accuracy <50% for 3 days |
+| **Mon–Fri 09:00** | `shark_pre_market` | Stocks pre-market gates + signal warm-up | Telegram |
+| **Mon–Fri 09:35** | `shark_market_open` | First-30-min snapshot post NYSE open | Telegram |
+| **Mon–Fri 10:00 + 14:00** | `wheel_profit_take` | Scan for ≥50% premium captured; close early | Telegram |
+| **Mon 11:00** | `wheel_sell_covered_calls` | Sell CCs against assigned shares | Telegram |
+| **Mon–Fri 13:00** | `shark_midday` | Mid-session regime + risk re-check | Telegram |
+| **Mon–Fri 17:30** | `shark_daily_summary` | EOD recap — fills, P&L, gate-block counts | Telegram |
+| **Mon–Fri 21:30** | `shark_kb_update` | Refresh per-symbol knowledge base from filings + news | (silent) |
+| **Fri 11:00** | `wheel_sell_csps` | Sell next-Friday cash-secured puts | Telegram |
+| **Sat 10:00** | `shark_weekly_review` | Weekly P&L + gate-block patterns across 5 sessions | Slack |
+| **Sat 11:00** | `shark_kb_refresh` | Full weekly KB rebuild + Reddit + earnings calendar | (silent) |
+| **Sun 00:00** | `weekly_evolution_report` | Generation + champion lineage + fitness trend | Slack |
+| **Sun 01:00** | `post_mortem_weekly` | Cluster last 7 d losses by (regime, exit_reason); top-3 recommendations | Slack |
+| **Sun 23:00** | `stocks_ml_train` | Retrain stocks TFT on full 5-yr daily-bar history | Telegram on completion |
+| **Every 36 h** | `ept_eval_breeding` | Fitness eval + demotion flag on 3-d rolling Sharpe < 0.5 | Slack |
+| **Every 14 d** | `capital_rebalance_14d` | Recompute `pair_weights` from 14-d Sharpe | Slack |
 
 ### Daily checklist (5 minutes)
 
 | Where | What | Threshold |
 |---|---|---|
 | Slack `:bar_chart:` daily report | Net P&L, Sharpe-30d, MaxDD-30d | DD < 8%, Sharpe trending up |
-| `/ops` regime hero | Current regime + warm-up banner | Banner yellow > 12h ⇒ restart freqtrade |
-| `/ops` services panel | All 8 services green | Anything red ⇒ investigate |
-| `/ops` trades + risk | Open count, daily P&L, breaker | Breaker should say `clear` |
+| `/ops` Combined portfolio | Crypto + stocks equity, combined DD, breaker | Breaker `clear`, DD < 8% |
+| `/ops` Regime hero | Current regime + warm-up banner | Banner yellow > 12 h ⇒ restart freqtrade |
+| `/ops` Services panel | All 8 services green | Anything red ⇒ investigate |
+| `/ops` Card #14 LLM provider health | Ollama state + circuit breakers | All `CLOSED`, latency `<3 s` |
+| `/ops` Card #15 Stocks ML | Last train ts, val_acc, val_loss | Train fresh after Sun 23:00 ET |
+| `/ops` Gates panel | Per-pair blocking constraints | At least 1 pair clearing on trending regime |
 | `tail -50 user_data/logs/hermes_mcp.log` | MCP tool calls | No repeated 5xx/auth errors |
 | `tail -50 user_data/logs/freqtrade.log` | Strategy errors | Empty (no recurring exception) |
 
@@ -478,7 +808,7 @@ to the previous tradable_balance_ratio.
 
 ---
 
-## 7. Tech stack
+## 11. Tech stack
 
 | Component | Source | Version |
 |---|---|---|
@@ -504,7 +834,7 @@ to the previous tradable_balance_ratio.
 
 ---
 
-## 8. Validation framework
+## 12. Validation framework
 
 The validation framework is the system's most important defence against
 the "paper-traded strategy fails live" failure mode quantified by
@@ -530,7 +860,7 @@ equivalent to "validate_readiness has flipped to NOT-READY".
 
 ---
 
-## 9. Hardware + cost economics
+## 13. Hardware + cost economics
 
 ### Hardware
 
@@ -570,7 +900,7 @@ the AI Safety Institute, 2024][aisi]).
 
 ---
 
-## 10. References
+## 14. References
 
 [freqtrade]: https://github.com/freqtrade/freqtrade "Freqtrade — Free, open-source crypto trading bot in Python"
 [freqai]: https://www.freqtrade.io/en/stable/freqai/ "FreqAI documentation — Freqtrade's machine-learning extension"
