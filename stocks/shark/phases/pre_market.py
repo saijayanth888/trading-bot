@@ -122,9 +122,39 @@ def _score(
 
 
 def _notify_premarket_risk(symbol: str, plpc: float) -> None:
+    """Pre-market risk alert routed through the UnifiedNotifier (Slack + Telegram
+    on critical, plus the legacy email digest for forensics)."""
     pct = round(plpc * 100, 2)
     message = f"URGENT: {symbol} is down {pct}% premarket — approaching -7% stop"
     logger.warning(message)
+
+    # Route to Slack + Telegram via the unified notifier
+    try:
+        import sys
+        from pathlib import Path
+        repo_root = Path(__file__).resolve().parents[3]
+        if str(repo_root / "user_data") not in sys.path:
+            sys.path.insert(0, str(repo_root / "user_data"))
+        from modules.notifier import notify
+
+        if abs(plpc) >= 0.10:
+            notify.critical(
+                "risk",
+                metric=f"overnight_move_{symbol}",
+                value=abs(plpc),
+                threshold=0.10,
+            )
+        elif abs(plpc) >= 0.05:
+            notify.warning(
+                "risk",
+                metric=f"overnight_move_{symbol}",
+                value=abs(plpc),
+                threshold=0.05,
+            )
+    except Exception as exc:
+        logger.warning("unified notifier failed for %s: %s", symbol, exc)
+
+    # Keep email digest as a forensic record (legacy path; safe to keep)
     try:
         html = alert_html(
             title=f"Premarket Risk Alert — {symbol}",
@@ -136,7 +166,7 @@ def _notify_premarket_risk(symbol: str, plpc: float) -> None:
             body_html=html,
         )
     except Exception as exc:
-        logger.error("Premarket risk alert failed for %s: %s", symbol, exc)
+        logger.error("Premarket risk email failed for %s: %s", symbol, exc)
 
 
 def _append_candidate_table(date_str: str, viable: list[tuple[int, str, dict]]) -> None:
