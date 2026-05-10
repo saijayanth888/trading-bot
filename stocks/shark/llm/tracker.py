@@ -33,9 +33,16 @@ logger = logging.getLogger(__name__)
 # Counterfactual pricing — what the call WOULD have cost on Sonnet 4.6.
 SONNET_PRICING_USD_PER_M = {"input": 3.0, "output": 15.0}
 
-# Persistent log location. Outside the package so shark/wheel runtimes can
-# write to it without depending on the package being installed.
-_LOG_PATH = Path(__file__).resolve().parents[2] / "memory" / "llm-calls.jsonl"
+# Persistent log location. Tests set SHARK_TRACKER_LOG to /tmp/<unique>
+# so they don't pollute the production dashboard.
+def _resolve_log_path() -> Path:
+    override = os.environ.get("SHARK_TRACKER_LOG", "").strip()
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parents[2] / "memory" / "llm-calls.jsonl"
+
+
+_LOG_PATH = _resolve_log_path()
 
 _RING_MAX = 1000
 _LOCK = threading.Lock()

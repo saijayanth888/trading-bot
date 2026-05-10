@@ -16,11 +16,17 @@ from shark.llm import client as client_module
 
 @pytest.fixture(autouse=True)
 def isolated_breaker_state(tmp_path, monkeypatch):
-    """Each test gets a fresh state dir so breaker state doesn't leak."""
+    """Each test gets a fresh state dir so breaker state doesn't leak.
+    Also redirects the LLM tracker log so test calls don't pollute the
+    production dashboard's LLM-stats card."""
     monkeypatch.setattr(cb_module, "_STATE_DIR", tmp_path)
     monkeypatch.setattr(cb_module, "_breakers", {})
     # Reset the rate-limited fallback alert so each test can fire it
     monkeypatch.setattr(client_module, "_FALLBACK_ALERT_LAST_TS", 0.0)
+    # Redirect tracker JSONL to tmp_path so prod log stays clean
+    from shark.llm import tracker as tracker_module
+    monkeypatch.setattr(tracker_module, "_LOG_PATH", tmp_path / "test-llm.jsonl")
+    monkeypatch.setattr(tracker_module, "_singleton", None)
     yield
 
 
