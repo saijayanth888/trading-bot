@@ -207,6 +207,10 @@
     clear(els.meta);
     els.meta.appendChild(document.createTextNode("loading stock…"));
 
+    // Fetch market-hours so the chart can show "🔒 NYSE closed · reopens Mon 09:30 ET"
+    let mh;
+    try { mh = await getJson("/api/ops/market_hours"); } catch (_) { mh = null; }
+
     let envelope;
     try {
       envelope = await getJson(`/api/ops/stock_candles/${encodeURIComponent(symbol)}?timeframe=${encodeURIComponent(stockTf)}`);
@@ -280,6 +284,46 @@
     els.meta.appendChild(document.createTextNode("  ·  "));
     els.meta.appendChild(el("span", { style: { color: "var(--muted)" } },
       `${bars.length} bars · candles ${envelope.data.age_seconds == null ? "—" : envelope.data.age_seconds + "s"} old`));
+
+    // Market-hours badge: closed → red pill with reopen hint; open → green
+    if (mh && mh.data) {
+      const open = mh.data.is_open === true;
+      const ext = mh.data.is_extended === true;
+      const reopenLocal = mh.data.next_open_utc ? new Date(mh.data.next_open_utc) : null;
+      const reopenStr = reopenLocal
+        ? reopenLocal.toLocaleString("en-US", {
+            weekday: "short", hour: "2-digit", minute: "2-digit", timeZone: "America/New_York",
+          }) + " ET"
+        : "—";
+      els.meta.appendChild(document.createTextNode("  ·  "));
+      const pill = el("span", {
+        style: {
+          padding: "2px 8px",
+          borderRadius: "999px",
+          fontSize: "11px",
+          fontWeight: "600",
+          letterSpacing: "0.04em",
+          textTransform: "uppercase",
+        },
+      });
+      if (open) {
+        pill.textContent = "● NYSE OPEN";
+        pill.style.background = "rgba(63,185,80,0.10)";
+        pill.style.color = "#3fb950";
+        pill.style.border = "1px solid rgba(63,185,80,0.35)";
+      } else if (ext) {
+        pill.textContent = "● Extended hours";
+        pill.style.background = "rgba(244,185,66,0.10)";
+        pill.style.color = "#f4b942";
+        pill.style.border = "1px solid rgba(244,185,66,0.35)";
+      } else {
+        pill.textContent = `🔒 NYSE closed · reopens ${reopenStr}`;
+        pill.style.background = "rgba(248,81,73,0.06)";
+        pill.style.color = "#f5a8a3";
+        pill.style.border = "1px solid rgba(248,81,73,0.25)";
+      }
+      els.meta.appendChild(pill);
+    }
 
     mainChart.timeScale().fitContent();
     rsiChart.timeScale().fitContent();

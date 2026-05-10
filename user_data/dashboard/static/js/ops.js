@@ -568,11 +568,27 @@ function fmtAge(seconds) {
 }
 
 async function refreshStocks() {
-  const r = await jsonFetch("/api/ops/stocks");
+  const [r, mhResp] = await Promise.all([
+    jsonFetch("/api/ops/stocks"),
+    jsonFetch("/api/ops/market_hours"),
+  ]);
   const env = r.body;
+  const mh = mhResp.body && mhResp.body.data;
   setStatus("card-stocks", env.status || "down");
   const ageEl = document.getElementById("stocks-age");
-  if (ageEl) ageEl.textContent = env.error || "live";
+  if (ageEl) {
+    const reopen = mh && mh.next_open_utc
+      ? new Date(mh.next_open_utc).toLocaleString("en-US", {
+          weekday: "short", hour: "2-digit", minute: "2-digit", timeZone: "America/New_York",
+        }) + " ET"
+      : null;
+    let mhBadge;
+    if (!mh) mhBadge = "";
+    else if (mh.is_open) mhBadge = "● NYSE open";
+    else if (mh.is_extended) mhBadge = "● Extended hours";
+    else mhBadge = `🔒 closed · reopens ${reopen}`;
+    ageEl.textContent = (env.error || "live") + (mhBadge ? "  ·  " + mhBadge : "");
+  }
   const body = document.getElementById("stocks-body");
   if (!body) return;
   if (!env.data) { body.textContent = env.error || "—"; return; }

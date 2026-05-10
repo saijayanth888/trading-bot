@@ -1874,6 +1874,91 @@ async def gates():
     })
 
 
+@router.get("/market_hours")
+async def market_hours():
+    """NYSE / US-equities session state for the dashboard.
+
+    Markets are M-F 09:30-16:00 America/New_York. Crypto charts run 24/7;
+    stocks are paused 17/24 of each weekday plus all weekends. The dashboard
+    uses this to show "🔒 NYSE closed · reopens Monday 09:30 ET" instead of
+    a stale chart that looks broken.
+
+    No external dependency on `pandas_market_calendars` (which would add
+    holiday awareness). Returns:
+        is_open:           bool
+        is_extended:       bool   (premarket 04:00-09:30 or after-hours 16:00-20:00)
+        last_close_utc:    ISO    (UTC)
+        next_open_utc:     ISO    (UTC)
+        next_close_utc:    ISO    (UTC)
+        now_et:            string in ET for display
+        holiday_note:      None for now (TODO: NYSE holiday feed)
+    """
+    from datetime import datetime, time, timedelta, timezone
+    try:
+        # Python 3.9+ stdlib
+        from zoneinfo import ZoneInfo
+    except ImportError:  # pragma: no cover
+        from backports.zoneinfo import ZoneInfo
+
+    ET = ZoneInfo("America/New_York")
+    now_utc = datetime.now(timezone.utc)
+    now_et = now_utc.astimezone(ET)
+
+    REG_OPEN = time(9, 30)
+    REG_CLOSE = time(16, 0)
+    EXT_OPEN = time(4, 0)
+    EXT_CLOSE = time(20, 0)
+
+    weekday = now_et.weekday()  # 0=Mon..6=Sun
+    is_weekday = weekday < 5
+    cur_t = now_et.time()
+    is_open = is_weekday and (REG_OPEN <= cur_t < REG_CLOSE)
+    is_extended = is_weekday and (
+        (EXT_OPEN <= cur_t < REG_OPEN) or (REG_CLOSE <= cur_t < EXT_CLOSE)
+    ) and not is_open
+
+    # Compute last-close: most recent weekday at 16:00 ET that has already passed
+    def _last_weekday_at(target: datetime, t: time) -> datetime:
+        candidate = target.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+        if candidate > target:
+            candidate -= timedelta(days=1)
+        while candidate.weekday() >= 5:  # roll back through weekend
+            candidate -= timedelta(days=1)
+        return candidate
+
+    last_close_et = _last_weekday_at(now_et, REG_CLOSE)
+
+    # Compute next open/close
+    def _next_weekday_at(target: datetime, t: time) -> datetime:
+        candidate = target.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+        if candidate <= target:
+            candidate += timedelta(days=1)
+        while candidate.weekday() >= 5:
+            candidate += timedelta(days=1)
+        return candidate
+
+    if is_open:
+        next_close_et = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        if next_close_et <= now_et:
+            next_close_et += timedelta(days=1)
+        # Next open after that day's close
+        next_open_et = _next_weekday_at(next_close_et, REG_OPEN)
+    else:
+        next_open_et = _next_weekday_at(now_et, REG_OPEN)
+        next_close_et = next_open_et.replace(hour=16, minute=0, second=0, microsecond=0)
+
+    return _envelope("ok", data={
+        "is_open": is_open,
+        "is_extended": is_extended,
+        "last_close_utc": last_close_et.astimezone(timezone.utc).isoformat(),
+        "next_open_utc": next_open_et.astimezone(timezone.utc).isoformat(),
+        "next_close_utc": next_close_et.astimezone(timezone.utc).isoformat(),
+        "now_et": now_et.isoformat(timespec="seconds"),
+        "weekday": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][weekday],
+        "holiday_note": None,
+    })
+
+
 @router.get("/live_trades")
 async def live_trades():
     """Aggregate every active position across crypto + wheel + shark for
