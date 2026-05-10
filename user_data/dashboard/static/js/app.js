@@ -660,7 +660,6 @@
   function currentTimeframe() { return els.tf.value; }
 
   // Support deep-linking from /ops: e.g. http://host:8081/?pair=SOFI&tf=5m
-  // Selects the matching dropdown option on first paint if the option exists.
   (function applyUrlParams() {
     const params = new URLSearchParams(window.location.search);
     const wantPair = params.get("pair");
@@ -671,6 +670,60 @@
     if (wantTf && [...els.tf.options].some((o) => o.value === wantTf)) {
       els.tf.value = wantTf;
     }
+  })();
+
+  // ─── Venue tabs (Crypto / Stocks) — filter the pair dropdown ─────────
+  (function wireVenueTabs() {
+    const tabs = document.querySelectorAll(".venue-tab");
+    if (!tabs.length) return;
+    const VENUE_LS_KEY = "charts.venue";
+
+    function activeKind() {
+      const opt = els.pair.options[els.pair.selectedIndex];
+      return opt && opt.dataset.kind === "stock" ? "stocks" : "crypto";
+    }
+
+    function applyFilter(venue) {
+      let firstVisible = null;
+      for (const opt of els.pair.options) {
+        const kind = opt.dataset.kind === "stock" ? "stocks" : "crypto";
+        const show = kind === venue;
+        opt.hidden = !show;
+        opt.disabled = !show;
+        if (show && !firstVisible) firstVisible = opt.value;
+      }
+      // If the current selection is now hidden, jump to the first visible
+      const current = els.pair.options[els.pair.selectedIndex];
+      const currentKind = current && current.dataset.kind === "stock" ? "stocks" : "crypto";
+      if (currentKind !== venue && firstVisible) {
+        els.pair.value = firstVisible;
+        loadPair(firstVisible, currentTimeframe());
+      }
+      // Reflect on tab buttons
+      tabs.forEach((t) => {
+        t.setAttribute("aria-selected", t.dataset.venue === venue ? "true" : "false");
+      });
+    }
+
+    // Restore venue: URL pair > localStorage > active selection
+    let initial = activeKind();
+    const saved = localStorage.getItem(VENUE_LS_KEY);
+    const urlPair = new URLSearchParams(window.location.search).get("pair");
+    if (urlPair) {
+      // URL wins — keep whatever venue the URL pair belongs to
+      initial = activeKind();
+    } else if (saved === "crypto" || saved === "stocks") {
+      initial = saved;
+    }
+    applyFilter(initial);
+
+    tabs.forEach((tab) => {
+      tab.addEventListener("click", () => {
+        const venue = tab.dataset.venue;
+        localStorage.setItem(VENUE_LS_KEY, venue);
+        applyFilter(venue);
+      });
+    });
   })();
 
   els.pair.addEventListener("change", () => loadPair(currentPair(), currentTimeframe()));
