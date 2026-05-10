@@ -28,6 +28,12 @@ Tools (read-only unless tagged ❗):
     query_trade_journal(sql)           read-only SQL on trade_journal
     get_regime_history(days)           regime transitions over time
 
+  ── Stocks (Shark + Wheel) ─────────────────────────────────────
+    get_combined_portfolio()           crypto + stocks equity, drawdown, breaker
+    get_stock_positions()              Alpaca + wheel positions (read-only)
+    get_stock_pnl(days)                Stock P&L from stocks/memory/TRADE-LOG.md
+    get_wheel_status()                 open puts/calls/shares + cumulative premium
+
 Authentication: HERMES_MCP_KEY env var (required). All tool calls are
 logged to user_data/logs/hermes_mcp.log.
 
@@ -755,6 +761,225 @@ async def get_regime_history(days: int = 30) -> list[dict]:
             last_regime = rg
     _audit("get_regime_history", {"days": days}, f"{len(transitions)} transitions")
     return transitions
+
+
+# ---------------------------------------------------------------------------
+# Stocks subsystem (Shark + Wheel) — read-only views
+# ---------------------------------------------------------------------------
+
+
+_STOCKS_ROOT = ROOT_DIR / "stocks"
+_WHEEL_STATE_DIR = _STOCKS_ROOT / "wheel" / "state"
+_TRADE_LOG_PATH = _STOCKS_ROOT / "memory" / "TRADE-LOG.md"
+
+
+def _read_json_file(path: Path) -> Any:
+    try:
+        if not path.is_file():
+            return None
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("read %s failed: %s", path, exc)
+        return None
+
+
+def _file_age_seconds(path: Path) -> int | None:
+    try:
+        return int(datetime.now(timezone.utc).timestamp() - path.stat().st_mtime) if path.is_file() else None
+    except OSError:
+        return None
+
+
+@mcp.tool()
+async def get_combined_portfolio() -> dict:
+    """Combined crypto + stocks portfolio status, drawdown, and risk-breaker
+    state. Reads `user_data.modules.unified_risk` which aggregates Freqtrade
+    + Alpaca equity behind a single peak / drawdown / threshold view.
+    """
+    try:
+        sys.path.insert(0, str(ROOT_DIR))
+        from user_data.modules.unified_risk import get_combined_risk_status
+    except ImportError as exc:
+        return {"error": f"unified_risk import failed: {exc}"}
+    status = get_combined_risk_status()
+    _audit("get_combined_portfolio", {},
+           f"total=${status['total_equity']:.0f} dd={status['combined_drawdown_pct']}%")
+    return status
+
+
+@mcp.tool()
+async def get_stock_positions() -> list[dict]:
+    """Current Alpaca + wheel stock positions from disk-fed state files.
+
+    Returns one entry per open position with kind (short_put, short_call,
+    long_shares), strike, expiry, qty, entry_credit, contract_symbol.
+    """
+    pos_file = _WHEEL_STATE_DIR / "positions.json"
+    raw = _read_json_file(pos_file) or []
+    if not isinstance(raw, list):
+        raw = []
+    out = []
+    for p in raw:
+        out.append({
+            "kind": p.get("kind"),
+            "underlying": p.get("underlying"),
+            "qty": p.get("qty"),
+            "strike": p.get("strike"),
+            "expiry": p.get("expiry"),
+            "entry_credit_usd": float(p.get("entry_credit") or 0.0),
+            "contract": p.get("contract_symbol"),
+            "opened_at": p.get("opened_at"),
+        })
+    _audit("get_stock_positions", {}, f"{len(out)} positions")
+    return out
+
+
+@mcp.tool()
+async def get_stock_pnl(days: int = 7) -> dict:
+    """Stock P&L over the last N days, parsed from stocks/memory/TRADE-LOG.md.
+
+    Returns realized P&L from EOD snapshots + counts of BUY / SELL /
+    STOPPED actions. Wheel premium is reported separately via the wheel
+    snapshot since it lives in trades.jsonl, not the markdown log.
+    """
+    if not _TRADE_LOG_PATH.is_file():
+        return {"error": "TRADE-LOG.md missing", "days": days}
+
+    text = _TRADE_LOG_PATH.read_text(errors="replace")
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date()
+
+    # Action lines look like "[2026-05-08] BUY TSLA 10 @ $250.50 | catalyst..."
+    action_re = re.compile(
+        r"\[(\d{4}-\d{2}-\d{2})\]\s+(BUY|SELL|STOPPED|TIGHTEN|SCAN)\s+(\S+)"
+    )
+    pnl_re = re.compile(r"\*\*Day P&L:\*\*\s+([+\-]?[\d.,]+)")
+    eod_date_re = re.compile(r"###\s+(\d{4}-\d{2}-\d{2})\s+—\s+EOD")
+
+    actions = {"BUY": 0, "SELL": 0, "STOPPED": 0, "TIGHTEN": 0, "SCAN": 0}
+    realized_pnl = 0.0
+    eod_count = 0
+    cur_eod_date: datetime | None = None
+    for line in text.splitlines():
+        m = eod_date_re.search(line)
+        if m:
+            try:
+                cur_eod_date = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+            except ValueError:
+                cur_eod_date = None
+            continue
+        m = action_re.search(line)
+        if m:
+            try:
+                d = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+                if d >= cutoff:
+                    actions[m.group(2)] = actions.get(m.group(2), 0) + 1
+            except ValueError:
+                pass
+            continue
+        m = pnl_re.search(line)
+        if m and cur_eod_date and cur_eod_date >= cutoff:
+            try:
+                realized_pnl += float(m.group(1).replace(",", ""))
+                eod_count += 1
+            except ValueError:
+                pass
+
+    # Cumulative wheel premium (lives in trades.jsonl)
+    wheel_pnl = 0.0
+    trades_file = _WHEEL_STATE_DIR / "trades.jsonl"
+    if trades_file.is_file():
+        cutoff_iso = cutoff.isoformat()
+        try:
+            for line in trades_file.read_text().splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts = (rec.get("timestamp") or "")[:10]
+                if ts >= cutoff_iso:
+                    wheel_pnl += float(rec.get("pnl", 0.0) or 0.0)
+        except OSError:
+            pass
+
+    out = {
+        "days": days,
+        "shark_realized_pnl_usd": round(realized_pnl, 2),
+        "wheel_realized_pnl_usd": round(wheel_pnl, 2),
+        "total_realized_pnl_usd": round(realized_pnl + wheel_pnl, 2),
+        "eod_snapshots_in_window": eod_count,
+        "actions_in_window": actions,
+    }
+    _audit("get_stock_pnl", {"days": days},
+           f"shark=${out['shark_realized_pnl_usd']} wheel=${out['wheel_realized_pnl_usd']}")
+    return out
+
+
+@mcp.tool()
+async def get_wheel_status() -> dict:
+    """Options-wheel state — open puts, covered calls, assignments + cumulative
+    premium captured. Reads stocks/wheel/state/{account_snapshot,positions}.json.
+    """
+    snap = _read_json_file(_WHEEL_STATE_DIR / "account_snapshot.json") or {}
+    positions = _read_json_file(_WHEEL_STATE_DIR / "positions.json") or []
+    if not isinstance(positions, list):
+        positions = []
+    snap_age = _file_age_seconds(_WHEEL_STATE_DIR / "account_snapshot.json")
+
+    csps = [p for p in positions if p.get("kind") == "short_put"]
+    ccs = [p for p in positions if p.get("kind") == "short_call"]
+    shares = [p for p in positions if p.get("kind") == "long_shares"]
+
+    out = {
+        "alpaca": {
+            "cash": snap.get("cash"),
+            "buying_power": snap.get("buying_power"),
+            "portfolio_value": snap.get("portfolio_value"),
+            "paper": snap.get("paper", True),
+            "snapshot_ts": snap.get("ts"),
+            "snapshot_age_seconds": snap_age,
+        },
+        "wheel": {
+            "open_short_puts": len(csps),
+            "open_covered_calls": len(ccs),
+            "shares_held": sum(int(p.get("qty") or 0) for p in shares),
+            "cumulative_premium_usd": float(snap.get("wheel_cumulative_pnl") or 0.0),
+            "total_open_positions": len(positions),
+        },
+        "positions": positions,
+    }
+    _audit("get_wheel_status", {},
+           f"csp={len(csps)} cc={len(ccs)} shares={len(shares)}")
+    return out
+
+
+# ---------------------------------------------------------------------------
+# /health endpoint — plain HTTP, mounted on the same FastMCP ASGI app
+# ---------------------------------------------------------------------------
+
+START_TIME = datetime.now(timezone.utc).timestamp()
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health_endpoint(request):  # type: ignore[no-untyped-def]
+    """Plain HTTP health probe for systemd / Docker / load-balancer.
+    No auth required (this is a liveness check, not a tool call).
+    """
+    from starlette.responses import JSONResponse
+    tool_count = len(getattr(mcp, "_tool_manager", mcp).list_tools()) \
+        if hasattr(mcp, "list_tools") else None
+    if asyncio.iscoroutine(tool_count):
+        tool_count = await tool_count
+    if isinstance(tool_count, list):
+        tool_count = len(tool_count)
+    return JSONResponse({
+        "status": "ok",
+        "uptime_seconds": int(datetime.now(timezone.utc).timestamp() - START_TIME),
+        "tools": tool_count,
+        "trading_bot_root": str(ROOT_DIR),
+        "freqtrade_api": FREQTRADE_API,
+    })
 
 
 # ---------------------------------------------------------------------------

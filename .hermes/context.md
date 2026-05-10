@@ -124,3 +124,83 @@ Database:        query_trade_journal  get_regime_history
 - **Defer destructive action**: do not edit `config.json` by hand — go through the MCP tool. Do not stop containers — message the operator instead.
 - **Skill > prompt**: when a pattern repeats (squeeze, flash crash, regime shift), create a skill rather than re-deriving the response each time.
 - **Never bypass the risk governor**. If you think it's wrong, alert the operator, do not work around it.
+
+## 11. Stocks trading subsystem (Shark + Wheel)
+
+The stocks subsystem lives at `stocks/` within the trading-bot repo. Two
+sister components — both run on **local Ollama (Hermes-3 70B)** by default
+since the cost-aware migration on 2026-05-10. Anthropic remains opt-in via
+`SHARK_LLM_PROVIDER=anthropic` for higher-stakes decisions.
+
+### Shark — multi-agent stock analysis + execution
+
+7 LLM agents, all routed through `shark.llm.client.chat_json`:
+
+| Agent | Role | Default model |
+|-------|------|---------------|
+| `analyst_bull` | builds long thesis | hermes3:70b |
+| `analyst_bear` | stress-tests bull thesis | hermes3:70b |
+| `combined_analyst` | single-pass bull+bear+decision | hermes3:70b |
+| `debate_orchestrator` | runs N-round bull-vs-bear debate | hermes3:70b (override per role via `SHARK_DEBATE_LLM_MODEL`) |
+| `risk_debate` | aggressive/conservative/neutral perspectives | hermes3:70b |
+| `decision_arbiter` | final BUY/NO_TRADE/WAIT call | hermes3:70b |
+| `trade_reviewer` | post-hoc lesson extraction | hermes3:70b |
+
+Data: Alpaca API (OHLCV, account, options, orders), Perplexity (news intel
+in pre-market). Execution: Alpaca paper today, live after the 4-week paper
+gate. Phases: pre-market, market-open, midday, EOD, weekly-review.
+Memory: `stocks/memory/{TRADE-LOG.md, SIGNAL-LOG.md, LESSONS-LEARNED.md,
+DAILY-HANDOFF.md, KILL.flag}`.
+
+### Wheel — cash-secured puts → covered calls
+
+Mechanical options strategy on Alpaca (no LLM in the hot path).
+Targets liquid mid-IV stocks (default WHEEL_SYMBOLS=SOFI). State files at
+`stocks/wheel/state/{positions.json, trades.jsonl, account_snapshot.json,
+candles_*.json, kill_flags.json}`.
+
+Hermes crons (all `--no-agent`, zero LLM cost):
+- `wheel_snapshot`     `*/30 13-21 * * 1-5` — refresh Alpaca account snapshot
+- `wheel_candles`      `*/5 13-21 * * 1-5`  — refresh OHLC + SPY for regime
+- `wheel_sell_csps`    `0 15 * * 5`         — Friday 11 ET CSP write
+- `wheel_profit_take`  `0 14,18 * * 1-5`    — buy-to-close at 50% profit
+- `wheel_sell_calls`   `0 15 * * 1`         — Monday 11 ET covered call write
+
+### Risk management — UNIFIED
+
+A single governor at `user_data/modules/unified_risk.py` aggregates equity
+across both crypto (Freqtrade trade_journal + dry_run_wallet) and stocks
+(`account_snapshot.json`). When **combined drawdown ≥ UNIFIED_DRAWDOWN_PCT
+(default 10%)** it trips both kill switches:
+1. Posts to `/api/ops/pause` (crypto)
+2. Writes `stocks/memory/KILL.flag` (stocks + wheel)
+3. Sends a critical Slack alert
+
+Per-side guardrails still exist as belt-and-suspenders: crypto risk_governor
+8% pause, stocks 15% circuit breaker, wheel BP/collateral checks.
+
+### MCP tools for stocks
+
+- `get_combined_portfolio()` — combined crypto + stocks status + drawdown
+- `get_stock_positions()` — current Alpaca + wheel positions
+- `get_stock_pnl(days)` — stock P&L over N days from TRADE-LOG.md
+- `get_wheel_status()` — open puts/calls/shares + cumulative premium
+
+### Cross-system coordination (GPU contention)
+
+Hermes-3 70B is shared between crypto sentiment polling (every 5 min) and
+stock LLM analysis (every market-open phase). EPT training uses the GPU
+heavily. The `stocks_coordination` skill (`.hermes/skills/`) defines:
+- EPT training > stock analysis > sentiment polling (priority)
+- Stock phases wait if EPT is running (lock file at
+  `stocks/memory/.agent-running.lock` for the reverse direction)
+
+### Key files
+
+- `stocks/shark/run.py` — phase entry point
+- `stocks/shark/config.py` — env-driven settings
+- `stocks/shark/llm/client.py` — provider abstraction (Ollama / Anthropic / OpenAI / Google)
+- `stocks/shark/execution/{orders,guardrails}.py` — Alpaca order execution + hard limits
+- `stocks/wheel/runner.py` — wheel cron entry point
+- `stocks/wheel/cli.py` — `python -m wheel.cli {sell-csps, profit-take, sell-covered-calls, snapshot, candles, status}`
+- `user_data/modules/unified_risk.py` — combined-portfolio risk governor
