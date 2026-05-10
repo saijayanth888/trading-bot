@@ -73,7 +73,12 @@ async def _bounded(coro, fallback_fn, *fallback_args):
 def make_html_route(app):
     @app.get("/ops", response_class=HTMLResponse, name="ops_page")
     async def ops_page(request: Request) -> HTMLResponse:
-        return templates.TemplateResponse(request, "ops.html", {})
+        effects_enabled = os.environ.get("DASHBOARD_EFFECTS", "1").strip() not in {"0", "false", "False", ""}
+        return templates.TemplateResponse(
+            request, "ops.html",
+            {"effects_enabled": effects_enabled,
+             "shark_llm_provider": os.environ.get("SHARK_LLM_PROVIDER", "ollama")},
+        )
     return ops_page
 
 

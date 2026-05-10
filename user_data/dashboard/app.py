@@ -56,6 +56,11 @@ templates = Jinja2Templates(directory=str(HERE / "templates"))
 DEFAULT_PAIRS = os.environ.get(
     "DASHBOARD_PAIRS", "BTC/USD,ETH/USD,SOL/USD",
 ).split(",")
+# Trading dashboards prioritise data over animation. Set DASHBOARD_EFFECTS=0
+# in .env to drop the decorative effects.js layer (cursor trails, particle
+# backgrounds, etc.) — this leaves all functional UI untouched.
+EFFECTS_ENABLED = os.environ.get("DASHBOARD_EFFECTS", "1").strip() not in {"0", "false", "False", ""}
+SHARK_LLM_PROVIDER = os.environ.get("SHARK_LLM_PROVIDER", "ollama")
 DEFAULT_TIMEFRAME = os.environ.get("DASHBOARD_TIMEFRAME", "5m")
 # Stocks the chart-page dropdown will offer (Alpaca paper). Reads
 # WHEEL_SYMBOLS first so it tracks whatever the wheel cron pre-fetches.
@@ -90,6 +95,8 @@ async def index(request: Request) -> HTMLResponse:
             "stock_symbols": DEFAULT_STOCK_SYMBOLS,
             "default_timeframe": DEFAULT_TIMEFRAME,
             "ws_push_interval": int(WS_PUSH_INTERVAL),
+            "effects_enabled": EFFECTS_ENABLED,
+            "shark_llm_provider": SHARK_LLM_PROVIDER,
         },
     )
 

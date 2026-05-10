@@ -181,6 +181,14 @@ services:
     environment:
       - USER_DATA_ROOT=/freqtrade/user_data
       - STOCKS_ROOT=/freqtrade/stocks
+      # Shark LLM provider — surfaced on the Stocks card so the operator can
+      # see at a glance whether stocks is on local Ollama (default) or paid
+      # Anthropic. Read-only display; container does not call the LLM.
+      - SHARK_LLM_PROVIDER=${SHARK_LLM_PROVIDER:-ollama}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-hermes3:70b}
+      # Animation gate — operator can set DASHBOARD_EFFECTS=0 to drop the
+      # decorative effects.js layer for a data-first display.
+      - DASHBOARD_EFFECTS=${DASHBOARD_EFFECTS:-1}
       - DASHBOARD_PAIRS=${DASHBOARD_PAIRS:-BTC/USD,ETH/USD,SOL/USD}
       - DASHBOARD_TIMEFRAME=${DASHBOARD_TIMEFRAME:-5m}
       - DASHBOARD_WS_INTERVAL_SEC=${DASHBOARD_WS_INTERVAL_SEC:-30}
