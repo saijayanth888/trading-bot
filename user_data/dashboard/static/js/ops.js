@@ -1777,19 +1777,51 @@ document.addEventListener("DOMContentLoaded", () => {
   loadExpPairs().then(refreshExplainability);
   loadMcpTools();
 
-  setInterval(refreshLiveTrades, REFRESH_MS.live_trades);
-  setInterval(refreshGates, REFRESH_MS.gates);
-  setInterval(refreshCombined, REFRESH_MS.combined);
-  setInterval(refreshLLMStats, REFRESH_MS.llm);
-  setInterval(refreshCircuitBreakers, REFRESH_MS.cb);
-  setInterval(() => { refreshRegime().then(refreshSentiment); }, REFRESH_MS.regime);
-  setInterval(refreshStockRegime, REFRESH_MS.stock_regime);
-  setInterval(refreshServices, REFRESH_MS.services);
-  setInterval(refreshTraining, REFRESH_MS.training);
-  setInterval(refreshMcp,      REFRESH_MS.mcp);
-  setInterval(refreshTrades,   REFRESH_MS.trades);
-  setInterval(refreshStocks,   REFRESH_MS.stocks);
-  setInterval(refreshSparklines,    REFRESH_MS.sparklines);
-  setInterval(refreshSlackPreview,  REFRESH_MS.slack_preview);
-  setInterval(refreshExplainability, REFRESH_MS.explainability);
+  // ─── Refresh controller — one master tick, dropdown + button govern it ──
+  const REFRESH_LS_KEY = "ops.refresh_interval_ms";
+  const ALL_REFRESHERS = [
+    refreshLiveTrades, refreshGates, refreshCombined, refreshLLMStats,
+    refreshCircuitBreakers,
+    () => refreshRegime().then(refreshSentiment),
+    refreshStockRegime,
+    refreshServices, refreshTraining, refreshMcp, refreshTrades,
+    refreshStocks, refreshSparklines, refreshSlackPreview, refreshExplainability,
+  ];
+  let _masterTimer = null;
+  function _refreshAll() {
+    for (const fn of ALL_REFRESHERS) {
+      try { Promise.resolve(fn()).catch(() => {}); } catch (_) { /* noop */ }
+    }
+  }
+  function _setRefreshInterval(ms) {
+    if (_masterTimer) { clearInterval(_masterTimer); _masterTimer = null; }
+    if (ms > 0) _masterTimer = setInterval(_refreshAll, ms);
+  }
+  // Wire the dropdown + force-refresh button
+  const refreshSel = document.getElementById("refresh-interval-select");
+  const refreshBtn = document.getElementById("refresh-now-btn");
+  // Restore saved choice if any
+  if (refreshSel) {
+    const saved = localStorage.getItem(REFRESH_LS_KEY);
+    if (saved !== null && [...refreshSel.options].some(o => o.value === saved)) {
+      refreshSel.value = saved;
+    }
+    refreshSel.addEventListener("change", () => {
+      const ms = parseInt(refreshSel.value, 10) || 0;
+      localStorage.setItem(REFRESH_LS_KEY, String(ms));
+      _setRefreshInterval(ms);
+    });
+    _setRefreshInterval(parseInt(refreshSel.value, 10) || 0);
+  } else {
+    // No dropdown — fall back to default 10s
+    _setRefreshInterval(10000);
+  }
+  if (refreshBtn) {
+    refreshBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      refreshBtn.disabled = true;
+      _refreshAll();
+      setTimeout(() => { refreshBtn.disabled = false; }, 300);
+    });
+  }
 });

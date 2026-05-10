@@ -39,10 +39,42 @@
         <option value="1h">1h</option>
         <option value="1d">1d</option>
       </select>
+      <label class="refresh-control" title="Auto-refresh interval">
+        <span class="refresh-eyebrow">refresh</span>
+        <select id="refresh-interval-select" class="refresh-select">
+          <option value="5000">5s</option>
+          <option value="10000">10s</option>
+          <option value="30000" selected>30s</option>
+          <option value="60000">1m</option>
+          <option value="0">Off</option>
+        </select>
+      </label>
+      <button id="refresh-now-btn" class="mode-pill"
+              style="background:none;cursor:pointer;border:1px solid var(--border-default);"
+              title="Force refresh now">↻</button>
       <span id="mode-badge" class="mode-pill mode-paper" title="Trading mode">PAPER</span>
       <span id="ws-indicator" class="ws-pill ws-off" title="WebSocket status">offline</span>
     </div>
   </header>
+  <style>
+    .refresh-control {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 2px 6px; border-radius: 4px;
+      border: 1px solid var(--border-default);
+      background: var(--bg-card); height: 28px; box-sizing: border-box;
+    }
+    .refresh-eyebrow {
+      font-family: var(--mono); font-size: 9px; letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--text-muted); padding: 0 2px;
+    }
+    .refresh-select {
+      background: transparent; color: var(--text-primary);
+      border: none; outline: none; font-family: var(--mono);
+      font-size: 11px; padding: 0 2px; cursor: pointer;
+    }
+    #refresh-now-btn { font-size: 14px; padding: 0 8px; }
+    #refresh-now-btn:hover { background: var(--bg-card-hover) !important; }
+  </style>
 
   <section id="live-trades-strip" class="live-trades-strip" aria-label="Active trades">
     <div class="lt-header">
@@ -221,7 +253,7 @@
       wsPushInterval: {{ ws_push_interval }}
     };
   </script>
-  {% if effects_enabled %}<script src="/static/js/effects.js?v=20260510-8" defer></script>{% endif %}
-  <script src="/static/js/app.js?v=20260510-8" defer></script>
+  {% if effects_enabled %}<script src="/static/js/effects.js?v=20260510-9" defer></script>{% endif %}
+  <script src="/static/js/app.js?v=20260510-9" defer></script>
 </body>
 </html>

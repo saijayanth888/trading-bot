@@ -828,10 +828,49 @@
   refreshStocks();
   refreshLiveTrades();
   refreshStockRegime();
-  setInterval(() => getJson("/api/mode").then(applyMode).catch(() => {}), 60_000);
-  setInterval(refreshStocks, 30_000);
-  setInterval(refreshLiveTrades, 5_000);
-  setInterval(refreshStockRegime, 60_000);
+
+  // ─── Refresh controller — same dropdown UX as /ops ───────────────────
+  const REFRESH_LS_KEY = "charts.refresh_interval_ms";
+  const _refreshFns = [
+    () => getJson("/api/mode").then(applyMode).catch(() => {}),
+    refreshStocks,
+    refreshLiveTrades,
+    refreshStockRegime,
+  ];
+  let _masterTimer = null;
+  function _refreshAll() {
+    for (const fn of _refreshFns) {
+      try { Promise.resolve(fn()).catch(() => {}); } catch (_) { /* noop */ }
+    }
+  }
+  function _setRefreshInterval(ms) {
+    if (_masterTimer) { clearInterval(_masterTimer); _masterTimer = null; }
+    if (ms > 0) _masterTimer = setInterval(_refreshAll, ms);
+  }
+  const refreshSel = document.getElementById("refresh-interval-select");
+  const refreshBtn = document.getElementById("refresh-now-btn");
+  if (refreshSel) {
+    const saved = localStorage.getItem(REFRESH_LS_KEY);
+    if (saved !== null && [...refreshSel.options].some(o => o.value === saved)) {
+      refreshSel.value = saved;
+    }
+    refreshSel.addEventListener("change", () => {
+      const ms = parseInt(refreshSel.value, 10) || 0;
+      localStorage.setItem(REFRESH_LS_KEY, String(ms));
+      _setRefreshInterval(ms);
+    });
+    _setRefreshInterval(parseInt(refreshSel.value, 10) || 0);
+  } else {
+    _setRefreshInterval(30000);
+  }
+  if (refreshBtn) {
+    refreshBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      refreshBtn.disabled = true;
+      _refreshAll();
+      setTimeout(() => { refreshBtn.disabled = false; }, 300);
+    });
+  }
   loadPair(currentPair(), currentTimeframe());
   connectWs();
 })();
