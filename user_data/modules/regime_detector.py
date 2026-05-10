@@ -530,8 +530,18 @@ def _deserialise_model(blob: dict):
     model.means_ = np.asarray(blob["means"], dtype=np.float64)
     covars_arr = np.asarray(blob["covars"], dtype=np.float64)
     if cov_type == "diag":
-        # _covars_ is the public-facing attr after fitting; setting covars_ via
-        # the property requires calling _set_covars on older versions.
+        # hmmlearn quirk: `model.covars_` (property) returns 3D
+        # full-matrix diag form (n_components × n_features × n_features),
+        # but the internal `_covars_` storage that predict() consumes
+        # MUST be the 2D diag-only form (n_components × n_features). If
+        # we feed back the 3D form `.covars_.tolist()` produced at
+        # serialise time, predict() crashes with a broadcast-shape error
+        # — silently, because the regime-detector thread catches all
+        # exceptions. So extract the diagonal here on load.
+        if covars_arr.ndim == 3:
+            covars_arr = np.array([
+                np.diag(covars_arr[i]) for i in range(covars_arr.shape[0])
+            ], dtype=np.float64)
         model._covars_ = covars_arr
     else:
         model._covars_ = covars_arr
