@@ -94,3 +94,10 @@ stocks/kb/historical_bars/*.json
 stocks/memory/CONTEXT-BRIEFING.md
 stocks/memory/error.log
 stocks/memory/.*.lock
+
+# Wheel module — runtime state regenerates, but trade log stays
+stocks/wheel/state/positions.json
+stocks/wheel/state/cash_log.jsonl
+stocks/wheel/state/.lock
+stocks/wheel/__pycache__/
+stocks/wheel/state/__pycache__/

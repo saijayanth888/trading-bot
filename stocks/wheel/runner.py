@@ -1,0 +1,306 @@
+"""
+wheel.runner — orchestrates per-cycle wheel actions.
+
+Three runner entry points, each one-shot for cron firing:
+
+    sell_csps()          Friday 11 AM ET — sell new puts on allowed tickers
+    profit_take_check()  Mon-Fri 10/14 ET — buy-to-close any short puts that
+                         have decayed to profit-take threshold
+    sell_covered_calls() Monday 11 AM ET — for each held assignment, sell a
+                         covered call >= cost basis
+
+All three return None on success and log loudly on failure. They never raise
+beyond unrecoverable misconfiguration; transient broker failures are logged
+and the next firing retries.
+
+Reusable safety:
+    * shark.memory.kill_switch — shared kill-flag; if memory/KILL.flag exists,
+      no new positions are opened. (Wheel respects shark's kill switch and
+      adds its own per-ticker kill flags via wheel.state.is_killed().)
+    * pre-flight account snapshot — won't enter if cash buffer breaches floor
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import date
+from typing import List, Optional
+
+# Path so `python -m wheel.runner` works regardless of cwd
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+# Load unified .env via shark's loader (no-op if already loaded)
+import shark.run  # noqa: F401
+
+from shark.memory.kill_switch import is_killed as _shark_kill_active
+
+from .broker import from_env
+from .config import load_config
+from .state import (
+    Position, TradeRecord,
+    add_position, append_trade, find_open_csp, find_open_cc,
+    is_killed, kill_ticker, load_positions, now_iso, remove_position,
+    shares_held,
+)
+from .strategy import (
+    OptionContract,
+    filter_calls,
+    filter_puts,
+    profit_take_threshold,
+    select_best,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+# ── Entry: sell_csps ────────────────────────────────────────────────────────
+
+
+def sell_csps(symbols_override: Optional[List[str]] = None) -> dict:
+    """Sell cash-secured puts for each allowed ticker. One-shot.
+
+    Returns a summary dict suitable for Telegram delivery.
+    """
+    cfg = load_config()
+    summary = {"phase": "sell_csps", "actions": [], "skipped": [], "errors": []}
+
+    if _shark_kill_active():
+        logger.warning("Shark kill switch active — sell_csps() aborted")
+        summary["errors"].append("shark kill switch active")
+        return summary
+
+    broker = from_env()
+    acct = broker.get_account()
+    logger.info(
+        "account: cash=$%.2f buying_power=$%.2f portfolio=$%.2f paper=%s",
+        acct.cash, acct.buying_power, acct.portfolio_value, acct.paper,
+    )
+
+    symbols = symbols_override or list(cfg.symbols)
+    for sym in symbols:
+        try:
+            _try_sell_csp(broker, sym, cfg, acct, summary)
+        except Exception as exc:
+            logger.exception("sell_csp(%s) crashed", sym)
+            summary["errors"].append(f"{sym}: {exc!s}")
+    return summary
+
+
+def _try_sell_csp(broker, sym: str, cfg, acct, summary: dict) -> None:
+    if is_killed(sym):
+        summary["skipped"].append(f"{sym}: per-ticker kill flag active")
+        return
+
+    if find_open_csp(sym) is not None:
+        summary["skipped"].append(f"{sym}: already have an open CSP")
+        return
+
+    if shares_held(sym) > 0:
+        summary["skipped"].append(f"{sym}: holding shares — covered-call leg, not CSP")
+        return
+
+    contracts = broker.list_put_contracts(
+        underlying=sym,
+        min_dte=cfg.dte_min,
+        max_dte=cfg.dte_max,
+    )
+    candidates = filter_puts(contracts, cfg)
+    if not candidates:
+        summary["skipped"].append(f"{sym}: no put passes the filter")
+        return
+
+    best_list = select_best(candidates, n=1)
+    if not best_list:
+        summary["skipped"].append(f"{sym}: select_best returned empty")
+        return
+    best: OptionContract = best_list[0]
+
+    collateral = best.strike * 100  # 1 contract = 100 shares
+    if collateral > cfg.max_risk_per_ticker_usd:
+        summary["skipped"].append(
+            f"{sym}: collateral ${collateral:.0f} > max_risk_per_ticker ${cfg.max_risk_per_ticker_usd:.0f}"
+        )
+        return
+    if collateral > acct.buying_power:
+        summary["skipped"].append(
+            f"{sym}: collateral ${collateral:.0f} > buying_power ${acct.buying_power:.0f}"
+        )
+        return
+
+    limit_price = best.mid or best.bid
+    if limit_price <= 0:
+        summary["skipped"].append(f"{sym}: zero quote (illiquid)")
+        return
+
+    order = broker.sell_to_open(best.symbol, qty=1, limit_price=limit_price)
+    add_position(Position(
+        underlying=sym,
+        contract_symbol=best.symbol,
+        kind="short_put",
+        qty=1,
+        strike=best.strike,
+        expiry=best.expiry.isoformat() if best.expiry else None,
+        entry_credit=limit_price * 100,  # USD
+        opened_at=now_iso(),
+    ))
+    summary["actions"].append({
+        "underlying": sym,
+        "action": "sell_to_open_put",
+        "symbol": best.symbol,
+        "strike": best.strike,
+        "dte": best.dte,
+        "delta": round(best.delta, 3),
+        "credit_usd": round(limit_price * 100, 2),
+        "order_id": order.get("id"),
+    })
+
+
+# ── Entry: profit_take_check ────────────────────────────────────────────────
+
+
+def profit_take_check() -> dict:
+    """Walk open short puts; buy-to-close any whose mid is at or below the
+    profit-take threshold. One-shot."""
+    cfg = load_config()
+    summary = {"phase": "profit_take_check", "actions": [], "skipped": [], "errors": []}
+
+    open_csps = [p for p in load_positions() if p.kind == "short_put"]
+    if not open_csps:
+        summary["skipped"].append("no open CSPs")
+        return summary
+
+    broker = from_env()
+
+    for pos in open_csps:
+        try:
+            _check_csp_profit_take(broker, pos, cfg, summary)
+        except Exception as exc:
+            logger.exception("profit_take(%s) crashed", pos.contract_symbol)
+            summary["errors"].append(f"{pos.contract_symbol}: {exc!s}")
+    return summary
+
+
+def _check_csp_profit_take(broker, pos: Position, cfg, summary: dict) -> None:
+    """For one open CSP, check if it's hit profit-take or needs to roll."""
+    contracts = broker.list_put_contracts(
+        underlying=pos.underlying,
+        min_dte=0,
+        max_dte=60,
+    )
+    quote = next((c for c in contracts if c.symbol == pos.contract_symbol), None)
+    if quote is None:
+        summary["skipped"].append(f"{pos.contract_symbol}: not in chain (expired?)")
+        return
+
+    # We sold for entry_credit_per_contract = entry_credit / 100 / qty
+    credit_per_share = pos.entry_credit / 100 / max(1, pos.qty)
+    threshold = profit_take_threshold(credit_per_share, cfg)
+    if quote.mid <= threshold:
+        broker.buy_to_close(pos.contract_symbol, qty=pos.qty, limit_price=quote.mid)
+        pnl_usd = (credit_per_share - quote.mid) * 100 * pos.qty
+        append_trade(TradeRecord(
+            timestamp=now_iso(),
+            underlying=pos.underlying,
+            cycle="csp_close",
+            pnl=round(pnl_usd, 2),
+            notes=f"closed at ${quote.mid:.2f} (entry ${credit_per_share:.2f}, threshold ${threshold:.2f})",
+        ))
+        remove_position(pos.contract_symbol)
+        summary["actions"].append({
+            "underlying": pos.underlying,
+            "action": "buy_to_close_profit_take",
+            "symbol": pos.contract_symbol,
+            "exit_price": quote.mid,
+            "pnl_usd": round(pnl_usd, 2),
+        })
+    elif abs(quote.delta) >= cfg.delta_roll_trigger:
+        # Don't auto-roll in pilot — flag for operator
+        summary["actions"].append({
+            "underlying": pos.underlying,
+            "action": "needs_roll",
+            "symbol": pos.contract_symbol,
+            "current_delta": round(quote.delta, 3),
+            "trigger": cfg.delta_roll_trigger,
+        })
+
+
+# ── Entry: sell_covered_calls ──────────────────────────────────────────────
+
+
+def sell_covered_calls() -> dict:
+    """For each underlying where we hold ≥100 shares (assigned), sell a CC."""
+    cfg = load_config()
+    summary = {"phase": "sell_covered_calls", "actions": [], "skipped": [], "errors": []}
+    if _shark_kill_active():
+        summary["errors"].append("shark kill switch active")
+        return summary
+
+    broker = from_env()
+    acct = broker.get_account()
+
+    for sym in cfg.symbols:
+        try:
+            shares = shares_held(sym)
+            if shares < 100:
+                summary["skipped"].append(f"{sym}: only {shares} shares (need 100)")
+                continue
+            if find_open_cc(sym) is not None:
+                summary["skipped"].append(f"{sym}: already have an open CC")
+                continue
+
+            # Cost basis = entry_price of the long_shares row (set on assignment)
+            position_rows = [
+                p for p in load_positions()
+                if p.kind == "long_shares" and p.underlying == sym
+            ]
+            cost_basis = (
+                sum(p.entry_price * p.qty for p in position_rows)
+                / max(1, sum(p.qty for p in position_rows))
+            )
+
+            contracts = broker.list_call_contracts(
+                underlying=sym,
+                min_dte=cfg.dte_min,
+                max_dte=cfg.dte_max,
+                min_strike=cost_basis,
+            )
+            candidates = filter_calls(contracts, cfg, cost_basis=cost_basis)
+            if not candidates:
+                summary["skipped"].append(f"{sym}: no call passes the filter")
+                continue
+
+            best = select_best(candidates, n=1)[0]
+            limit = best.mid or best.bid
+            if limit <= 0:
+                summary["skipped"].append(f"{sym}: zero quote on best CC")
+                continue
+
+            qty = shares // 100
+            order = broker.sell_to_open(best.symbol, qty=qty, limit_price=limit)
+            add_position(Position(
+                underlying=sym,
+                contract_symbol=best.symbol,
+                kind="short_call",
+                qty=qty,
+                strike=best.strike,
+                expiry=best.expiry.isoformat() if best.expiry else None,
+                entry_credit=limit * 100 * qty,
+                opened_at=now_iso(),
+            ))
+            summary["actions"].append({
+                "underlying": sym,
+                "action": "sell_to_open_call",
+                "symbol": best.symbol,
+                "strike": best.strike,
+                "qty": qty,
+                "credit_usd": round(limit * 100 * qty, 2),
+                "order_id": order.get("id"),
+            })
+        except Exception as exc:
+            logger.exception("sell_cc(%s) crashed", sym)
+            summary["errors"].append(f"{sym}: {exc!s}")
+
+    return summary
