@@ -135,9 +135,19 @@ class Settings:
     alpaca_api_key: str
     alpaca_secret_key: str
     alpaca_data_feed: str
-    anthropic_api_key: str
+    anthropic_api_key: str            # optional once SHARK_LLM_PROVIDER=ollama
     claude_model: str
     perplexity_api_key: str
+
+    # ----- LLM provider routing -----
+    # Default is local Ollama (zero cost, same Hermes-3 model the crypto
+    # sentiment engine uses). Switch to "anthropic" only if you specifically
+    # want Claude for higher decision quality; cost is ~$0.50/day at typical
+    # cadence (see docs/SETUP-GUIDE.md).
+    llm_provider: str
+    ollama_model: str
+    ollama_fast_model: str
+    ollama_base_url: str
 
     # ----- Notifications -----
     notify_email: str
@@ -321,6 +331,12 @@ def _load_from_env() -> Settings:
         anthropic_api_key=_env_str("ANTHROPIC_API_KEY"),
         claude_model=_env_str("CLAUDE_MODEL", "claude-sonnet-4-6"),
         perplexity_api_key=_env_str("PERPLEXITY_API_KEY"),
+
+        # LLM provider (default: local Ollama, zero cost)
+        llm_provider=_env_str("SHARK_LLM_PROVIDER", "ollama"),
+        ollama_model=_env_str("OLLAMA_MODEL", "hermes3:70b"),
+        ollama_fast_model=_env_str("OLLAMA_FAST_MODEL", "hermes3:8b"),
+        ollama_base_url=_env_str("OLLAMA_BASE_URL", "http://localhost:11434"),
 
         # Notifications
         notify_email=_env_str("NOTIFY_EMAIL"),

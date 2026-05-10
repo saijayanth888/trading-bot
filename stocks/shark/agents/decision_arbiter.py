@@ -1,17 +1,22 @@
 """
-Decision Arbiter — final GO/NO-GO trading decision using Claude.
+Decision Arbiter — final GO/NO-GO trading decision via the configured LLM
+provider (default: local Ollama / Hermes-3 70B).
 
 Synthesizes bull thesis, bear thesis, and risk manager output to make a
 disciplined, high-conviction final call. Enforces confidence and risk thresholds.
 """
 
 import json
-import os
 import logging
 from typing import Any
 
-import anthropic
+try:
+    import anthropic as _anthropic_lib
+except ImportError:
+    _anthropic_lib = None
+
 from shark.config import get_settings
+from shark.llm.client import chat_json
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +71,6 @@ def make_decision(
             "thesis_summary": f"NO_TRADE — {symbol} failed risk checks.",
         }
 
-    client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-
     system_prompt = (
         "You are the final decision-maker for a disciplined trading fund. "
         "You receive analysis from a bull analyst, a bear analyst, and a risk manager. "
@@ -120,22 +123,14 @@ Rules:
 - Do not include any text outside the JSON object."""
 
     try:
-        cfg = get_settings()
-        response = client.messages.create(
-            model=cfg.claude_model,
+        raw_text, _usage, _model = chat_json(
+            system_prompt=system_prompt,
+            user_message=user_prompt,
             max_tokens=800,
             temperature=0.2,
-            system=[
-                {
-                    "type": "text",
-                    "text": system_prompt,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-            messages=[{"role": "user", "content": user_prompt}],
+            role="arbiter",
         )
-
-        raw_text = response.content[0].text.strip()
+        raw_text = (raw_text or "").strip()
 
         # Strip markdown code fences if present
         if raw_text.startswith("```"):
@@ -200,7 +195,9 @@ Rules:
             "error": str(exc),
         }
 
-    except anthropic.APIError as exc:
+    except (
+        _anthropic_lib.APIError if _anthropic_lib else Exception
+    ) as exc:  # type: ignore[misc]
         logger.error("Anthropic API error in decision arbiter for %s: %s", symbol, exc)
         return {
             "decision": "NO_TRADE",

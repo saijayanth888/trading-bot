@@ -1,14 +1,20 @@
 """
-Bull Analyst Agent — generates a bullish thesis for a given symbol using Claude.
+Bull Analyst Agent — generates a bullish thesis for a given symbol via the
+provider-agnostic shark.llm.client. Default provider is local Ollama
+(hermes3:70b); set SHARK_LLM_PROVIDER=anthropic in .env to route to Claude.
 """
 
 import json
-import os
 import logging
 from typing import Any
 
-import anthropic
+try:
+    import anthropic as _anthropic_lib
+except ImportError:  # safety net — anthropic SDK is optional now
+    _anthropic_lib = None
+
 from shark.config import get_settings
+from shark.llm.client import chat_json
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +27,9 @@ def generate_bull_thesis(
     """
     Generate a bullish investment thesis for the given symbol.
 
-    Uses Claude with a cached system prompt to produce a structured JSON
-    bull thesis including target price, entry zone, catalysts, and confidence.
+    Uses the configured LLM provider (default: local Ollama / Hermes-3 70B)
+    to produce a structured JSON bull thesis including target price, entry
+    zone, catalysts, and confidence.
 
     Args:
         symbol: Ticker symbol (e.g. "AAPL").
@@ -34,8 +41,6 @@ def generate_bull_thesis(
         timeframe_days, confidence, supporting_data.
         On failure: includes an "error" key and confidence=0.0.
     """
-    client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-
     system_prompt = (
         "You are an experienced bullish equity analyst at a top hedge fund. "
         "Your job is to find compelling long opportunities and build conviction. "
@@ -69,22 +74,13 @@ Return ONLY a valid JSON object with this exact structure:
 Be specific about price levels based on the market data provided. Do not include any text outside the JSON object."""
 
     try:
-        cfg = get_settings()
-        response = client.messages.create(
-            model=cfg.claude_model,
+        raw_text, _usage, _model = chat_json(
+            system_prompt=system_prompt,
+            user_message=user_prompt,
             max_tokens=1000,
             temperature=0.3,
-            system=[
-                {
-                    "type": "text",
-                    "text": system_prompt,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-            messages=[{"role": "user", "content": user_prompt}],
         )
-
-        raw_text = response.content[0].text.strip()
+        raw_text = (raw_text or "").strip()
 
         # Strip markdown code fences if present
         if raw_text.startswith("```"):
@@ -123,8 +119,10 @@ Be specific about price levels based on the market data provided. Do not include
             "error": f"JSON parse error: {exc}",
         }
 
-    except anthropic.APIError as exc:
-        logger.error("Anthropic API error in bull analyst for %s: %s", symbol, exc)
+    except (
+        _anthropic_lib.APIError if _anthropic_lib else Exception
+    ) as exc:  # type: ignore[misc]
+        logger.error("LLM API error in bull analyst for %s: %s", symbol, exc)
         return {
             "symbol": symbol,
             "thesis": "",

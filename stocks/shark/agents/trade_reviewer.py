@@ -66,20 +66,19 @@ def review_closed_trade(
     pnl_pct = float(trade.get("pnl_pct", 0.0))
     exit_reason = trade.get("exit_reason", "unknown")
 
-    # Try AI review first, fall back to rule-based
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if api_key and _anthropic_lib is not None:
-        try:
-            return _ai_review(trade, market_context)
-        except Exception as exc:
-            logger.warning("AI review failed, using rule-based: %s", exc)
+    # AI review via configured LLM provider (Ollama by default).
+    # Fall back to rule-based on any failure (network, parse, etc.).
+    try:
+        return _ai_review(trade, market_context)
+    except Exception as exc:
+        logger.warning("AI review failed, using rule-based: %s", exc)
 
     return _rule_based_review(trade)
 
 
 def _ai_review(trade: dict[str, Any], market_context: str) -> dict[str, Any]:
-    """Use Claude to analyze the trade."""
-    client = _anthropic_lib.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    """Use the configured LLM (default: local Ollama / Hermes-3) to analyze the trade."""
+    from shark.llm.client import chat_json
 
     prompt = f"""Analyze this completed trade:
 
@@ -101,16 +100,13 @@ Return JSON:
 
 Grading: A=great execution, B=good but improvable, C=mediocre, D=poor execution, F=rule violation"""
 
-    cfg = get_settings()
-    response = client.messages.create(
-        model=cfg.claude_model,
+    raw, _usage, _model = chat_json(
+        system_prompt=_REVIEW_SYSTEM_PROMPT,
+        user_message=prompt,
         max_tokens=600,
         temperature=0.3,
-        system=[{"type": "text", "text": _REVIEW_SYSTEM_PROMPT}],
-        messages=[{"role": "user", "content": prompt}],
     )
-
-    raw = response.content[0].text.strip()
+    raw = (raw or "").strip()
     if raw.startswith("```"):
         raw = "\n".join(l for l in raw.splitlines() if not l.startswith("```")).strip()
 

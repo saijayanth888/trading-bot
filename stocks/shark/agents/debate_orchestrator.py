@@ -75,7 +75,7 @@ def _run_bull_round(
     total_rounds: int,
 ) -> dict[str, Any]:
     """Run one bull analyst round. Returns structured bull argument dict."""
-    client = _anthropic_lib.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+    from shark.llm.client import chat_json
 
     counter_section = ""
     if bear_last_argument:
@@ -113,14 +113,14 @@ Return ONLY this JSON:
 }}"""
 
     try:
-        response = client.messages.create(
-            model=get_settings().claude_model,
+        raw, _usage, _model = chat_json(
+            system_prompt=_BULL_SYSTEM,
+            user_message=prompt,
             max_tokens=800,
             temperature=0.4,
-            system=[{"type": "text", "text": _BULL_SYSTEM, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": prompt}],
+            role="debate",
         )
-        raw = response.content[0].text.strip()
+        raw = (raw or "").strip()
         if raw.startswith("```"):
             raw = "\n".join(l for l in raw.splitlines() if not l.startswith("```")).strip()
         result = json.loads(raw)
@@ -148,7 +148,7 @@ def _run_bear_round(
     total_rounds: int,
 ) -> dict[str, Any]:
     """Run one bear analyst round. Returns structured bear argument dict."""
-    client = _anthropic_lib.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+    from shark.llm.client import chat_json
 
     counter_section = ""
     if bull_last_argument:
@@ -187,14 +187,14 @@ Return ONLY this JSON:
 }}"""
 
     try:
-        response = client.messages.create(
-            model=get_settings().claude_model,
+        raw, _usage, _model = chat_json(
+            system_prompt=_BEAR_SYSTEM,
+            user_message=prompt,
             max_tokens=800,
             temperature=0.4,
-            system=[{"type": "text", "text": _BEAR_SYSTEM, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": prompt}],
+            role="debate",
         )
-        raw = response.content[0].text.strip()
+        raw = (raw or "").strip()
         if raw.startswith("```"):
             raw = "\n".join(l for l in raw.splitlines() if not l.startswith("```")).strip()
         result = json.loads(raw)
@@ -223,7 +223,7 @@ def _run_arbiter(
     lessons: list[str],
 ) -> dict[str, Any]:
     """Final decision after the debate. Returns trade decision dict."""
-    client = _anthropic_lib.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+    from shark.llm.client import chat_json
 
     lessons_block = ""
     if lessons:
@@ -268,14 +268,14 @@ Rules:
 - NO_TRADE if risks outweigh the opportunity"""
 
     try:
-        response = client.messages.create(
-            model=get_settings().claude_model,
+        raw, _usage, _model = chat_json(
+            system_prompt=_ARBITER_SYSTEM,
+            user_message=prompt,
             max_tokens=1000,
             temperature=0.2,
-            system=[{"type": "text", "text": _ARBITER_SYSTEM, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": prompt}],
+            role="arbiter",
         )
-        raw = response.content[0].text.strip()
+        raw = (raw or "").strip()
         if raw.startswith("```"):
             raw = "\n".join(l for l in raw.splitlines() if not l.startswith("```")).strip()
         result = json.loads(raw)

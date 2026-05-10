@@ -8,7 +8,8 @@ Allows Shark to use different LLM providers for different agent roles:
   - Risk review → configurable per use case
 
 Providers:
-  - anthropic (default): Claude models via Anthropic API
+  - ollama (default): local Hermes-3 / Llama models via Ollama (zero cost)
+  - anthropic: Claude models via Anthropic API
   - openai: GPT models via OpenAI API
   - google: Gemini models via Google AI API
 
@@ -270,10 +271,97 @@ class GoogleClient(LLMClient):
 
 
 # ---------------------------------------------------------------------------
+# Ollama (local — zero-cost inference via Hermes-3 / Llama family)
+# ---------------------------------------------------------------------------
+
+class OllamaClient(LLMClient):
+    """Local LLM via the Ollama REST API.
+
+    Designed for the same Hermes-3 model the crypto-side sentiment engine
+    uses, so the GPU stays warm. Tool-use is implemented via JSON-schema
+    prompting (Hermes-3 follows schemas reliably) — Ollama's /api/chat
+    doesn't have native function-calling.
+    """
+
+    DEFAULT_BASE_URL = "http://localhost:11434"
+
+    def __init__(self, model: str = "hermes3:70b", **kwargs):
+        super().__init__(model, **kwargs)
+        self.base_url = kwargs.get(
+            "base_url", os.environ.get("OLLAMA_BASE_URL", self.DEFAULT_BASE_URL),
+        ).rstrip("/")
+        self.timeout = float(kwargs.get("timeout", os.environ.get("OLLAMA_TIMEOUT_S", "180")))
+        try:
+            import requests  # noqa: F401  pylint: disable=unused-import
+            self._lib_ok = True
+        except ImportError:
+            self._lib_ok = False
+            logger.warning("OllamaClient: `requests` not available; chat() will raise")
+
+    @property
+    def provider_name(self) -> str:
+        return "ollama"
+
+    def chat(self, system_prompt, user_message, max_tokens=1000, temperature=0.3, **kwargs):
+        if not self._lib_ok:
+            raise RuntimeError("OllamaClient requires the `requests` package")
+        import requests
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            "stream": False,
+            "options": {
+                "temperature": float(temperature),
+                "num_predict": int(max_tokens),
+            },
+        }
+        keep_alive = kwargs.get("keep_alive")
+        if keep_alive is not None:
+            payload["keep_alive"] = keep_alive
+        resp = requests.post(
+            f"{self.base_url}/api/chat", json=payload, timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        content = (data.get("message") or {}).get("content", "") or ""
+        usage = {
+            "input_tokens": int(data.get("prompt_eval_count") or 0),
+            "output_tokens": int(data.get("eval_count") or 0),
+        }
+        return LLMResponse(content, self.model, usage)
+
+    def chat_with_tools(self, system_prompt, user_message, tools, max_tokens=1000,
+                        temperature=0.3, **kwargs):
+        # Ollama doesn't have an Anthropic-equivalent "tool_choice=any" guarantee,
+        # but Hermes-3 reliably follows JSON-schema instructions. Embed the
+        # schema in the prompt and request a JSON object response.
+        if not tools:
+            return self.chat(system_prompt, user_message, max_tokens, temperature)
+        # Use the first tool as the target schema (matches AnthropicClient behavior)
+        tool = tools[0]
+        schema = tool.get("input_schema", {})
+        enhanced_user = (
+            f"{user_message}\n\n"
+            f"Respond with a single JSON object matching this exact schema "
+            f"(no prose, no markdown, no code-fence):\n"
+            f"{json.dumps(schema, indent=2)}"
+        )
+        # Tighten temperature for JSON faithfulness
+        return self.chat(
+            system_prompt, enhanced_user, max_tokens=max_tokens,
+            temperature=min(0.2, float(temperature)), **kwargs,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
 _PROVIDERS = {
+    "ollama": OllamaClient,
     "anthropic": AnthropicClient,
     "openai": OpenAIClient,
     "google": GoogleClient,
@@ -296,7 +384,7 @@ def get_llm_client(
     Returns:
         LLMClient instance.
     """
-    provider = provider or os.environ.get("SHARK_LLM_PROVIDER", "anthropic")
+    provider = provider or os.environ.get("SHARK_LLM_PROVIDER", "ollama")
     provider = provider.lower()
 
     cls = _PROVIDERS.get(provider)
@@ -308,9 +396,10 @@ def get_llm_client(
 
     if model is None:
         model_defaults = {
+            "ollama":    os.environ.get("OLLAMA_MODEL", "hermes3:70b"),
             "anthropic": os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6"),
-            "openai": os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
-            "google": os.environ.get("GOOGLE_MODEL", "gemini-2.0-flash"),
+            "openai":    os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+            "google":    os.environ.get("GOOGLE_MODEL", "gemini-2.0-flash"),
         }
         model = model_defaults.get(provider, "")
 
@@ -318,11 +407,61 @@ def get_llm_client(
     return cls(model=model, **kwargs)
 
 
+# ---------------------------------------------------------------------------
+# Migration shim — lets agents go from "anthropic.messages.create()" to the
+# provider-agnostic abstraction with one line of code. Minimises churn while
+# we move all 7 shark agents off the bare Anthropic SDK call path.
+# ---------------------------------------------------------------------------
+
+
+def chat_json(
+    system_prompt: str,
+    user_message: str,
+    *,
+    max_tokens: int = 1000,
+    temperature: float = 0.3,
+    role: str = "default",
+    schema_hint: str = "",
+) -> tuple[str, dict[str, int], str]:
+    """One-shot helper: run a chat against the configured provider and return
+    raw text + usage + model name. Caller does its own JSON parsing (matches
+    the existing agent code's robustness around markdown-fenced responses).
+
+    role: "default" | "debate" | "arbiter" | "risk" — picks the right env-var
+          override. Falls back to SHARK_LLM_PROVIDER if no role-specific one.
+    schema_hint: optional JSON-schema text appended to the user message so
+          local models (Hermes-3) reliably return parseable output. Empty
+          string = caller already embeds the schema in user_message.
+    """
+    role = (role or "default").lower()
+    pickers = {
+        "default": get_llm_client,
+        "debate":  get_debate_client,
+        "arbiter": get_arbiter_client,
+        "risk":    get_risk_client,
+    }
+    client = pickers.get(role, get_llm_client)()
+    user = user_message
+    if schema_hint and client.provider_name == "ollama":
+        user = (
+            f"{user_message}\n\n"
+            f"Respond with a single JSON object matching this exact schema "
+            f"(no prose, no markdown, no code-fence):\n{schema_hint}"
+        )
+    resp = client.chat(
+        system_prompt=system_prompt,
+        user_message=user,
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
+    return resp.content, resp.usage, client.model
+
+
 # Role-based client helpers
 def get_debate_client(**kwargs) -> LLMClient:
     """Get the LLM client configured for debate rounds (can be a cheaper model)."""
     provider = os.environ.get("SHARK_DEBATE_LLM_PROVIDER",
-                              os.environ.get("SHARK_LLM_PROVIDER", "anthropic"))
+                              os.environ.get("SHARK_LLM_PROVIDER", "ollama"))
     model = os.environ.get("SHARK_DEBATE_LLM_MODEL")
     return get_llm_client(provider=provider, model=model, **kwargs)
 
@@ -330,7 +469,7 @@ def get_debate_client(**kwargs) -> LLMClient:
 def get_arbiter_client(**kwargs) -> LLMClient:
     """Get the LLM client for the decision arbiter (highest quality)."""
     provider = os.environ.get("SHARK_ARBITER_LLM_PROVIDER",
-                              os.environ.get("SHARK_LLM_PROVIDER", "anthropic"))
+                              os.environ.get("SHARK_LLM_PROVIDER", "ollama"))
     model = os.environ.get("SHARK_ARBITER_LLM_MODEL")
     return get_llm_client(provider=provider, model=model, **kwargs)
 
@@ -338,6 +477,6 @@ def get_arbiter_client(**kwargs) -> LLMClient:
 def get_risk_client(**kwargs) -> LLMClient:
     """Get the LLM client for risk review."""
     provider = os.environ.get("SHARK_RISK_LLM_PROVIDER",
-                              os.environ.get("SHARK_LLM_PROVIDER", "anthropic"))
+                              os.environ.get("SHARK_LLM_PROVIDER", "ollama"))
     model = os.environ.get("SHARK_RISK_LLM_MODEL")
     return get_llm_client(provider=provider, model=model, **kwargs)

@@ -74,7 +74,7 @@ def _run_perspective(
     round_num: int,
 ) -> dict[str, Any]:
     """Run one risk perspective. Returns structured assessment."""
-    client = _anthropic_lib.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+    from shark.llm.client import chat_json
 
     others_section = ""
     for name, arg in other_arguments.items():
@@ -108,15 +108,14 @@ Return ONLY this JSON:
 }}"""
 
     try:
-        cfg = get_settings()
-        response = client.messages.create(
-            model=cfg.claude_model,
+        raw, _usage, _model = chat_json(
+            system_prompt=system_prompt,
+            user_message=prompt,
             max_tokens=600,
             temperature=0.3,
-            system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": prompt}],
+            role="risk",
         )
-        raw = response.content[0].text.strip()
+        raw = (raw or "").strip()
         if raw.startswith("```"):
             raw = "\n".join(l for l in raw.splitlines() if not l.startswith("```")).strip()
         result = json.loads(raw)
@@ -145,7 +144,7 @@ def _run_risk_judge(
     debate_transcript: str,
 ) -> dict[str, Any]:
     """Synthesize the 3-way risk debate into a final recommendation."""
-    client = _anthropic_lib.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+    from shark.llm.client import chat_json
 
     prompt = f"""Synthesize this 3-way risk debate for {symbol} into a final risk recommendation.
 
@@ -172,15 +171,14 @@ Return ONLY this JSON:
 }}"""
 
     try:
-        cfg = get_settings()
-        response = client.messages.create(
-            model=cfg.claude_model,
+        raw, _usage, _model = chat_json(
+            system_prompt=_JUDGE_SYSTEM,
+            user_message=prompt,
             max_tokens=600,
             temperature=0.2,
-            system=[{"type": "text", "text": _JUDGE_SYSTEM, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": prompt}],
+            role="arbiter",
         )
-        raw = response.content[0].text.strip()
+        raw = (raw or "").strip()
         if raw.startswith("```"):
             raw = "\n".join(l for l in raw.splitlines() if not l.startswith("```")).strip()
         result = json.loads(raw)

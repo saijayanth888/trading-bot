@@ -226,10 +226,15 @@ def analyze_symbol(
         violations = risk_check.get("violations", ["risk check failed"])
         return _no_trade_result(symbol, f"Risk check failed: {'; '.join(violations)}")
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key or _anthropic_lib is None:
-        logger.info("ANTHROPIC_API_KEY not set — using rule-based analysis for %s", symbol)
-        return _rule_based_analyze(symbol, technicals, perplexity_intel, risk_check)
+    # LLM provider routing — when SHARK_LLM_PROVIDER=ollama (default), no API
+    # key is needed. When SHARK_LLM_PROVIDER=anthropic, fall back to rule-based
+    # if the key is absent so we never crash mid-phase.
+    provider = os.environ.get("SHARK_LLM_PROVIDER", "ollama").lower()
+    if provider == "anthropic":
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key or _anthropic_lib is None:
+            logger.info("Anthropic provider chosen but key/lib missing — rule-based for %s", symbol)
+            return _rule_based_analyze(symbol, technicals, perplexity_intel, risk_check)
 
     # --- Debate mode: route to adversarial debate if configured ---
     debate_rounds = int(os.environ.get("SHARK_DEBATE_ROUNDS", "1"))
@@ -326,20 +331,16 @@ Return ONLY this JSON (no text outside it):
 
 Rules: Only set decision=BUY if confidence >= 0.70 AND risk_reward_ratio >= 2.0."""
 
-    from shark.config import get_settings
-    cfg = get_settings()
-    client = _anthropic_lib.Anthropic(api_key=api_key)
+    from shark.llm.client import chat_json
 
     try:
-        response = client.messages.create(
-            model=cfg.claude_model,
+        raw, _usage, _model = chat_json(
+            system_prompt=_SYSTEM_PROMPT,
+            user_message=user_prompt,
             max_tokens=1200,
             temperature=0.2,
-            system=[{"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": user_prompt}],
         )
-
-        raw = response.content[0].text.strip()
+        raw = (raw or "").strip()
         if raw.startswith("```"):
             lines = raw.splitlines()
             raw = "\n".join(l for l in lines if not l.startswith("```")).strip()

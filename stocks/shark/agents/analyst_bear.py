@@ -1,14 +1,20 @@
 """
-Bear Analyst Agent — stress-tests bull theses and generates bearish counter-analysis.
+Bear Analyst Agent — stress-tests bull theses via the provider-agnostic
+shark.llm.client. Default provider is local Ollama (hermes3:70b); set
+SHARK_LLM_PROVIDER=anthropic to route to Claude.
 """
 
 import json
-import os
 import logging
 from typing import Any
 
-import anthropic
+try:
+    import anthropic as _anthropic_lib
+except ImportError:
+    _anthropic_lib = None
+
 from shark.config import get_settings
+from shark.llm.client import chat_json
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +40,6 @@ def generate_bear_thesis(
         stop_recommended, invalidation_signal, confidence.
         On failure: includes an "error" key and confidence=0.0.
     """
-    client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-
     system_prompt = (
         "You are a skeptical short-seller and risk analyst. "
         "Your job is to stress-test bull theses and find every reason a trade could fail. "
@@ -68,22 +72,13 @@ Return ONLY a valid JSON object with this exact structure:
 Be specific about price levels based on the market data provided. Do not include any text outside the JSON object."""
 
     try:
-        cfg = get_settings()
-        response = client.messages.create(
-            model=cfg.claude_model,
+        raw_text, _usage, _model = chat_json(
+            system_prompt=system_prompt,
+            user_message=user_prompt,
             max_tokens=1000,
             temperature=0.3,
-            system=[
-                {
-                    "type": "text",
-                    "text": system_prompt,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-            messages=[{"role": "user", "content": user_prompt}],
         )
-
-        raw_text = response.content[0].text.strip()
+        raw_text = (raw_text or "").strip()
 
         # Strip markdown code fences if present
         if raw_text.startswith("```"):
@@ -120,8 +115,10 @@ Be specific about price levels based on the market data provided. Do not include
             "error": f"JSON parse error: {exc}",
         }
 
-    except anthropic.APIError as exc:
-        logger.error("Anthropic API error in bear analyst for %s: %s", symbol, exc)
+    except (
+        _anthropic_lib.APIError if _anthropic_lib else Exception
+    ) as exc:  # type: ignore[misc]
+        logger.error("LLM API error in bear analyst for %s: %s", symbol, exc)
         return {
             "symbol": symbol,
             "counter_thesis": "",
