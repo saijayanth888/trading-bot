@@ -76,3 +76,14 @@ htmlcov/
 
 # --- Claude Code local settings ------------------------------------------
 .claude/settings.local.json
+
+# Auto-generated config backups (created by /ops regime-params apply)
+user_data/config.json.bak.*
+user_data/data/config-backup-*.json
+
+# Postgres / Hermes state dumps — local-only, large, never commit
+user_data/data/*.dump
+user_data/data/*.tar.gz
+
+# Hermes runtime heartbeat / pid / lock files
+user_data/state/
