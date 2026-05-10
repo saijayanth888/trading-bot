@@ -437,6 +437,36 @@ class SlackAlerter:
 # ---------------------------------------------------------------------------
 
 
+def _strip_md(s: str) -> str:
+    """Strip only the chars that would break a triple-backtick fence.
+
+    Inside a code block, Slack does NOT parse mrkdwn — underscores,
+    asterisks, etc. render literally. So we only need to neutralise
+    backticks, which would otherwise close the fence prematurely.
+    """
+    return str(s).replace("`", "")
+
+
+def _format_table(pairs: Iterable[tuple[str, str]]) -> str:
+    """Render key/value pairs as a fixed-width monospaced table.
+
+    Slack renders triple-backtick fenced blocks in monospace — perfect for
+    tabular alerts that scan top-down at-a-glance, instead of the 2-column
+    stacked grid that the old fields-array layout produced.
+    """
+    rows = [(_strip_md(k), _strip_md(v)) for k, v in pairs]
+    if not rows:
+        return ""
+    key_w = max(len(k) for k, _ in rows)
+    val_w = max(min(len(v), 60) for _, v in rows)   # cap value width for sanity
+    lines = []
+    for k, v in rows:
+        # truncate insanely long values
+        v_short = v if len(v) <= 60 else v[:57] + "..."
+        lines.append(f"{k:<{key_w}}  {v_short:<{val_w}}")
+    return "```\n" + "\n".join(lines) + "\n```"
+
+
 def _blocks(
     header: str,
     fields: Iterable[tuple[str, str]] = (),
@@ -449,32 +479,32 @@ def _blocks(
 
     Every notification answers four questions in 2 seconds:
       header        WHAT happened
-      fields        the numbers
+      fields        the numbers (rendered as a monospaced top-down table)
       delta         WHAT CHANGED since last time (vs yesterday / last hour)
       action        WHAT TO DO right now ("monitor", "no action", "investigate")
       context       when it fired (UTC clock)
+
+    Layout decisions:
+      * fields → monospaced fenced code block (table), NOT the
+        2-column stacked grid Slack's `fields` array produces. The grid
+        was visually noisy for >4 pairs and forced scanning in a Z pattern.
+      * tables are scoped to the section block they live in so divider +
+        delta + action read naturally afterwards.
     """
     out: list[dict] = [{"type": "header", "text": {"type": "plain_text", "text": header[:150]}}]
     pairs = list(fields)
     if pairs:
-        # Slack section "fields" max 10 entries; chunk if needed
-        for chunk_start in range(0, len(pairs), 10):
-            chunk = pairs[chunk_start:chunk_start + 10]
-            out.append({
-                "type": "section",
-                "fields": [
-                    {"type": "mrkdwn", "text": f"*{k}*\n{v}"} for k, v in chunk
-                ],
-            })
+        tbl = _format_table(pairs)
+        out.append({"type": "section", "text": {"type": "mrkdwn", "text": tbl[:2900]}})
     if delta:
         out.append({
             "type": "section",
-            "text": {"type": "mrkdwn", "text": f"_Δ_  {delta[:2900]}"},
+            "text": {"type": "mrkdwn", "text": f"*Δ*  {delta[:2900]}"},
         })
     if action:
         out.append({
             "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*Action:*  {action[:2900]}"},
+            "text": {"type": "mrkdwn", "text": f"*Action*  {action[:2900]}"},
         })
     for title, body in sections:
         out.append({"type": "divider"})

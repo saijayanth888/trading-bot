@@ -103,12 +103,19 @@ class TelegramAlerter:
     def notify_kill_switch(self, reason: str, actions: dict) -> bool:
         crypto = actions.get("crypto_paused", False)
         stocks = actions.get("stocks_kill_flag", False)
+        # Monospaced code block for table; values stripped of ` to avoid
+        # mid-block markup. MarkdownV2 doesn't need escapes inside ```...```.
+        table = (
+            "```\n"
+            f"Reason       {str(reason)[:50]}\n"
+            f"Crypto       {'paused (OK)' if crypto else 'NOT paused'}\n"
+            f"Stocks       {'halted (OK)' if stocks else 'NOT halted'}\n"
+            "```"
+        )
         text = (
             f"🛑 *KILL SWITCH TRIPPED*\n"
-            f"Reason: {_escape_md2(reason)}\n"
-            f"Crypto paused: {'✅' if crypto else '❌'}\n"
-            f"Stocks halted: {'✅' if stocks else '❌'}\n"
-            f"_Action_: investigate dashboard, manual reset required"
+            f"{table}\n"
+            f"*Action*: investigate dashboard, manual reset required"
         )
         return self._send(text, dedup_key="kill_switch", priority=True)
 

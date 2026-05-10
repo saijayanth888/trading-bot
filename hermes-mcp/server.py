@@ -380,18 +380,47 @@ async def get_evolution_status() -> dict:
 
 @mcp.tool()
 @_require_auth
-async def trigger_evolution_cycle() -> dict:
-    """❗ Kick off a new EPT generation — calls scripts/train_drl.py via shell."""
-    script = ROOT_DIR / "user_data" / "scripts" / "train_drl.py"
+async def trigger_evolution_cycle(mode: str = "mock") -> dict:
+    """❗ Kick off a new EPT generation — runs run_ept_generation.py synchronously.
+
+    Returns the full summary dict (champion id, fitness, leaderboard) so
+    the caller can report real numbers — not the previously misconfigured
+    fire-and-forget call that ran train_drl.py and left evolution.json
+    empty. mode='mock' uses the deterministic surrogate (default until
+    real per-agent paper-trading bots exist); mode='live' reads
+    trade_journal for real Sharpe/PF/DD.
+    """
+    script = ROOT_DIR / "user_data" / "scripts" / "run_ept_generation.py"
     if not script.exists():
         return {"error": f"script missing: {script}"}
-    proc = subprocess.Popen(
-        ["python3", str(script), "--synthetic", "--timesteps", "20000"],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        env=os.environ.copy(), cwd=str(ROOT_DIR),
-    )
-    _audit("trigger_evolution_cycle", {}, f"pid={proc.pid}")
-    return {"started": True, "pid": proc.pid, "note": "running in background"}
+    try:
+        proc = subprocess.run(
+            ["python3", str(script), "--mode", str(mode)],
+            capture_output=True, text=True, timeout=300,
+            env=os.environ.copy(), cwd=str(ROOT_DIR),
+        )
+    except subprocess.TimeoutExpired:
+        _audit("trigger_evolution_cycle", {"mode": mode}, "TIMEOUT >5min")
+        return {"error": "evolution cycle timed out after 5 minutes"}
+    except Exception as exc:
+        _audit("trigger_evolution_cycle", {"mode": mode}, f"exec failed: {exc}")
+        return {"error": f"could not execute runner: {exc}"}
+
+    if proc.returncode != 0:
+        _audit("trigger_evolution_cycle", {"mode": mode},
+               f"exit={proc.returncode} stderr={proc.stderr[-400:]}")
+        return {
+            "error": f"runner exited with code {proc.returncode}",
+            "stderr_tail": proc.stderr[-1200:],
+        }
+    try:
+        summary = json.loads(proc.stdout.strip().splitlines()[-1] if False else proc.stdout.strip()[proc.stdout.strip().rfind("{"):])
+    except Exception:
+        # fall back to raw stdout if we can't parse the JSON tail
+        summary = {"ok": True, "raw_stdout": proc.stdout[-2000:]}
+    _audit("trigger_evolution_cycle", {"mode": mode},
+           f"gen={summary.get('generation')} champ={(summary.get('champion') or {}).get('member_id')}")
+    return summary
 
 
 @mcp.tool()
