@@ -500,6 +500,176 @@ def query_trade_journal(sql: str) -> dict:
     return {"rows": serialised, "truncated": len(rows) > 1000, "n": len(rows)}
 
 
+# ─── Stocks subsystem tools — mirror hermes-mcp/server.py ─────────────────
+# Dashboard-side parity wrappers so /api/ops/mcp/<tool> returns useful data
+# instead of empty stubs. The hermes-mcp/server.py copies are authoritative
+# when called via the streamable-http MCP on port 8089.
+
+_STOCKS_ROOT = Path(os.environ.get("STOCKS_ROOT", "/freqtrade/stocks"))
+
+
+def _read_stocks_json(rel: str) -> Any:
+    p = _STOCKS_ROOT / rel
+    try:
+        if p.is_file():
+            return json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("read %s failed: %s", p, exc)
+    return None
+
+
+def get_combined_portfolio() -> dict:
+    """Combined crypto + stocks portfolio + drawdown via unified_risk."""
+    try:
+        import sys
+        if "/freqtrade" not in sys.path:
+            sys.path.insert(0, "/freqtrade")
+        from user_data.modules.unified_risk import get_combined_risk_status
+    except ImportError as exc:
+        return {"error": f"unified_risk import failed: {exc}"}
+    status = get_combined_risk_status()
+    _audit("get_combined_portfolio", {},
+           f"total=${status['total_equity']:.0f} dd={status['combined_drawdown_pct']}%")
+    return status
+
+
+def get_stock_positions() -> list[dict]:
+    """Current wheel positions from stocks/wheel/state/positions.json."""
+    raw = _read_stocks_json("wheel/state/positions.json") or []
+    if not isinstance(raw, list):
+        raw = []
+    out = [
+        {
+            "kind": p.get("kind"),
+            "underlying": p.get("underlying"),
+            "qty": p.get("qty"),
+            "strike": p.get("strike"),
+            "expiry": p.get("expiry"),
+            "entry_credit_usd": float(p.get("entry_credit") or 0.0),
+            "contract": p.get("contract_symbol"),
+            "opened_at": p.get("opened_at"),
+        }
+        for p in raw
+    ]
+    _audit("get_stock_positions", {}, f"{len(out)} positions")
+    return out
+
+
+def get_stock_pnl(days: int = 7) -> dict:
+    """Stock P&L from TRADE-LOG.md + wheel trades.jsonl over last N days."""
+    import re as _re
+    log_path = _STOCKS_ROOT / "memory" / "TRADE-LOG.md"
+    if not log_path.is_file():
+        return {"error": "TRADE-LOG.md missing", "days": days}
+
+    text = log_path.read_text(errors="replace")
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=int(days))).date()
+    action_re = _re.compile(r"\[(\d{4}-\d{2}-\d{2})\]\s+(BUY|SELL|STOPPED|TIGHTEN|SCAN)")
+    pnl_re = _re.compile(r"\*\*Day P&L:\*\*\s+([+\-]?[\d.,]+)")
+    eod_re = _re.compile(r"###\s+(\d{4}-\d{2}-\d{2})\s+—\s+EOD")
+
+    actions = {"BUY": 0, "SELL": 0, "STOPPED": 0, "TIGHTEN": 0, "SCAN": 0}
+    realized_pnl = 0.0
+    eod_count = 0
+    cur_eod = None
+    for line in text.splitlines():
+        m = eod_re.search(line)
+        if m:
+            try:
+                cur_eod = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+            except ValueError:
+                cur_eod = None
+            continue
+        m = action_re.search(line)
+        if m:
+            try:
+                d = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+                if d >= cutoff:
+                    actions[m.group(2)] = actions.get(m.group(2), 0) + 1
+            except ValueError:
+                pass
+            continue
+        m = pnl_re.search(line)
+        if m and cur_eod and cur_eod >= cutoff:
+            try:
+                realized_pnl += float(m.group(1).replace(",", ""))
+                eod_count += 1
+            except ValueError:
+                pass
+
+    wheel_pnl = 0.0
+    wheel_path = _STOCKS_ROOT / "wheel" / "state" / "trades.jsonl"
+    if wheel_path.is_file():
+        cutoff_iso = cutoff.isoformat()
+        try:
+            for line in wheel_path.read_text().splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts = (rec.get("timestamp") or "")[:10]
+                if ts >= cutoff_iso:
+                    wheel_pnl += float(rec.get("pnl", 0.0) or 0.0)
+        except OSError:
+            pass
+
+    out = {
+        "days": days,
+        "shark_realized_pnl_usd": round(realized_pnl, 2),
+        "wheel_realized_pnl_usd": round(wheel_pnl, 2),
+        "total_realized_pnl_usd": round(realized_pnl + wheel_pnl, 2),
+        "eod_snapshots_in_window": eod_count,
+        "actions_in_window": actions,
+    }
+    _audit("get_stock_pnl", {"days": days},
+           f"shark=${out['shark_realized_pnl_usd']} wheel=${out['wheel_realized_pnl_usd']}")
+    return out
+
+
+def get_wheel_status() -> dict:
+    """Wheel state: open puts/calls/shares + cumulative premium."""
+    snap = _read_stocks_json("wheel/state/account_snapshot.json") or {}
+    positions = _read_stocks_json("wheel/state/positions.json") or []
+    if not isinstance(positions, list):
+        positions = []
+
+    snap_path = _STOCKS_ROOT / "wheel" / "state" / "account_snapshot.json"
+    snap_age = None
+    try:
+        if snap_path.is_file():
+            snap_age = int(datetime.now(timezone.utc).timestamp() - snap_path.stat().st_mtime)
+    except OSError:
+        pass
+
+    csps = [p for p in positions if p.get("kind") == "short_put"]
+    ccs = [p for p in positions if p.get("kind") == "short_call"]
+    shares = [p for p in positions if p.get("kind") == "long_shares"]
+
+    out = {
+        "alpaca": {
+            "cash": snap.get("cash"),
+            "buying_power": snap.get("buying_power"),
+            "portfolio_value": snap.get("portfolio_value"),
+            "paper": snap.get("paper", True),
+            "snapshot_ts": snap.get("ts"),
+            "snapshot_age_seconds": snap_age,
+        },
+        "wheel": {
+            "open_short_puts": len(csps),
+            "open_covered_calls": len(ccs),
+            "shares_held": sum(int(p.get("qty") or 0) for p in shares),
+            "cumulative_premium_usd": float(snap.get("wheel_cumulative_pnl") or 0.0),
+            "total_open_positions": len(positions),
+        },
+        "positions": positions,
+    }
+    _audit("get_wheel_status", {},
+           f"csp={len(csps)} cc={len(ccs)} shares={len(shares)}")
+    return out
+
+
 def get_regime_history(days: int = 7) -> list[dict]:
     cutoff = datetime.now(timezone.utc) - timedelta(days=int(days))
     if not ops_db._HAVE_PG:
@@ -616,6 +786,27 @@ TOOLS: dict[str, dict[str, Any]] = {
         "func": get_regime_history, "async": False, "mutating": False,
         "params": [{"name": "days", "type": "int", "default": 7, "required": False}],
         "doc": "Regime transitions over the last N days.",
+    },
+    # ── Stocks subsystem (Shark + Wheel) — mirrors hermes-mcp/server.py ────
+    "get_combined_portfolio": {
+        "func": get_combined_portfolio, "async": False, "mutating": False,
+        "params": [],
+        "doc": "Combined crypto + stocks equity, drawdown, breaker state.",
+    },
+    "get_stock_positions": {
+        "func": get_stock_positions, "async": False, "mutating": False,
+        "params": [],
+        "doc": "Current Alpaca + wheel stock positions (read-only).",
+    },
+    "get_stock_pnl": {
+        "func": get_stock_pnl, "async": False, "mutating": False,
+        "params": [{"name": "days", "type": "int", "default": 7, "required": False}],
+        "doc": "Stock P&L over N days from stocks/memory/TRADE-LOG.md + wheel trades.jsonl.",
+    },
+    "get_wheel_status": {
+        "func": get_wheel_status, "async": False, "mutating": False,
+        "params": [],
+        "doc": "Options-wheel state — open puts/calls + cumulative premium.",
     },
 }
 
