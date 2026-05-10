@@ -20,6 +20,7 @@ const REFRESH_MS = {
   stocks:         30000,   // stocks state writes on cron tick (~5min) + nightly
   live_trades:     5000,   // top hero strip — pulse on every fill
   stock_regime:   60000,   // SPY MA bands move slowly
+  gates:          15000,   // gates change with each candle
 };
 
 const REGIME_ARROW = {
@@ -337,6 +338,137 @@ async function refreshTrades() {
   }
 
   body.innerHTML = html;
+}
+
+// ─── Entry gates matrix (per-pair × per-gate green/red grid) ──────
+function renderGatesSection(host, kind, rows, title) {
+  // host: DOM node, kind: "crypto"|"stocks", rows: [{pair, gates: [{gate, pass, detail}], ...}]
+  if (!rows || !rows.length) {
+    const empty = document.createElement("div");
+    empty.className = "muted";
+    empty.style.cssText = "padding: 12px; font-size: 12px;";
+    empty.textContent = `${title}: no pairs configured`;
+    host.appendChild(empty);
+    return;
+  }
+  const section = document.createElement("div");
+  section.className = "gates-section";
+  section.dataset.kind = kind;
+
+  const head = document.createElement("div");
+  head.className = "gates-section-head";
+  head.textContent = title;
+  section.appendChild(head);
+
+  // Build column list from the first row's gate names so we get consistent order
+  const gateNames = rows[0].gates.map(g => g.gate);
+
+  const table = document.createElement("table");
+  table.className = "gates-table";
+  table.dataset.kind = kind;
+
+  // Header
+  const thead = document.createElement("thead");
+  const trh = document.createElement("tr");
+  const cols = ["pair", "regime"].concat(gateNames).concat(["status"]);
+  for (const c of cols) {
+    const th = document.createElement("th");
+    if (gateNames.includes(c)) th.className = "gate-col";
+    th.textContent = c.replace(/_/g, " ");
+    trh.appendChild(th);
+  }
+  thead.appendChild(trh);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  for (const row of rows) {
+    const tr = document.createElement("tr");
+    tr.style.cursor = "pointer";
+
+    const tdPair = document.createElement("td");
+    tdPair.className = "pair";
+    tdPair.textContent = row.pair;
+    tr.appendChild(tdPair);
+
+    const tdReg = document.createElement("td");
+    tdReg.className = "regime";
+    tdReg.textContent = row.regime || "—";
+    tr.appendChild(tdReg);
+
+    for (const gname of gateNames) {
+      const g = row.gates.find(x => x.gate === gname);
+      const td = document.createElement("td");
+      td.style.textAlign = "center";
+      const cell = document.createElement("span");
+      cell.className = "gate-cell";
+      cell.dataset.pass = String(g?.pass);
+      cell.textContent = g?.pass === true ? "✓" : g?.pass === false ? "✗" : "—";
+      cell.title = g?.detail || "";
+      td.appendChild(cell);
+      tr.appendChild(td);
+    }
+
+    const tdSum = document.createElement("td");
+    tdSum.className = "summary";
+    if (row.n_blocking === 0) {
+      tdSum.textContent = "all pass · ready";
+      tdSum.style.color = "#3fb950";
+    } else {
+      tdSum.textContent = `${row.n_blocking}/${row.n_gates} blocking`;
+      tdSum.style.color = "#f85149";
+    }
+    tr.appendChild(tdSum);
+
+    // Detail row (revealed by tooltip via title attrs; also pre-rendered below the row)
+    const detailTr = document.createElement("tr");
+    detailTr.className = "gates-detail-row";
+    const detailTd = document.createElement("td");
+    detailTd.colSpan = cols.length;
+    if (row.n_blocking > 0) {
+      const blockers = row.gates.filter(g => g.pass === false);
+      const lines = blockers.map(b => `${b.gate}: ${b.detail}`);
+      const span = document.createElement("span");
+      span.className = "blocker";
+      span.textContent = "blocking → ";
+      detailTd.appendChild(span);
+      detailTd.appendChild(document.createTextNode(lines.join(" · ")));
+    } else {
+      detailTd.style.color = "#3fb950";
+      detailTd.textContent = "all gates pass — bot will fire on the next valid candle";
+    }
+    detailTr.appendChild(detailTd);
+
+    tbody.appendChild(tr);
+    tbody.appendChild(detailTr);
+  }
+  table.appendChild(tbody);
+  section.appendChild(table);
+  host.appendChild(section);
+}
+
+async function refreshGates() {
+  const r = await jsonFetch("/api/ops/gates");
+  const env = r.body;
+  setStatus("card-gates", env.status || "down");
+  const ageEl = document.getElementById("gates-age");
+  const body = document.getElementById("gates-body");
+  if (!body) return;
+  if (!env.data) { body.textContent = env.error || "—"; return; }
+
+  const acct = env.data.account || {};
+  if (ageEl) {
+    const breakerStr = acct.breaker_active ? " · BREAKER" : "";
+    const paperStr = acct.paper === false ? "LIVE" : "PAPER";
+    ageEl.textContent = `${acct.open_count ?? 0}/${acct.max_open ?? 6} open · ${paperStr}${breakerStr}`;
+  }
+
+  // Wipe + rerender
+  while (body.firstChild) body.removeChild(body.firstChild);
+
+  renderGatesSection(body, "crypto", env.data.crypto || [],
+    "Crypto · freqtrade FreqAI gates");
+  renderGatesSection(body, "stocks", env.data.stocks || [],
+    "Stocks · wheel CSP rules");
 }
 
 // ─── Live trades hero strip (full-width, top of page) ─────────────
@@ -1367,6 +1499,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // First-paint refreshes
   refreshLiveTrades();
+  refreshGates();
   refreshRegime().then(refreshSentiment);
   refreshStockRegime();
   refreshServices(); refreshTraining(); refreshMcp(); refreshTrades();
@@ -1377,6 +1510,7 @@ document.addEventListener("DOMContentLoaded", () => {
   loadMcpTools();
 
   setInterval(refreshLiveTrades, REFRESH_MS.live_trades);
+  setInterval(refreshGates, REFRESH_MS.gates);
   setInterval(() => { refreshRegime().then(refreshSentiment); }, REFRESH_MS.regime);
   setInterval(refreshStockRegime, REFRESH_MS.stock_regime);
   setInterval(refreshServices, REFRESH_MS.services);

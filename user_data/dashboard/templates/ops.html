@@ -782,6 +782,66 @@
         <div id="trades-body">Loading…</div>
       </section>
 
+      <!-- ── Entry gates: which gates block which pair right now ─ -->
+      <section class="ops-card wide-card" id="card-gates" data-status="ok">
+        <div class="card-head">
+          <h3 data-num="06">Entry gates · why isn't anything trading?</h3>
+          <span class="age" id="gates-age">—</span>
+        </div>
+        <div id="gates-body">Loading…</div>
+      </section>
+
+      <style>
+        .gates-section { margin-top: 14px; }
+        .gates-section:first-child { margin-top: 4px; }
+        .gates-section-head {
+          font-size: 11px; font-weight: 700;
+          letter-spacing: 0.08em; text-transform: uppercase;
+          color: var(--text-muted); margin-bottom: 8px;
+          padding-left: 8px; border-left: 3px solid;
+        }
+        .gates-section[data-kind="crypto"] .gates-section-head { border-color: #6ea2ff; color: #b8c8ee; }
+        .gates-section[data-kind="stocks"] .gates-section-head { border-color: #f4b942; color: #ecd29a; }
+        .gates-table {
+          width: 100%; border-collapse: collapse; font-family: var(--mono);
+          font-size: 12px; margin-bottom: 4px;
+        }
+        .gates-table th {
+          font-size: 10px; font-weight: 600;
+          letter-spacing: 0.06em; text-transform: uppercase;
+          color: var(--text-muted); padding: 8px 6px; text-align: left;
+          border-bottom: 1px solid var(--border-subtle);
+          white-space: nowrap;
+        }
+        .gates-table th.gate-col { text-align: center; min-width: 56px; }
+        .gates-table td {
+          padding: 6px 6px; vertical-align: middle;
+          border-bottom: 1px solid rgba(255,255,255,0.03);
+        }
+        .gates-table td.pair {
+          font-weight: 700; color: var(--text-primary);
+        }
+        .gates-table[data-kind="crypto"] td.pair { border-left: 3px solid #6ea2ff; padding-left: 8px; }
+        .gates-table[data-kind="stocks"] td.pair { border-left: 3px solid #f4b942; padding-left: 8px; }
+        .gates-table td.regime { color: var(--text-muted); font-size: 11px; }
+        .gates-table td.summary { color: var(--text-muted); font-size: 11px; text-align: right; }
+        .gate-cell {
+          display: inline-block; min-width: 40px; text-align: center;
+          font-weight: 600;
+        }
+        .gate-cell[data-pass="true"]  { color: #3fb950; }
+        .gate-cell[data-pass="false"] { color: #f85149; }
+        .gate-cell[data-pass="null"]  { color: var(--text-muted); }
+        .gates-detail-row td {
+          background: var(--bg-inset); padding: 8px 12px;
+          color: var(--text-muted); font-size: 11px; line-height: 1.6;
+          border-bottom: 1px solid var(--border-subtle);
+        }
+        .gates-detail-row .blocker {
+          color: #f85149; font-weight: 600;
+        }
+      </style>
+
       <!-- ── Stocks: shark momentum + wheel income on Alpaca ──── -->
       <section class="ops-card wide-card" id="card-stocks" data-status="ok">
         <div class="card-head">
@@ -973,7 +1033,7 @@
       tick(); setInterval(tick, 1000);
     })();
   </script>
-  <script src="/static/js/effects.js?v=20260510-1" defer></script>
-  <script src="/static/js/ops.js?v=20260510-1" defer></script>
+  <script src="/static/js/effects.js?v=20260510-2" defer></script>
+  <script src="/static/js/ops.js?v=20260510-2" defer></script>
 </body>
 </html>

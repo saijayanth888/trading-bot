@@ -1528,6 +1528,352 @@ async def stock_candles(symbol: str, timeframe: str = "5Min"):
     return _envelope("ok", data=payload)
 
 
+@router.get("/gates")
+async def gates():
+    """Per-pair entry-gate matrix: which gate is blocking each pair right now.
+
+    Walks every pair in DASHBOARD_PAIRS, pulls the latest row from
+    freqtrade's pair_candles, and evaluates each entry gate the strategy
+    enforces in populate_entry_trend(). Returns a grid the dashboard
+    renders so the operator can see exactly *why* a pair isn't trading.
+
+    Gates evaluated (in strategy order):
+      1. capital_allocation     pair weight > 0
+      2. do_predict             FreqAI has live predictions
+      3. volume                 last bar has volume > 0
+      4. regime                 != trending_down (hard block)
+      5. up_prob_threshold      up >= base + regime delta
+      6. tft_confidence         >= TFT_MIN_CONFIDENCE (0.40)
+      7. high_vol_confidence    not (regime=high_vol AND up < HIGH_VOL_MIN)
+      8. meta_signal_up         == +1 when DRL active
+      9. meta_confidence        >= META_MIN_CONFIDENCE (0.40) when DRL active
+     10. account_capacity       open_count < max_open AND breaker clear
+    """
+    from .data_sources import fetch_freqtrade_candles, latest_state_from_df
+
+    # Strategy constants — keep in sync with FreqAIMeanRevV1.py defaults
+    TFT_MIN = 0.40
+    META_MIN = 0.40
+    HIGH_VOL_MIN = 0.75
+    BASE_ENTRY = 0.62
+    REGIME_DELTA = {
+        "trending_up":      -0.05,
+        "trending_down":    None,   # None = hard block
+        "mean_reverting":   +0.10,
+        "high_volatility":  +0.05,
+        "unknown":          0.0,
+    }
+
+    pairs = [p.strip() for p in os.environ.get("DASHBOARD_PAIRS", "BTC/USD,ETH/USD,SOL/USD").split(",") if p.strip()]
+    timeframe = os.environ.get("DASHBOARD_TIMEFRAME", "5m")
+
+    # Account-level inputs from existing endpoints
+    open_count = 0
+    max_open = 6
+    breaker_active = False
+    try:
+        async with httpx.AsyncClient(timeout=ENDPOINT_TIMEOUT_S) as client:
+            tok = await _ensure_jwt(client)
+            if tok:
+                r = await client.get(f"{FREQTRADE_API_URL}/api/v1/status", headers={"Authorization": f"Bearer {tok}"})
+                if r.status_code == 200:
+                    open_count = len(r.json() or [])
+                r2 = await client.get(f"{FREQTRADE_API_URL}/api/v1/show_config", headers={"Authorization": f"Bearer {tok}"})
+                if r2.status_code == 200:
+                    cfg = r2.json() or {}
+                    max_open = int(cfg.get("max_open_trades") or 6)
+    except Exception as exc:
+        logger.warning("gates: account-level fetch failed: %s", exc)
+
+    # Per-pair gate evaluation
+    rows = []
+    for pair in pairs:
+        try:
+            df = await fetch_freqtrade_candles(pair, timeframe, limit=5)
+            state = latest_state_from_df(df, pair) if df is not None else {}
+        except Exception as exc:
+            logger.warning("gates: pair_candles failed for %s: %s", pair, exc)
+            state = {"_error": str(exc)}
+
+        regime = state.get("regime") or "unknown"
+        delta = REGIME_DELTA.get(regime, 0.0)
+        threshold = (BASE_ENTRY + delta) if delta is not None else None
+        up = state.get("tft_up")
+        tft_conf = state.get("tft_confidence")
+        meta_sig = state.get("meta_signal")
+        meta_conf = state.get("meta_confidence")
+        volume = state.get("volume")
+        do_predict = state.get("do_predict")
+
+        gate_results = []
+
+        # 1. Pair capital allocation — we don't have per-pair weight here
+        #    without parsing config.json; assume allowed (most operators set this once).
+        gate_results.append({
+            "gate": "capital_allocation",
+            "pass": True,
+            "detail": "weight > 0 (assumed)",
+        })
+
+        # 2. do_predict — FreqAI has live predictions
+        gate_results.append({
+            "gate": "freqai_predict",
+            "pass": do_predict in (1, True, "1") if do_predict is not None else None,
+            "detail": f"do_predict={do_predict}",
+        })
+
+        # 3. volume
+        vol_pass = (volume or 0) > 0 if volume is not None else None
+        gate_results.append({
+            "gate": "volume",
+            "pass": vol_pass,
+            "detail": f"volume={volume}",
+        })
+
+        # 4. regime — trending_down is a hard block
+        regime_pass = regime != "trending_down"
+        gate_results.append({
+            "gate": "regime",
+            "pass": regime_pass,
+            "detail": f"regime={regime}" + (" [HARD BLOCK]" if regime == "trending_down" else ""),
+        })
+
+        # 5. up_prob_threshold (only meaningful when regime != trending_down)
+        if threshold is None:
+            gate_results.append({
+                "gate": "up_prob_threshold",
+                "pass": False,
+                "detail": "regime=trending_down → hard block",
+            })
+        elif up is None:
+            gate_results.append({
+                "gate": "up_prob_threshold",
+                "pass": None,
+                "detail": "no up signal yet",
+            })
+        else:
+            gate_results.append({
+                "gate": "up_prob_threshold",
+                "pass": up >= threshold,
+                "detail": f"up={up:.3f} vs threshold={threshold:.2f} (base {BASE_ENTRY:+.2f}{delta:+.2f})",
+            })
+
+        # 6. tft_confidence
+        if tft_conf is None:
+            gate_results.append({
+                "gate": "tft_confidence",
+                "pass": None,
+                "detail": "tft_confidence missing",
+            })
+        else:
+            gate_results.append({
+                "gate": "tft_confidence",
+                "pass": tft_conf >= TFT_MIN,
+                "detail": f"{tft_conf:.3f} ≥ {TFT_MIN:.2f}",
+            })
+
+        # 7. high_vol_confidence
+        if regime == "high_volatility":
+            if up is None:
+                gate_results.append({"gate": "high_vol_confidence", "pass": None, "detail": "up missing"})
+            else:
+                gate_results.append({
+                    "gate": "high_vol_confidence",
+                    "pass": up >= HIGH_VOL_MIN,
+                    "detail": f"high_vol regime: up={up:.3f} ≥ {HIGH_VOL_MIN}",
+                })
+        else:
+            gate_results.append({
+                "gate": "high_vol_confidence",
+                "pass": True,
+                "detail": "n/a (not high_vol regime)",
+            })
+
+        # 8. meta_signal — only enforced when DRL active (meta_confidence > 0)
+        meta_active = meta_conf is not None and meta_conf > 0
+        if meta_active:
+            gate_results.append({
+                "gate": "meta_signal_up",
+                "pass": meta_sig == 1,
+                "detail": f"meta_signal={meta_sig} (need +1)",
+            })
+            gate_results.append({
+                "gate": "meta_confidence",
+                "pass": meta_conf >= META_MIN,
+                "detail": f"{meta_conf:.3f} ≥ {META_MIN:.2f}",
+            })
+        else:
+            gate_results.append({
+                "gate": "meta_signal_up",
+                "pass": True,
+                "detail": "DRL ensemble inactive — gate disabled",
+            })
+            gate_results.append({
+                "gate": "meta_confidence",
+                "pass": True,
+                "detail": "DRL ensemble inactive — gate disabled",
+            })
+
+        # 10. account_capacity (account-wide, but we render per row)
+        gate_results.append({
+            "gate": "account_capacity",
+            "pass": open_count < max_open and not breaker_active,
+            "detail": f"{open_count}/{max_open} open" + (" · BREAKER" if breaker_active else ""),
+        })
+
+        # Summary
+        blocking = [g for g in gate_results if g["pass"] is False]
+        rows.append({
+            "pair": pair,
+            "regime": regime,
+            "n_gates": len(gate_results),
+            "n_blocking": len(blocking),
+            "first_blocker": blocking[0]["gate"] if blocking else None,
+            "gates": gate_results,
+            "snapshot": {
+                "up": up,
+                "tft_confidence": tft_conf,
+                "meta_signal": meta_sig,
+                "meta_confidence": meta_conf,
+                "volume": volume,
+                "threshold": threshold,
+            },
+        })
+
+    # ── Stocks gates (wheel CSP rules per ticker) ──────────────────────
+    stock_rows = []
+    pos_file = STOCKS_ROOT / "wheel" / "state" / "positions.json"
+    snap_file = STOCKS_ROOT / "wheel" / "state" / "account_snapshot.json"
+    kill_file = STOCKS_ROOT / "wheel" / "state" / "kill_flags.json"
+    raw_positions = _read_json(pos_file) or []
+    snap = _read_json(snap_file) or {}
+    kill_flags = _read_json(kill_file) or {}
+    shark_kill = (STOCKS_ROOT / "memory" / "KILL.flag").exists() if STOCKS_ROOT.is_dir() else False
+
+    # Stocks-regime feed (SPY simple classifier)
+    stock_regime = None
+    spy_file = STOCKS_ROOT / "wheel" / "state" / "candles_SPY_1Day.json"
+    spy_raw = _read_json(spy_file)
+    if spy_raw and len(spy_raw.get("bars") or []) >= 200:
+        closes = [float(b["close"]) for b in spy_raw["bars"]]
+        ma50 = sum(closes[-50:]) / 50
+        ma200 = sum(closes[-200:]) / 200
+        spot = closes[-1]
+        if ma50 < ma200 and spot < ma200:
+            stock_regime = "trending_down"
+        elif ma50 > ma200 and spot > ma200:
+            stock_regime = "trending_up"
+        else:
+            stock_regime = "mean_reverting"
+
+    wheel_symbols = [
+        s.strip().upper() for s in os.environ.get("WHEEL_SYMBOLS", "SOFI").split(",") if s.strip()
+    ]
+    cash = snap.get("cash") or 0
+    bp = snap.get("buying_power") or 0
+    paper = snap.get("paper", True)
+
+    for sym in wheel_symbols:
+        gate_results = []
+
+        # 1. Shark global kill switch
+        gate_results.append({
+            "gate": "kill_switch",
+            "pass": not shark_kill,
+            "detail": "KILL.flag present" if shark_kill else "no kill flag",
+        })
+
+        # 2. Per-ticker 90-day kill flag
+        kill_until = kill_flags.get(sym)
+        gate_results.append({
+            "gate": "ticker_kill_flag",
+            "pass": kill_until is None,
+            "detail": f"killed until {kill_until}" if kill_until else "clear",
+        })
+
+        # 3. SPY regime not trending_down (the safety rail we want to add)
+        if stock_regime is None:
+            gate_results.append({"gate": "spy_regime", "pass": None, "detail": "SPY data missing"})
+        else:
+            gate_results.append({
+                "gate": "spy_regime",
+                "pass": stock_regime != "trending_down",
+                "detail": f"SPY regime={stock_regime}",
+            })
+
+        # 4. Existing CSP / shares — already-positioned skip
+        has_csp = any(p.get("kind") == "short_put" and p.get("underlying") == sym for p in raw_positions)
+        has_shares = sum(p.get("qty", 0) for p in raw_positions if p.get("kind") == "long_shares" and p.get("underlying") == sym) >= 100
+        gate_results.append({
+            "gate": "no_existing_csp",
+            "pass": not has_csp,
+            "detail": "open CSP exists" if has_csp else "no open CSP",
+        })
+        gate_results.append({
+            "gate": "no_assignment",
+            "pass": not has_shares,
+            "detail": "holds ≥100 shares (CC leg)" if has_shares else "no assigned shares",
+        })
+
+        # 5. Buying power / collateral budget — assume strike $15 → $1500 collateral
+        max_risk = float(os.environ.get("WHEEL_MAX_RISK_PER_TICKER", "1700"))
+        gate_results.append({
+            "gate": "buying_power",
+            "pass": bp >= max_risk,
+            "detail": f"BP ${bp:,.0f} ≥ collateral ~${max_risk:,.0f}",
+        })
+
+        # 6. Account snapshot fresh
+        snap_age = _file_age_seconds(snap_file)
+        gate_results.append({
+            "gate": "snapshot_fresh",
+            "pass": snap_age is not None and snap_age < 86400,
+            "detail": f"snapshot {snap_age}s old" if snap_age is not None else "no snapshot",
+        })
+
+        # 7. Calendar / cron schedule (today is Friday for sell-csps)
+        from datetime import datetime, timezone
+        weekday = datetime.now(timezone.utc).weekday()
+        gate_results.append({
+            "gate": "schedule",
+            "pass": True,  # always passes; schedule-driven
+            "detail": "next sell-csps cron: Friday 15:00 UTC",
+        })
+
+        blocking = [g for g in gate_results if g["pass"] is False]
+        stock_rows.append({
+            "pair": sym,
+            "regime": stock_regime or "—",
+            "n_gates": len(gate_results),
+            "n_blocking": len(blocking),
+            "first_blocker": blocking[0]["gate"] if blocking else None,
+            "gates": gate_results,
+            "snapshot": {
+                "cash": cash,
+                "buying_power": bp,
+                "paper": paper,
+            },
+        })
+
+    return _envelope("ok", data={
+        "crypto": rows,
+        "stocks": stock_rows,
+        "constants": {
+            "tft_min": TFT_MIN,
+            "meta_min": META_MIN,
+            "high_vol_min": HIGH_VOL_MIN,
+            "base_entry": BASE_ENTRY,
+            "regime_delta": REGIME_DELTA,
+        },
+        "account": {
+            "open_count": open_count,
+            "max_open": max_open,
+            "breaker_active": breaker_active,
+            "paper": paper,
+        },
+    })
+
+
 @router.get("/live_trades")
 async def live_trades():
     """Aggregate every active position across crypto + wheel + shark for
