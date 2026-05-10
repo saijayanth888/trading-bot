@@ -1126,17 +1126,17 @@
         // Render in America/New_York (NYSE) — handles EST/EDT automatically.
         const parts = new Intl.DateTimeFormat("en-US", {
           timeZone: "America/New_York",
-          hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+          hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true,
           month: "short", day: "2-digit", year: "numeric",
           timeZoneName: "short",
         }).formatToParts(now).reduce((m, p) => (m[p.type] = p.value, m), {});
-        t.textContent = `${parts.hour}:${parts.minute}:${parts.second}`;
+        t.textContent = `${parts.hour}:${parts.minute}:${parts.second} ${parts.dayPeriod || ""}`.trim();
         d.textContent = `${parts.month.toUpperCase()} ${parts.day} · ${parts.year} · ${parts.timeZoneName}`;
       }
       tick(); setInterval(tick, 1000);
     })();
   </script>
-  {% if effects_enabled %}<script src="/static/js/effects.js?v=20260510-6" defer></script>{% endif %}
-  <script src="/static/js/ops.js?v=20260510-6" defer></script>
+  {% if effects_enabled %}<script src="/static/js/effects.js?v=20260510-8" defer></script>{% endif %}
+  <script src="/static/js/ops.js?v=20260510-8" defer></script>
 </body>
 </html>

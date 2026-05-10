@@ -85,7 +85,10 @@ function setRefresh(ts) {
   const el = document.getElementById("last-refresh");
   if (!el || !ts) return;
   const d = new Date(ts);
-  el.textContent = d.toISOString().substring(11, 19) + "Z";
+  el.textContent = d.toLocaleTimeString("en-US", {
+    hour: "numeric", minute: "2-digit", second: "2-digit",
+    hour12: true, timeZone: "America/New_York",
+  }) + " ET";
 }
 
 // ─── Hero (regime + sentiment) ──────────────────────────────────────
@@ -334,7 +337,9 @@ async function refreshTrades() {
     html += `<h4 style="margin:14px 0 6px;font-size:13px;">Recent closes</h4>`;
     html += `<table class="tape"><thead><tr><th>pair</th><th>side</th><th>regime@entry</th><th>P&amp;L</th><th>closed</th></tr></thead><tbody>`;
     for (const t of d.live_tape) {
-      const t_str = t.exit_time ? new Date(t.exit_time).toISOString().substring(11,16) + "Z" : "—";
+      const t_str = t.exit_time ? new Date(t.exit_time).toLocaleTimeString("en-US", {
+        hour: "numeric", minute: "2-digit", hour12: true, timeZone: "America/New_York",
+      }) + " ET" : "—";
       html += `<tr><td>${esc(t.pair)}</td><td>${esc(t.side)}</td><td class="muted">${esc(t.regime_at_entry || "—")}</td><td>${esc(fmtPct(t.pnl_pct))}</td><td class="muted">${esc(t_str)}</td></tr>`;
     }
     html += `</tbody></table>`;
@@ -822,7 +827,8 @@ async function refreshStocks() {
   if (ageEl) {
     const reopen = mh && mh.next_open_utc
       ? new Date(mh.next_open_utc).toLocaleString("en-US", {
-          weekday: "short", hour: "2-digit", minute: "2-digit", timeZone: "America/New_York",
+          weekday: "short", hour: "numeric", minute: "2-digit",
+          hour12: true, timeZone: "America/New_York",
         }) + " ET"
       : null;
     let mhBadge;

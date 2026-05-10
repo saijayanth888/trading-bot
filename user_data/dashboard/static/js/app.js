@@ -104,11 +104,29 @@
     "unknown":         "—",
   };
 
+  // 12-hour time formatter for the chart axis + crosshair tooltip.
+  // lightweight-charts ships only 24-hour by default; we override via
+  // localization.timeFormatter (axis ticks) + localization.locale (en-US
+  // makes the default crosshair tooltip use 12h too).
+  function _fmt12h(ts) {
+    return new Date(ts * 1000).toLocaleTimeString("en-US", {
+      hour: "numeric", minute: "2-digit", hour12: true,
+    });
+  }
   const baseChartOpts = {
     layout: { background: { type: "solid", color: "transparent" }, textColor: "#a8b1cb" },
     grid:   { vertLines: { color: "rgba(138,147,179,0.08)" }, horzLines: { color: "rgba(138,147,179,0.08)" } },
     rightPriceScale: { borderColor: "rgba(138,147,179,0.2)" },
-    timeScale:       { borderColor: "rgba(138,147,179,0.2)", timeVisible: true, secondsVisible: false },
+    timeScale: {
+      borderColor: "rgba(138,147,179,0.2)",
+      timeVisible: true,
+      secondsVisible: false,
+      tickMarkFormatter: (ts) => _fmt12h(ts),
+    },
+    localization: {
+      locale: "en-US",
+      timeFormatter: _fmt12h,
+    },
     crosshair: { mode: 1 },
   };
 
@@ -292,7 +310,8 @@
       const reopenLocal = mh.data.next_open_utc ? new Date(mh.data.next_open_utc) : null;
       const reopenStr = reopenLocal
         ? reopenLocal.toLocaleString("en-US", {
-            weekday: "short", hour: "2-digit", minute: "2-digit", timeZone: "America/New_York",
+            weekday: "short", hour: "numeric", minute: "2-digit",
+            hour12: true, timeZone: "America/New_York",
           }) + " ET"
         : "—";
       els.meta.appendChild(document.createTextNode("  ·  "));
