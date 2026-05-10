@@ -45,8 +45,10 @@ from alpaca.data.historical.stock import StockHistoricalDataClient
 from alpaca.data.requests import (
     OptionLatestQuoteRequest,
     OptionSnapshotRequest,
+    StockBarsRequest,
     StockLatestTradeRequest,
 )
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from .strategy import OptionContract
 
@@ -88,6 +90,77 @@ class Broker:
         resp = self.stock_data.get_stock_latest_trade(req)
         trade = resp[symbol]
         return float(trade.price)
+
+    def get_stock_bars(
+        self,
+        symbol: str,
+        timeframe: str = "5Min",
+        limit: int = 288,
+    ) -> List[dict]:
+        """Return OHLCV bars in the shape Lightweight-Charts expects.
+
+        timeframe: "1Min", "5Min", "15Min", "1Hour", "1Day"
+        limit: number of bars (default 288 = 24h of 5-min bars)
+        Returns: [{ "time": unix_seconds, "open": .., "high": .., "low": ..,
+                    "close": .., "volume": .. }, ...]  oldest → newest
+        """
+        # Map timeframe string → SDK TimeFrame
+        unit_map = {
+            "min": TimeFrameUnit.Minute,
+            "hour": TimeFrameUnit.Hour,
+            "day": TimeFrameUnit.Day,
+        }
+        tf_lc = timeframe.lower()
+        if tf_lc.endswith("min"):
+            amount = int(tf_lc[:-3]) if tf_lc[:-3] else 1
+            tf = TimeFrame(amount, TimeFrameUnit.Minute)
+        elif tf_lc.endswith("hour"):
+            amount = int(tf_lc[:-4]) if tf_lc[:-4] else 1
+            tf = TimeFrame(amount, TimeFrameUnit.Hour)
+        elif tf_lc in ("1day", "day", "1d"):
+            tf = TimeFrame(1, TimeFrameUnit.Day)
+        else:
+            raise ValueError(f"unsupported timeframe: {timeframe}")
+
+        # Wide lookback to absorb non-trading hours and weekends. Floor at
+        # 7 days so 1Min×limit-bars-on-a-weekend still hits Friday's bars.
+        # We always trim to `limit` after fetching.
+        end = datetime.now(timezone.utc)
+        if tf.unit == TimeFrameUnit.Minute:
+            wanted = timedelta(minutes=tf.amount * limit * 7)
+            start = end - max(wanted, timedelta(days=7))
+        elif tf.unit == TimeFrameUnit.Hour:
+            wanted = timedelta(hours=tf.amount * limit * 3)
+            start = end - max(wanted, timedelta(days=7))
+        else:
+            start = end - timedelta(days=int(tf.amount * limit * 1.6))
+
+        req = StockBarsRequest(
+            symbol_or_symbols=symbol,
+            timeframe=tf,
+            start=start,
+            end=end,
+            feed=os.environ.get("ALPACA_DATA_FEED", "iex"),
+        )
+        resp = self.stock_data.get_stock_bars(req)
+        bars_obj = resp.data.get(symbol, []) if hasattr(resp, "data") else []
+        out: List[dict] = []
+        for b in bars_obj:
+            ts = b.timestamp
+            if hasattr(ts, "timestamp"):
+                t = int(ts.timestamp())
+            else:
+                t = int(ts)
+            out.append({
+                "time": t,
+                "open": float(b.open),
+                "high": float(b.high),
+                "low": float(b.low),
+                "close": float(b.close),
+                "volume": int(getattr(b, "volume", 0) or 0),
+            })
+        # Trim to last `limit`
+        return out[-limit:]
 
     # ── Options chain ──────────────────────────────────────────────────────
 

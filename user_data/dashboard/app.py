@@ -57,6 +57,14 @@ DEFAULT_PAIRS = os.environ.get(
     "DASHBOARD_PAIRS", "BTC/USD,ETH/USD,SOL/USD",
 ).split(",")
 DEFAULT_TIMEFRAME = os.environ.get("DASHBOARD_TIMEFRAME", "5m")
+# Stocks the chart-page dropdown will offer (Alpaca paper). Reads
+# WHEEL_SYMBOLS first so it tracks whatever the wheel cron pre-fetches.
+DEFAULT_STOCK_SYMBOLS = [
+    s.strip().upper() for s in os.environ.get(
+        "DASHBOARD_STOCK_SYMBOLS",
+        os.environ.get("WHEEL_SYMBOLS", "SOFI"),
+    ).split(",") if s.strip()
+]
 WS_PUSH_INTERVAL = float(os.environ.get("DASHBOARD_WS_INTERVAL_SEC", "30"))
 
 app = FastAPI(title="Trading bot dashboard", docs_url="/api/docs")
@@ -79,6 +87,7 @@ async def index(request: Request) -> HTMLResponse:
         "index.html",
         {
             "pairs": [p.strip() for p in DEFAULT_PAIRS if p.strip()],
+            "stock_symbols": DEFAULT_STOCK_SYMBOLS,
             "default_timeframe": DEFAULT_TIMEFRAME,
             "ws_push_interval": int(WS_PUSH_INTERVAL),
         },

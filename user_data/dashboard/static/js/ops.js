@@ -17,6 +17,9 @@ const REFRESH_MS = {
   sparklines:     60000,   // 5m candles only change every 5 min
   slack_preview:  60000,   // daily report preview — once a min is plenty
   explainability: 30000,   // trade journal updates on each entry/exit
+  stocks:         30000,   // stocks state writes on cron tick (~5min) + nightly
+  live_trades:     5000,   // top hero strip — pulse on every fill
+  stock_regime:   60000,   // SPY MA bands move slowly
 };
 
 const REGIME_ARROW = {
@@ -108,8 +111,14 @@ async function refreshRegime() {
   heroEl.appendChild(arrowSpan);
   const dur = d.duration_hours ? `${Number(d.duration_hours).toFixed(1)}h` : "—";
   const prob = d.probability ? Number(d.probability).toFixed(2) : "—";
+  // The HMM model writes once per closed hour. row-age is therefore
+  // expected to be 0–60 min mid-cycle; that's not staleness, that's
+  // cadence. Show as minutes + a "next tick" hint so it stops looking
+  // alarming.
+  const ageMin = d.age_s == null ? null : Math.floor(d.age_s / 60);
+  const tickHint = ageMin == null ? "" : ` · next tick in ~${Math.max(0, 60 - ageMin)}m`;
   document.getElementById("hero-meta").textContent =
-    `prob ${prob} · active ${dur}` + (d.age_s ? ` · row age ${d.age_s}s` : "");
+    `prob ${prob} · active ${dur}` + (ageMin != null ? ` · last tick ${ageMin}m ago${tickHint}` : "");
 }
 
 async function refreshSentiment() {
@@ -119,11 +128,15 @@ async function refreshSentiment() {
   const d = env.data;
   const direction = d.score > 0.1 ? "bullish" : d.score < -0.1 ? "bearish" : "neutral";
   const agree = d.agreement ? "✓ agree" : "✗ disagree";
-  // append as plain text — direction/agree are constants so no esc needed,
-  // but d.score / d.confidence / d.n_headlines are numbers so safe by construction.
+  // Per-model breakdown shows WHY the aggregate is what it is. A 0.00
+  // aggregate with deep=0.45/fast=-0.30 means real disagreement between
+  // models, not "no signal" — the operator can see and act on that.
+  const fastStr = d.fast_score == null ? "—" : `${fmt(d.fast_score, 2)}/${d.fast_impact || "?"}`;
+  const deepStr = d.deep_score == null ? "—" : `${fmt(d.deep_score, 2)}/${d.deep_impact || "?"}`;
+  const fgStr = d.fear_greed == null ? "" : ` · F&G ${d.fear_greed} ${d.fear_greed_label || ""}`;
   const meta = document.getElementById("hero-meta");
   meta.textContent = meta.textContent +
-    ` · sentiment ${fmt(d.score, 2)} (${direction}, conf ${fmt(d.confidence, 2)}, ${agree}, ${d.n_headlines} hl)`;
+    ` · agg ${fmt(d.score, 2)} (${direction}, ${agree}, conf ${fmt(d.confidence, 2)}) · fast ${fastStr} · deep ${deepStr}${fgStr} · ${d.n_headlines} hl`;
 }
 
 // ─── Services ───────────────────────────────────────────────────────
@@ -322,6 +335,215 @@ async function refreshTrades() {
     }
     html += `</tbody></table>`;
   }
+
+  body.innerHTML = html;
+}
+
+// ─── Live trades hero strip (full-width, top of page) ─────────────
+async function refreshLiveTrades() {
+  const r = await jsonFetch("/api/ops/live_trades");
+  const env = r.body;
+  const host = document.getElementById("lt-tracks");
+  const counter = document.getElementById("lt-counter");
+  if (!host || !env || !env.data) return;
+  const trades = env.data.trades || [];
+  const summary = env.data.summary || {};
+
+  if (counter) {
+    counter.textContent = `${summary.crypto_active ?? 0} crypto · ${summary.wheel_active ?? 0} wheel · ${summary.alpaca_paper === false ? "LIVE" : "PAPER"}`;
+  }
+
+  if (!trades.length) {
+    host.innerHTML = `<div class="lt-empty">— no active trades right now — bot is running, gates are blocking new entries —</div>`;
+    return;
+  }
+
+  const fragments = trades.map((t) => {
+    const pnlPct = t.pnl_pct;
+    const pnlDir = pnlPct == null ? "" : pnlPct > 0 ? "up" : pnlPct < 0 ? "down" : "";
+    let detail;
+    if (t.kind === "wheel") {
+      const credit = t.pnl_usd != null ? `$${Number(t.pnl_usd).toFixed(0)} credit` : "";
+      const subkind = t.subkind === "short_put" ? "CSP"
+        : t.subkind === "short_call" ? "CC"
+        : t.subkind === "long_shares" ? "shares"
+        : t.subkind;
+      detail = `${subkind} $${Number(t.entry || 0).toFixed(2)} · ${credit} · ${esc(t.extra || "")}`;
+    } else {
+      const dur = t.duration_s ? `${Math.floor(t.duration_s / 60)}m` : "—";
+      const pnlStr = pnlPct == null ? "—" : `${pnlPct >= 0 ? "+" : "−"}${Math.abs(pnlPct).toFixed(2)}%`;
+      const pnlUsdStr = t.pnl_usd != null ? `$${Number(t.pnl_usd).toFixed(2)}` : "";
+      detail = `${esc(t.subkind)} @${esc(t.entry)} · ${pnlStr} ${pnlUsdStr} · held ${dur}`;
+    }
+    return `<div class="lt-pill" data-kind="${esc(t.kind)}" data-pnl="${pnlDir}">` +
+      `<span class="lt-dot"></span>` +
+      `<span class="lt-label">${esc(t.label)}</span>` +
+      `<span class="lt-detail">${detail}</span>` +
+      `</div>`;
+  });
+  host.innerHTML = fragments.join("");
+}
+
+// ─── Stocks regime (SPY 50/200 MA classifier) ─────────────────────
+const STOCK_REGIME_LABELS = {
+  trending_up:     "↗ trending up",
+  trending_down:   "↘ trending down",
+  mean_reverting:  "↔ mean-reverting",
+  high_volatility: "⚡ high vol",
+};
+const STOCK_REGIME_COLORS = {
+  trending_up:     "#3fb950",
+  trending_down:   "#f85149",
+  mean_reverting:  "#9ab8ff",
+  high_volatility: "#f4b942",
+};
+async function refreshStockRegime() {
+  const r = await jsonFetch("/api/ops/stock_regime");
+  const env = r.body;
+  const head = document.getElementById("hero-stock-regime");
+  const meta = document.getElementById("hero-stock-meta");
+  const slot = document.getElementById("hero-stock-slot");
+  if (!head || !env) return;
+  if (!env.data || env.status === "down") {
+    head.textContent = "—";
+    if (meta) meta.textContent = env.error || "no SPY data";
+    return;
+  }
+  const d = env.data;
+  const reg = d.current || "—";
+  head.textContent = STOCK_REGIME_LABELS[reg] || reg;
+  head.style.color = STOCK_REGIME_COLORS[reg] || "var(--text-primary)";
+  if (slot) slot.dataset.regime = reg;
+  if (meta) {
+    const conf = d.probability != null ? `${(d.probability * 100).toFixed(0)}%` : "—";
+    const r5 = d.return_5d_pct != null ? `${d.return_5d_pct >= 0 ? "+" : ""}${d.return_5d_pct}%` : "—";
+    meta.textContent = `SPY $${d.spot} · 50d $${d.ma_50} · 200d $${d.ma_200} · 5d ${r5} · conf ${conf}`;
+  }
+}
+
+// ─── Stocks (shark momentum + wheel income on Alpaca) ─────────────
+function fmtUsdPlain(n) {
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  return "$" + Number(n).toLocaleString("en-US", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+}
+
+function fmtAge(seconds) {
+  if (seconds === null || seconds === undefined) return "no data";
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86400)}d ago`;
+}
+
+async function refreshStocks() {
+  const r = await jsonFetch("/api/ops/stocks");
+  const env = r.body;
+  setStatus("card-stocks", env.status || "down");
+  const ageEl = document.getElementById("stocks-age");
+  if (ageEl) ageEl.textContent = env.error || "live";
+  const body = document.getElementById("stocks-body");
+  if (!body) return;
+  if (!env.data) { body.textContent = env.error || "—"; return; }
+
+  const { alpaca = {}, wheel = {}, shark = {} } = env.data;
+
+  // ── Top KPIs: alpaca + wheel premium ────────────────────────────
+  const pnlClass = (wheel.cumulative_pnl_usd || 0) > 0 ? "ok"
+    : (wheel.cumulative_pnl_usd || 0) < 0 ? "bad" : "muted";
+  const paperBadge = alpaca.paper === false
+    ? `<span style="background:#3b1e1f;color:#ff9a9a;font-size:10px;padding:2px 6px;border-radius:3px;margin-left:8px;font-weight:600;">LIVE</span>`
+    : `<span style="background:#1a2640;color:#9ab8ff;font-size:10px;padding:2px 6px;border-radius:3px;margin-left:8px;font-weight:600;">PAPER</span>`;
+  const ageNote = alpaca.age_seconds === null
+    ? `<span class="muted" style="font-size:10px;">no snapshot — run \`wheel snapshot\`</span>`
+    : `<span class="muted" style="font-size:10px;">snapshot ${esc(fmtAge(alpaca.age_seconds))}</span>`;
+
+  let html = `<div style="display:grid;grid-template-columns:repeat(4, 1fr);gap:14px;">` +
+    `<div><div class="muted" style="font-size:11px;">alpaca cash ${paperBadge}</div>` +
+    `<div style="font-size:22px;font-variant-numeric:tabular-nums;">${esc(fmtUsdPlain(alpaca.cash))}</div></div>` +
+    `<div><div class="muted" style="font-size:11px;">buying power</div>` +
+    `<div style="font-size:22px;font-variant-numeric:tabular-nums;">${esc(fmtUsdPlain(alpaca.buying_power))}</div></div>` +
+    `<div><div class="muted" style="font-size:11px;">portfolio value</div>` +
+    `<div style="font-size:22px;font-variant-numeric:tabular-nums;">${esc(fmtUsdPlain(alpaca.portfolio_value))}</div></div>` +
+    `<div><div class="muted" style="font-size:11px;">wheel premium captured</div>` +
+    `<div class="${pnlClass}" style="font-size:22px;font-variant-numeric:tabular-nums;">${esc(fmtUsd(wheel.cumulative_pnl_usd))}</div></div>` +
+    `</div>` +
+    `<div style="margin-top:6px;text-align:right;">${ageNote}</div>`;
+
+  // ── Wheel: open positions table ──────────────────────────────────
+  html += `<h4 style="margin:14px 0 6px;font-size:13px;">Wheel positions <span class="muted" style="font-weight:400;font-size:11px;">— cash-secured puts &amp; covered calls on Alpaca</span></h4>`;
+  const positions = wheel.open_positions || [];
+  if (positions.length) {
+    html += `<table class="tape"><thead><tr><th>kind</th><th>underlying</th><th>strike</th><th>expiry</th><th>qty</th><th>credit</th><th>contract</th></tr></thead><tbody>`;
+    for (const p of positions) {
+      const kindLabel = p.kind === "short_put" ? "short put"
+        : p.kind === "short_call" ? "short call"
+        : p.kind === "long_shares" ? "shares"
+        : (p.kind || "—");
+      html += `<tr><td>${esc(kindLabel)}</td><td>${esc(p.underlying)}</td>` +
+        `<td>${esc(p.strike != null ? "$" + Number(p.strike).toFixed(2) : "—")}</td>` +
+        `<td>${esc(p.expiry || "—")}</td>` +
+        `<td>${esc(p.qty ?? "—")}</td>` +
+        `<td>${esc(fmtUsdPlain(p.entry_credit))}</td>` +
+        `<td class="muted" style="font-family:var(--mono);">${esc(p.contract || "—")}</td></tr>`;
+    }
+    html += `</tbody></table>`;
+  } else {
+    html += `<p class="muted" style="margin:8px 0 0;font-size:12px;">— no open wheel positions — Friday cron sells the next CSP cycle —</p>`;
+  }
+
+  // ── Shark: momentum bot strip ────────────────────────────────────
+  const sharkMode = (shark.mode || "—").toLowerCase();
+  const modeBadgeColor = sharkMode === "live" ? "#ff9a9a" : "#9ab8ff";
+  const cbTone = shark.circuit_breaker
+    ? `<span class="bad">TRIPPED</span>`
+    : `<span class="ok">clear</span>`;
+  const ksTone = shark.kill_switch_active
+    ? `<span class="bad">ACTIVE</span>`
+    : `<span class="ok">clear</span>`;
+  const sharkAge = shark.age_seconds == null
+    ? "—"
+    : fmtAge(shark.age_seconds);
+  const stats = shark.stats || {};
+  const winsLosses = `${esc(stats.wins ?? 0)}W / ${esc(stats.losses ?? 0)}L`;
+  const winRate = stats.win_rate != null ? Number(stats.win_rate).toFixed(0) + "%" : "—";
+
+  html += `<h4 style="margin:14px 0 6px;font-size:13px;">Shark momentum bot <span class="muted" style="font-weight:400;font-size:11px;">— S&amp;P-beating stocks · NO options</span></h4>`;
+  html += `<div style="display:grid;grid-template-columns:repeat(4, 1fr);gap:14px;">` +
+    `<div><div class="muted" style="font-size:11px;">mode</div>` +
+    `<div style="font-size:18px;color:${modeBadgeColor};text-transform:uppercase;letter-spacing:0.04em;">${esc(sharkMode)}</div></div>` +
+    `<div><div class="muted" style="font-size:11px;">peak equity</div>` +
+    `<div style="font-size:18px;font-variant-numeric:tabular-nums;">${esc(fmtUsdPlain(shark.peak_equity))}</div></div>` +
+    `<div><div class="muted" style="font-size:11px;">trades this week</div>` +
+    `<div style="font-size:18px;font-variant-numeric:tabular-nums;">${esc(shark.weekly_trade_count ?? 0)}<span class="muted">/3</span></div></div>` +
+    `<div><div class="muted" style="font-size:11px;">circuit breaker</div>` +
+    `<div style="font-size:18px;">${cbTone}</div></div>` +
+    `</div>`;
+
+  html += `<div style="display:grid;grid-template-columns:repeat(4, 1fr);gap:14px;margin-top:12px;">` +
+    `<div><div class="muted" style="font-size:11px;">kill switch</div>` +
+    `<div style="font-size:14px;">${ksTone}</div></div>` +
+    `<div><div class="muted" style="font-size:11px;">open shark trades</div>` +
+    `<div style="font-size:14px;font-variant-numeric:tabular-nums;">${esc((shark.open_trades || []).length)}<span class="muted">/6</span></div></div>` +
+    `<div><div class="muted" style="font-size:11px;">total P&amp;L · realized</div>` +
+    `<div style="font-size:14px;font-variant-numeric:tabular-nums;">${esc(fmtUsd(stats.total_pnl))}</div></div>` +
+    `<div><div class="muted" style="font-size:11px;">wins · win-rate</div>` +
+    `<div style="font-size:14px;font-variant-numeric:tabular-nums;">${esc(winsLosses)} · ${esc(winRate)}</div></div>` +
+    `</div>`;
+
+  if (shark.open_trades && shark.open_trades.length) {
+    html += `<table class="tape" style="margin-top:10px;"><thead><tr><th>symbol</th><th>side</th><th>entry</th><th>qty</th><th>stop</th><th>opened</th></tr></thead><tbody>`;
+    for (const t of shark.open_trades.slice(0, 6)) {
+      html += `<tr><td>${esc(t.symbol || t.ticker || "—")}</td>` +
+        `<td>${esc(t.side || "long")}</td>` +
+        `<td>${esc(t.entry_price != null ? "$" + Number(t.entry_price).toFixed(2) : "—")}</td>` +
+        `<td>${esc(t.qty ?? "—")}</td>` +
+        `<td>${esc(t.stop_price != null ? "$" + Number(t.stop_price).toFixed(2) : "—")}</td>` +
+        `<td class="muted" style="font-size:11px;">${esc(t.opened_at || t.entry_time || "—")}</td></tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+
+  html += `<p class="muted" style="margin:14px 0 0;font-size:11px;">shark snapshot ${esc(sharkAge)} · ${esc(shark.generated_at || "—")}</p>`;
 
   body.innerHTML = html;
 }
@@ -1144,18 +1366,24 @@ document.addEventListener("DOMContentLoaded", () => {
   if (mcpExec)  mcpExec.addEventListener("click", executeMcp);
 
   // First-paint refreshes
+  refreshLiveTrades();
   refreshRegime().then(refreshSentiment);
+  refreshStockRegime();
   refreshServices(); refreshTraining(); refreshMcp(); refreshTrades();
+  refreshStocks();
   refreshRegimeConfig(); refreshSparklines();
   refreshSlackPreview();
   loadExpPairs().then(refreshExplainability);
   loadMcpTools();
 
+  setInterval(refreshLiveTrades, REFRESH_MS.live_trades);
   setInterval(() => { refreshRegime().then(refreshSentiment); }, REFRESH_MS.regime);
+  setInterval(refreshStockRegime, REFRESH_MS.stock_regime);
   setInterval(refreshServices, REFRESH_MS.services);
   setInterval(refreshTraining, REFRESH_MS.training);
   setInterval(refreshMcp,      REFRESH_MS.mcp);
   setInterval(refreshTrades,   REFRESH_MS.trades);
+  setInterval(refreshStocks,   REFRESH_MS.stocks);
   setInterval(refreshSparklines,    REFRESH_MS.sparklines);
   setInterval(refreshSlackPreview,  REFRESH_MS.slack_preview);
   setInterval(refreshExplainability, REFRESH_MS.explainability);

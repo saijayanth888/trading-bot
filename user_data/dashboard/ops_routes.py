@@ -147,12 +147,13 @@ async def regime():
     if not latest:
         return _envelope("degraded", data={"current": None}, error="regime_log empty")
 
-    # Stale check: > 15 min old → degraded
+    # Stale check: regime model writes hourly → use 90min as the stale
+    # threshold so the card stays green across normal hour transitions.
     ts = latest.get("ts")
     age_s = None
     if ts:
         age_s = (datetime.now(timezone.utc) - ts).total_seconds() if ts.tzinfo else None
-    stale = (age_s is not None) and age_s > 15 * 60
+    stale = (age_s is not None) and age_s > 90 * 60
 
     return _envelope(
         "degraded" if stale else "ok",
@@ -199,6 +200,13 @@ async def sentiment():
     age_s = (datetime.now(timezone.utc) - ts).total_seconds() if ts and ts.tzinfo else None
     stale = (age_s is not None) and age_s > 30 * 60
 
+    # Pull per-model scores so the operator can see WHY the aggregate is 0
+    # — disagreement between fast (llama) and deep (claude) zeroes the
+    # final score by design. Surface both raw values for diagnostics.
+    claude_score = latest.get("claude_score")
+    llama_score = latest.get("llama_score")
+    key_events = latest.get("key_events") or []
+
     return _envelope(
         "degraded" if stale else "ok",
         data={
@@ -208,6 +216,16 @@ async def sentiment():
             "n_headlines": int(latest.get("n_headlines") or 0),
             "ts": ts.isoformat() if ts else None,
             "age_s": int(age_s) if age_s is not None else None,
+            # Per-model breakdown — explains the aggregate
+            "deep_score": float(claude_score) if claude_score is not None else None,
+            "deep_impact": latest.get("claude_impact"),
+            "fast_score": float(llama_score) if llama_score is not None else None,
+            "fast_impact": latest.get("llama_impact"),
+            # Side-channel signals
+            "fear_greed": latest.get("fear_greed_value"),
+            "fear_greed_label": latest.get("fear_greed_classification"),
+            "community_score": float(latest["community_score_avg"]) if latest.get("community_score_avg") is not None else None,
+            "key_events": list(key_events)[:5] if isinstance(key_events, list) else [],
             "hourly_24h": [
                 {"hour": r["hour"].isoformat() if hasattr(r["hour"], "isoformat") else str(r["hour"]),
                  "score": float(r["score"]),
@@ -1082,7 +1100,8 @@ async def explainability(base: str, quote: str, limit: int = 5):
                     SELECT trade_id, pair, direction, opened_at, closed_at,
                            entry_price, exit_price, pnl, pnl_pct, stake,
                            confidence, tft_probs, drl_votes, sentiment_score,
-                           sentiment_confidence, regime, exit_reason, reasoning
+                           sentiment_conf AS sentiment_confidence,
+                           regime, exit_reason, reasoning
                     FROM trade_journal
                     WHERE pair = %s
                     ORDER BY opened_at DESC LIMIT %s
@@ -1309,3 +1328,356 @@ async def slack_preview():
         "best": best, "worst": worst,
         "regime_distribution": regime_dist,
     })
+
+
+# --------------------------------------------------------------------------
+# /api/ops/stocks — unified shark + wheel state
+# --------------------------------------------------------------------------
+
+STOCKS_ROOT = Path(os.environ.get("STOCKS_ROOT", "/freqtrade/stocks"))
+
+
+def _read_json(path: Path) -> dict | None:
+    try:
+        if not path.is_file():
+            return None
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("stocks: failed to read %s: %s", path, exc)
+        return None
+
+
+def _file_age_seconds(path: Path) -> int | None:
+    try:
+        if not path.is_file():
+            return None
+        return int((datetime.now(timezone.utc).timestamp() - path.stat().st_mtime))
+    except OSError:
+        return None
+
+
+def _wheel_cumulative_pnl(trades_file: Path) -> tuple[float, str | None]:
+    """Sum pnl across the JSONL ledger; also return the latest trade ts."""
+    if not trades_file.is_file():
+        return 0.0, None
+    total = 0.0
+    last_ts: str | None = None
+    try:
+        for line in trades_file.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            total += float(rec.get("pnl", 0.0) or 0.0)
+            ts = rec.get("timestamp")
+            if ts and (last_ts is None or ts > last_ts):
+                last_ts = ts
+    except OSError as exc:
+        logger.warning("stocks: failed to scan trades.jsonl: %s", exc)
+    return round(total, 2), last_ts
+
+
+@router.get("/stocks")
+async def stocks_status():
+    """Unified shark + wheel + Alpaca state for the /ops Stocks card.
+
+    Reads only from disk (stocks/ is bind-mounted read-only). Live Alpaca
+    data comes from `wheel/state/account_snapshot.json`, which the
+    `python -m wheel.cli snapshot` cron writes every few minutes — `age_seconds`
+    surfaces freshness so a stale snapshot is visible in the UI.
+    """
+    if not STOCKS_ROOT.is_dir():
+        return _envelope(
+            "down",
+            error=f"stocks root not mounted: {STOCKS_ROOT}",
+        )
+
+    # ── Alpaca account snapshot (written by wheel.cli snapshot cron) ─────
+    snap_file = STOCKS_ROOT / "wheel" / "state" / "account_snapshot.json"
+    snap = _read_json(snap_file) or {}
+    alpaca = {
+        "cash": snap.get("cash"),
+        "buying_power": snap.get("buying_power"),
+        "portfolio_value": snap.get("portfolio_value"),
+        "paper": snap.get("paper", True),
+        "ts": snap.get("ts"),
+        "age_seconds": _file_age_seconds(snap_file),
+    }
+
+    # ── Wheel positions + cumulative P&L ─────────────────────────────────
+    pos_file = STOCKS_ROOT / "wheel" / "state" / "positions.json"
+    raw_positions = _read_json(pos_file) or []
+    if not isinstance(raw_positions, list):
+        raw_positions = []
+    wheel_positions = [
+        {
+            "underlying": p.get("underlying"),
+            "kind": p.get("kind"),
+            "qty": p.get("qty"),
+            "strike": p.get("strike"),
+            "expiry": p.get("expiry"),
+            "entry_credit": round(float(p.get("entry_credit") or 0.0), 2),
+            "contract": p.get("contract_symbol"),
+            "opened_at": p.get("opened_at"),
+        }
+        for p in raw_positions
+    ]
+    trades_file = STOCKS_ROOT / "wheel" / "state" / "trades.jsonl"
+    cumulative_pnl, last_trade_ts = _wheel_cumulative_pnl(trades_file)
+    wheel = {
+        "open_positions": wheel_positions,
+        "cumulative_pnl_usd": cumulative_pnl,
+        "last_trade_ts": last_trade_ts,
+    }
+
+    # ── Shark momentum bot state (from generated dashboard json) ─────────
+    shark_data_file = STOCKS_ROOT / "docs" / "dashboard" / "data.json"
+    shark_raw = _read_json(shark_data_file) or {}
+    state = shark_raw.get("state") or {}
+    stats = shark_raw.get("stats") or {}
+    kill_switch = shark_raw.get("kill_switch") or {}
+    open_trades_obj = shark_raw.get("open_trades") or {}
+    if isinstance(open_trades_obj, dict):
+        open_trades = list(open_trades_obj.values())
+    elif isinstance(open_trades_obj, list):
+        open_trades = open_trades_obj
+    else:
+        open_trades = []
+    shark = {
+        "mode": state.get("current_mode"),
+        "peak_equity": state.get("peak_equity"),
+        "circuit_breaker": bool(state.get("circuit_breaker_triggered", False)),
+        "weekly_trade_count": state.get("weekly_trade_count"),
+        "kill_switch_active": bool(kill_switch.get("active", False)),
+        "kill_switch_reason": kill_switch.get("reason"),
+        "open_trades": open_trades,
+        "stats": {
+            "total_trades": stats.get("total_trades", 0),
+            "wins": stats.get("wins", 0),
+            "losses": stats.get("losses", 0),
+            "win_rate": stats.get("win_rate", 0.0),
+            "total_pnl": stats.get("total_pnl", 0.0),
+            "current_drawdown_pct": stats.get("current_drawdown_pct", 0.0),
+        },
+        "generated_at": shark_raw.get("generated_at"),
+        "age_seconds": _file_age_seconds(shark_data_file),
+    }
+
+    # ── Status: degraded if any source is stale or missing ───────────────
+    degraded_reasons: list[str] = []
+    if alpaca["age_seconds"] is None:
+        degraded_reasons.append("alpaca snapshot missing — run `python -m wheel.cli snapshot`")
+    elif alpaca["age_seconds"] > 86400:
+        degraded_reasons.append(f"alpaca snapshot stale ({alpaca['age_seconds']}s old)")
+    if shark["age_seconds"] is None:
+        degraded_reasons.append("shark dashboard data missing")
+    if shark["circuit_breaker"]:
+        degraded_reasons.append("shark circuit breaker tripped")
+    if shark["kill_switch_active"]:
+        degraded_reasons.append(f"shark kill switch: {shark['kill_switch_reason'] or 'active'}")
+
+    payload = {"alpaca": alpaca, "wheel": wheel, "shark": shark}
+    if not degraded_reasons:
+        return _envelope("ok", data=payload)
+    return _envelope("degraded", data=payload, error="; ".join(degraded_reasons))
+
+
+# Whitelist of stock symbols the dashboard chart page is allowed to query.
+# Keeps `/api/ops/stock_candles/{sym}` from being a generic Alpaca proxy.
+_STOCK_SYMBOL_WHITELIST = {"SOFI", "AAPL", "TSLA", "NVDA", "META", "MSFT", "GOOGL", "AMZN", "MARA", "F", "PLTR", "AMD", "SPY"}
+
+
+@router.get("/stock_candles/{symbol}")
+async def stock_candles(symbol: str, timeframe: str = "5Min"):
+    """Serve OHLC candles for a stock from the cron-fed JSON cache.
+
+    The dashboard never calls Alpaca directly. The `wheel_candles` Hermes
+    cron writes `stocks/wheel/state/candles_{SYM}_{tf}.json` every 5 min
+    during market hours; this endpoint streams the cached file as a
+    Lightweight-Charts-compatible payload.
+    """
+    sym = symbol.upper()
+    if sym not in _STOCK_SYMBOL_WHITELIST:
+        raise HTTPException(status_code=404, detail=f"symbol not whitelisted: {sym}")
+    if timeframe not in {"1Min", "5Min", "15Min", "1Hour", "1Day"}:
+        raise HTTPException(status_code=400, detail=f"unsupported timeframe: {timeframe}")
+
+    candles_file = STOCKS_ROOT / "wheel" / "state" / f"candles_{sym}_{timeframe}.json"
+    raw = _read_json(candles_file)
+    if not raw:
+        return _envelope(
+            "down",
+            error=f"no cached candles for {sym} {timeframe} — run `python -m wheel.cli candles {sym} --timeframe {timeframe}`",
+        )
+
+    bars = raw.get("bars") or []
+    age = _file_age_seconds(candles_file)
+    payload = {
+        "symbol": sym,
+        "timeframe": timeframe,
+        "ts": raw.get("ts"),
+        "age_seconds": age,
+        "bars": bars,
+    }
+
+    # Stale = no refresh in 24h
+    if age is not None and age > 86400:
+        return _envelope("degraded", data=payload, error=f"candles stale ({age}s old)")
+    return _envelope("ok", data=payload)
+
+
+@router.get("/live_trades")
+async def live_trades():
+    """Aggregate every active position across crypto + wheel + shark for
+    the top hero strip. One source of truth so the operator sees ALL
+    trading activity at a glance, not split across two pages.
+    """
+    out: list[dict] = []
+
+    # ── Crypto open trades from freqtrade ────────────────────────────
+    try:
+        async with httpx.AsyncClient(timeout=ENDPOINT_TIMEOUT_S) as client:
+            token = await _ensure_jwt(client)
+            if token:
+                r = await client.get(
+                    f"{FREQTRADE_API_URL}/api/v1/status",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                if r.status_code == 200:
+                    for t in (r.json() or []):
+                        out.append({
+                            "kind": "crypto",
+                            "subkind": "long" if not t.get("is_short") else "short",
+                            "label": t.get("pair") or "?",
+                            "entry": t.get("open_rate"),
+                            "current": t.get("current_rate"),
+                            "qty": t.get("amount"),
+                            "pnl_pct": (t.get("profit_ratio") or 0) * 100,
+                            "pnl_usd": t.get("profit_abs"),
+                            "duration_s": t.get("trade_duration_s"),
+                            "opened_at": t.get("open_date"),
+                            "extra": f"regime@entry={t.get('regime', '—')}",
+                        })
+    except Exception as exc:
+        logger.warning("live_trades: freqtrade fetch failed: %s", exc)
+
+    # ── Wheel positions (puts/calls/shares) ─────────────────────────
+    pos_file = STOCKS_ROOT / "wheel" / "state" / "positions.json"
+    snap_file = STOCKS_ROOT / "wheel" / "state" / "account_snapshot.json"
+    raw_positions = _read_json(pos_file) or []
+    if isinstance(raw_positions, list):
+        for p in raw_positions:
+            kind = p.get("kind", "")
+            label_kind = (
+                "short_put" if kind == "short_put"
+                else "short_call" if kind == "short_call"
+                else "long_shares" if kind == "long_shares"
+                else kind
+            )
+            entry_credit = float(p.get("entry_credit") or 0.0)
+            out.append({
+                "kind": "wheel",
+                "subkind": label_kind,
+                "label": p.get("underlying") or "?",
+                "entry": p.get("strike"),
+                "current": None,
+                "qty": p.get("qty"),
+                "pnl_pct": None,
+                "pnl_usd": entry_credit if "short_" in kind else None,
+                "duration_s": None,
+                "opened_at": p.get("opened_at"),
+                "extra": f"expiry={p.get('expiry') or '—'} contract={p.get('contract_symbol') or '—'}",
+            })
+
+    # ── Aggregate health ─────────────────────────────────────────────
+    snap = _read_json(snap_file) or {}
+    summary = {
+        "total_active": len(out),
+        "crypto_active": sum(1 for t in out if t["kind"] == "crypto"),
+        "wheel_active": sum(1 for t in out if t["kind"] == "wheel"),
+        "shark_active": 0,  # shark trades are crypto-tracked separately for now
+        "alpaca_paper": snap.get("paper", True),
+    }
+    return _envelope("ok", data={"trades": out, "summary": summary})
+
+
+@router.get("/stock_regime")
+async def stock_regime():
+    """SPY-driven simple regime classifier for the dashboard.
+
+    Reads cached SPY 1Day bars (cron-fed every 5min during market hours),
+    computes 50-day MA, 200-day MA, and 5-day return, then classifies into
+    one of {trending_up, trending_down, mean_reverting, high_volatility}.
+
+    No training required — pure rule-based, refreshes whenever the
+    `wheel_candles` cron runs. Pairs visually with the BTC HMM regime card
+    so the operator sees both markets at a glance.
+    """
+    f = STOCKS_ROOT / "wheel" / "state" / "candles_SPY_1Day.json"
+    raw = _read_json(f)
+    if not raw:
+        return _envelope("down", error="SPY daily candles missing — run `python -m wheel.cli candles SPY --timeframe 1Day`")
+    bars = raw.get("bars") or []
+    if len(bars) < 200:
+        return _envelope("degraded", data={"current": None}, error=f"only {len(bars)} SPY bars (need ≥200 for 200d MA)")
+
+    closes = [float(b["close"]) for b in bars]
+    spot = closes[-1]
+    ma50 = sum(closes[-50:]) / 50
+    ma200 = sum(closes[-200:]) / 200
+    return_5d_pct = (closes[-1] / closes[-6] - 1.0) * 100 if len(closes) >= 6 else 0.0
+
+    # Realized 21-day vol (annualized) for the high-vol branch
+    import math
+    rets = [(closes[i] / closes[i-1] - 1.0) for i in range(max(1, len(closes)-21), len(closes))]
+    if rets:
+        mean = sum(rets) / len(rets)
+        var = sum((r - mean) ** 2 for r in rets) / len(rets)
+        realized_vol_pct = math.sqrt(var) * math.sqrt(252) * 100
+    else:
+        realized_vol_pct = 0.0
+
+    # Classification
+    above_50 = spot > ma50
+    above_200 = spot > ma200
+    golden = ma50 > ma200  # bullish trend structure
+    death = ma50 < ma200   # bearish trend structure
+
+    if realized_vol_pct > 35:
+        regime = "high_volatility"
+        confidence = min(1.0, realized_vol_pct / 50)
+    elif golden and above_200 and return_5d_pct > 0.5:
+        regime = "trending_up"
+        # confidence scales with how far above the structure is
+        spread_pct = (ma50 / ma200 - 1.0) * 100
+        confidence = min(1.0, 0.5 + spread_pct / 10)
+    elif death and not above_200 and return_5d_pct < -0.5:
+        regime = "trending_down"
+        spread_pct = (ma200 / ma50 - 1.0) * 100
+        confidence = min(1.0, 0.5 + spread_pct / 10)
+    else:
+        regime = "mean_reverting"
+        # higher confidence when price is near both MAs
+        dist_50 = abs(spot - ma50) / ma50 * 100
+        confidence = max(0.3, 1.0 - dist_50 / 5)
+
+    age = _file_age_seconds(f)
+    payload = {
+        "current": regime,
+        "probability": round(confidence, 4),
+        "spot": round(spot, 2),
+        "ma_50": round(ma50, 2),
+        "ma_200": round(ma200, 2),
+        "return_5d_pct": round(return_5d_pct, 2),
+        "realized_vol_21d_pct": round(realized_vol_pct, 2),
+        "structure": "golden_cross" if golden else "death_cross",
+        "above_200d": above_200,
+        "data_age_seconds": age,
+        "bars": len(bars),
+        "model": "spy_simple_v1",
+    }
+    if age is not None and age > 86400:
+        return _envelope("degraded", data=payload, error=f"SPY data {age}s old")
+    return _envelope("ok", data=payload)

@@ -95,9 +95,19 @@ stocks/memory/CONTEXT-BRIEFING.md
 stocks/memory/error.log
 stocks/memory/.*.lock
 
+# Freqtrade private config — telegram token, slack webhook URL, etc.
+# config.json is committed (strategy + non-secret settings); secrets live here.
+user_data/config-private.json
+user_data/config.json.bak-*
+user_data/config.json.tmp
+
 # Wheel module — runtime state regenerates, but trade log stays
 stocks/wheel/state/positions.json
 stocks/wheel/state/cash_log.jsonl
+stocks/wheel/state/account_snapshot.json
+stocks/wheel/state/kill_flags.json
+stocks/wheel/state/trades.jsonl
+stocks/wheel/state/candles_*.json
 stocks/wheel/state/.lock
 stocks/wheel/__pycache__/
 stocks/wheel/state/__pycache__/

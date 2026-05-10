@@ -9,7 +9,7 @@
   <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js" defer></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="/static/css/app.css?v=20260509-5" />
+  <link rel="stylesheet" href="/static/css/app.css?v=20260510-1" />
 </head>
 <body>
   <header class="topbar">
@@ -21,20 +21,81 @@
     <div class="controls">
       <a href="/ops" class="mode-pill" style="text-decoration:none;">↗ OPS CONSOLE</a>
       <select id="pair-select" aria-label="Pair">
-        {% for p in pairs %}
-        <option value="{{ p }}">{{ p }}</option>
-        {% endfor %}
+        <optgroup label="Crypto">
+          {% for p in pairs %}
+          <option value="{{ p }}">{{ p }}</option>
+          {% endfor %}
+        </optgroup>
+        <optgroup label="Stocks · Alpaca paper">
+          {% for s in stock_symbols %}
+          <option value="{{ s }}" data-kind="stock">{{ s }}</option>
+          {% endfor %}
+        </optgroup>
       </select>
       <select id="timeframe-select" aria-label="Timeframe">
         <option value="1m">1m</option>
         <option value="5m" selected>5m</option>
         <option value="15m">15m</option>
         <option value="1h">1h</option>
+        <option value="1d">1d</option>
       </select>
       <span id="mode-badge" class="mode-pill mode-paper" title="Trading mode">PAPER</span>
       <span id="ws-indicator" class="ws-pill ws-off" title="WebSocket status">offline</span>
     </div>
   </header>
+
+  <section id="live-trades-strip" class="live-trades-strip" aria-label="Active trades">
+    <div class="lt-header">
+      <span class="lt-eyebrow">Live trades · all venues</span>
+      <span class="lt-counter" id="lt-counter">— · —</span>
+    </div>
+    <div id="lt-tracks" class="lt-tracks">
+      <div class="lt-empty">Loading…</div>
+    </div>
+  </section>
+  <style>
+    .live-trades-strip {
+      margin: 12px auto;
+      width: min(100%, 1600px);
+      padding: 10px 18px 12px;
+      background: linear-gradient(180deg, var(--bg-card) 0%, var(--bg-inset) 100%);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-card);
+    }
+    .live-trades-strip .lt-header {
+      display: flex; justify-content: space-between; align-items: baseline;
+      margin-bottom: 6px;
+    }
+    .live-trades-strip .lt-eyebrow {
+      font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+      color: var(--text-muted); font-weight: 600;
+    }
+    .live-trades-strip .lt-counter {
+      font-family: var(--mono); font-size: 11px; color: var(--text-muted);
+    }
+    .live-trades-strip .lt-tracks { display: flex; flex-wrap: wrap; gap: 10px; }
+    .lt-pill {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 12px;
+      background: var(--bg-inset);
+      border: 1px solid var(--border-subtle);
+      border-radius: 999px;
+      font-size: 12px; font-family: var(--mono);
+    }
+    .lt-pill[data-kind="crypto"] { border-left: 3px solid #9ab8ff; }
+    .lt-pill[data-kind="wheel"]  { border-left: 3px solid #ffd49a; }
+    .lt-pill[data-pnl="up"]   { background: rgba(63, 185, 80, 0.06); }
+    .lt-pill[data-pnl="down"] { background: rgba(248, 81, 73, 0.06); }
+    .lt-pill .lt-dot { width: 6px; height: 6px; border-radius: 50%; background: #6e6e78; }
+    .lt-pill[data-kind="crypto"] .lt-dot { background: #9ab8ff; }
+    .lt-pill[data-kind="wheel"]  .lt-dot { background: #ffd49a; }
+    .lt-pill .lt-label  { font-weight: 600; color: var(--text-primary); }
+    .lt-pill .lt-detail { color: var(--text-muted); font-size: 11px; }
+    .lt-empty {
+      flex: 1; padding: 14px; text-align: center; color: var(--text-muted);
+      font-size: 12px; font-family: var(--mono); letter-spacing: 0.04em;
+    }
+  </style>
 
   <main class="layout">
     <section class="charts" aria-label="Charts">
@@ -67,8 +128,19 @@
     </section>
 
     <aside class="sidebar" aria-label="Sidebar">
+      <div class="card" id="stock-regime-card">
+        <h3 data-num="04a">Stocks regime <span class="muted" style="font-weight:400;font-size:10px;text-transform:none;letter-spacing:0;">— SPY 50/200</span></h3>
+        <div class="kv"><span>Regime</span><b id="stock-regime-label">—</b></div>
+        <div class="kv"><span>SPY spot</span><b id="stock-regime-spot">—</b></div>
+        <div class="kv"><span>50d MA</span><b id="stock-regime-ma50">—</b></div>
+        <div class="kv"><span>200d MA</span><b id="stock-regime-ma200">—</b></div>
+        <div class="kv"><span>5d return</span><b id="stock-regime-r5">—</b></div>
+        <div class="kv"><span>21d realized vol</span><b id="stock-regime-vol">—</b></div>
+        <div class="kv"><span>Confidence</span><b id="stock-regime-conf">—</b></div>
+      </div>
+
       <div class="card">
-        <h3 data-num="04">Now</h3>
+        <h3 data-num="04">Crypto · BTC bot context</h3>
         <div class="kv"><span>Regime</span><b id="state-regime">—</b></div>
         <div class="meter" title="Regime confidence">
           <div id="meter-regime" class="bar bar-blue"></div>
@@ -119,6 +191,23 @@
         <h3 data-num="09">Recent trades</h3>
         <div id="recent-trades" class="recent"></div>
       </div>
+
+      <div class="card" id="stocks-sidebar-card" data-status="ok">
+        <h3 data-num="10">Stocks · Alpaca <span id="stocks-mode-pill" class="mode-pill mode-paper" style="font-size:9px;padding:1px 6px;margin-left:4px;vertical-align:middle;">PAPER</span></h3>
+        <div class="kv"><span>Cash</span><b id="stocks-cash">—</b></div>
+        <div class="kv"><span>Buying power</span><b id="stocks-bp">—</b></div>
+        <div class="kv"><span>Portfolio value</span><b id="stocks-pv">—</b></div>
+        <div class="kv"><span>Wheel premium</span><b id="stocks-wheel-pnl">—</b></div>
+        <div class="kv"><span>Wheel positions</span><b id="stocks-wheel-pos">—</b></div>
+        <div class="kv"><span>Shark trades · wk</span><b id="stocks-shark-week">—</b></div>
+        <div class="kv"><span>Shark open</span><b id="stocks-shark-open">—</b></div>
+        <div class="kv"><span>Circuit breaker</span><b id="stocks-shark-cb">—</b></div>
+        <div class="kv" style="border-top:1px solid var(--border-subtle);padding-top:6px;margin-top:6px;">
+          <span class="muted" style="font-size:10px;">snapshot</span>
+          <b id="stocks-snapshot-age" class="muted" style="font-size:10px;font-weight:400;">—</b>
+        </div>
+        <a href="/ops#card-stocks" style="display:block;text-align:right;font-size:10px;color:var(--text-muted);text-decoration:none;margin-top:6px;letter-spacing:0.04em;">DETAILS · OPS ↗</a>
+      </div>
     </aside>
   </main>
 
@@ -132,7 +221,7 @@
       wsPushInterval: {{ ws_push_interval }}
     };
   </script>
-  <script src="/static/js/effects.js?v=20260509-5" defer></script>
-  <script src="/static/js/app.js?v=20260509-5" defer></script>
+  <script src="/static/js/effects.js?v=20260510-1" defer></script>
+  <script src="/static/js/app.js?v=20260510-1" defer></script>
 </body>
 </html>

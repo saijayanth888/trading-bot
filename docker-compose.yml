@@ -119,6 +119,7 @@ services:
       trade
       --logfile /freqtrade/user_data/logs/freqtrade.log
       --config /freqtrade/user_data/config.json
+      --config /freqtrade/user_data/config-private.json
       --strategy FreqAIMeanRevV1
 
   # ── DEPRECATION NOTICE ────────────────────────────────────────────────
@@ -174,8 +175,12 @@ services:
       # params from /ops (validated + atomic + backed-up). Trade data is
       # read from TimescaleDB, not files.
       - ./user_data:/freqtrade/user_data
+      # Read-only mount of the stocks subsystem so /api/ops/stocks can
+      # surface shark equity + wheel positions in the unified dashboard.
+      - ./stocks:/freqtrade/stocks:ro
     environment:
       - USER_DATA_ROOT=/freqtrade/user_data
+      - STOCKS_ROOT=/freqtrade/stocks
       - DASHBOARD_PAIRS=${DASHBOARD_PAIRS:-BTC/USD,ETH/USD,SOL/USD}
       - DASHBOARD_TIMEFRAME=${DASHBOARD_TIMEFRAME:-5m}
       - DASHBOARD_WS_INTERVAL_SEC=${DASHBOARD_WS_INTERVAL_SEC:-30}

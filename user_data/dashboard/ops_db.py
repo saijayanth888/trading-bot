@@ -99,7 +99,10 @@ def sentiment_latest() -> dict[str, Any] | None:
         return None
     with _connect() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT ts, sentiment_score, confidence, agreement, n_headlines "
+            "SELECT ts, sentiment_score, confidence, agreement, n_headlines, "
+            "       claude_score, claude_impact, llama_score, llama_impact, "
+            "       fear_greed_value, fear_greed_classification, "
+            "       community_score_avg, key_events "
             "FROM sentiment_log ORDER BY ts DESC LIMIT 1"
         )
         row = cur.fetchone()

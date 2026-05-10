@@ -417,6 +417,7 @@ def _trust_the_majority(fast: dict | None, deep: dict | None) -> dict:
     """
     have_both = bool(fast) and bool(deep)
     if have_both:
+        # Strong signal: both models pick the same directional impact
         same_dir = (
             fast["market_impact"] == deep["market_impact"]
             and fast["market_impact"] in ("bullish", "bearish")
@@ -429,7 +430,38 @@ def _trust_the_majority(fast: dict | None, deep: dict | None) -> dict:
                 "key_events": list(fast["key_events"])[:5],
                 "agreement": True,
             }
-        # Disagreement — neutral
+        # Soft signal: both models say "neutral" but their underlying scores
+        # may still tilt. Propagate the average with a 0.6× confidence
+        # haircut so downstream TFT features carry real information.
+        if fast["market_impact"] == "neutral" and deep["market_impact"] == "neutral":
+            return {
+                "sentiment_score": (fast["sentiment_score"] + deep["sentiment_score"]) / 2,
+                "confidence": min(fast["confidence"], deep["confidence"]) * 0.6,
+                "market_impact": "neutral",
+                "key_events": list(fast.get("key_events") or deep.get("key_events") or [])[:5],
+                "agreement": True,
+            }
+        # One directional + one neutral (an "abstention" rather than a
+        # contradiction) — trust the directional vote with a 0.5×
+        # confidence haircut. Better than zeroing a real call.
+        if fast["market_impact"] == "neutral" and deep["market_impact"] in ("bullish", "bearish"):
+            return {
+                "sentiment_score": deep["sentiment_score"],
+                "confidence": deep["confidence"] * 0.5,
+                "market_impact": deep["market_impact"],
+                "key_events": list(deep.get("key_events") or [])[:5],
+                "agreement": False,
+            }
+        if deep["market_impact"] == "neutral" and fast["market_impact"] in ("bullish", "bearish"):
+            return {
+                "sentiment_score": fast["sentiment_score"],
+                "confidence": fast["confidence"] * 0.5,
+                "market_impact": fast["market_impact"],
+                "key_events": list(fast.get("key_events") or [])[:5],
+                "agreement": False,
+            }
+        # True disagreement (one bullish, one bearish) — emit a real zero
+        # so the downstream feature column carries uncertainty, not noise.
         return {
             "sentiment_score": 0.0,
             "confidence": 0.0,

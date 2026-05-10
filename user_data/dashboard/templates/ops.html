@@ -8,7 +8,7 @@
   <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='6' fill='%237c5cff'/></svg>" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="/static/css/app.css?v=20260509-5" />
+  <link rel="stylesheet" href="/static/css/app.css?v=20260510-1" />
   <style>
     /* ── Page grid ────────────────────────────────────────────────── */
     .ops-grid {
@@ -614,6 +614,68 @@
     </div>
   </header>
 
+  <!-- ── Live trades hero strip (full-width, sticky-adjacent) ──── -->
+  <section id="live-trades-strip" class="live-trades-strip" aria-label="Active trades">
+    <div class="lt-header">
+      <span class="lt-eyebrow">Live trades · all venues</span>
+      <span class="lt-counter" id="lt-counter">— · —</span>
+    </div>
+    <div id="lt-tracks" class="lt-tracks">
+      <div class="lt-empty">Loading…</div>
+    </div>
+  </section>
+
+  <style>
+    .live-trades-strip {
+      grid-column: 1 / -1;
+      margin: 0 auto 12px;
+      width: min(100%, 1400px);
+      padding: 10px 18px 12px;
+      background: linear-gradient(180deg, var(--bg-card) 0%, var(--bg-inset) 100%);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-card);
+    }
+    .live-trades-strip .lt-header {
+      display: flex; justify-content: space-between; align-items: baseline;
+      margin-bottom: 6px;
+    }
+    .live-trades-strip .lt-eyebrow {
+      font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+      color: var(--text-muted); font-weight: 600;
+    }
+    .live-trades-strip .lt-counter {
+      font-family: var(--mono); font-size: 11px; color: var(--text-muted);
+    }
+    .live-trades-strip .lt-tracks {
+      display: flex; flex-wrap: wrap; gap: 10px;
+    }
+    .lt-pill {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 12px;
+      background: var(--bg-inset);
+      border: 1px solid var(--border-subtle);
+      border-radius: 999px;
+      font-size: 12px; font-family: var(--mono);
+      transition: background 200ms;
+    }
+    .lt-pill[data-kind="crypto"] { border-left: 3px solid #9ab8ff; }
+    .lt-pill[data-kind="wheel"]  { border-left: 3px solid #ffd49a; }
+    .lt-pill[data-pnl="up"]   { background: rgba(63, 185, 80, 0.06); }
+    .lt-pill[data-pnl="down"] { background: rgba(248, 81, 73, 0.06); }
+    .lt-pill .lt-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: #6e6e78;
+    }
+    .lt-pill[data-kind="crypto"] .lt-dot { background: #9ab8ff; }
+    .lt-pill[data-kind="wheel"]  .lt-dot { background: #ffd49a; }
+    .lt-pill .lt-label  { font-weight: 600; color: var(--text-primary); }
+    .lt-pill .lt-detail { color: var(--text-muted); font-size: 11px; }
+    .lt-empty {
+      flex: 1; padding: 14px; text-align: center; color: var(--text-muted);
+      font-size: 12px; font-family: var(--mono); letter-spacing: 0.04em;
+    }
+  </style>
+
   <!-- ── KPI strip (under header, sticky-adjacent) ─────────────── -->
   <section class="stat-strip" aria-label="Live KPIs">
     <div>
@@ -641,12 +703,17 @@
   <main>
     <div class="ops-grid">
 
-      <!-- ── HERO STRIP — Market regime · Bot status · Clock ──── -->
+      <!-- ── HERO STRIP — Crypto regime · Stocks regime · Bot · Clock ──── -->
       <section class="ops-card hero" id="hero" data-regime="" data-status="ok">
         <div class="hero-slot">
-          <div class="hero-eyebrow">Market regime <span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0;">— this is what the market is doing, not the bot</span></div>
+          <div class="hero-eyebrow">Crypto regime <span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0;">— BTC HMM</span></div>
           <h1 id="hero-regime" class="hero-headline">Loading…</h1>
           <div class="hero-meta" id="hero-meta">—</div>
+        </div>
+        <div class="hero-slot" id="hero-stock-slot" data-regime="">
+          <div class="hero-eyebrow">Stocks regime <span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0;">— SPY 50/200</span></div>
+          <h1 id="hero-stock-regime" class="hero-headline">Loading…</h1>
+          <div class="hero-meta" id="hero-stock-meta">—</div>
         </div>
         <div class="hero-slot hero-bot">
           <div class="hero-eyebrow">Bot status</div>
@@ -713,6 +780,15 @@
           <span class="age" id="trades-age">—</span>
         </div>
         <div id="trades-body">Loading…</div>
+      </section>
+
+      <!-- ── Stocks: shark momentum + wheel income on Alpaca ──── -->
+      <section class="ops-card wide-card" id="card-stocks" data-status="ok">
+        <div class="card-head">
+          <h3 data-num="11">Stocks · shark + wheel · Alpaca paper</h3>
+          <span class="age" id="stocks-age">—</span>
+        </div>
+        <div id="stocks-body">Loading…</div>
       </section>
 
       <!-- ── Regime parameters editor ──────────────────────────── -->
@@ -897,7 +973,7 @@
       tick(); setInterval(tick, 1000);
     })();
   </script>
-  <script src="/static/js/effects.js?v=20260509-5" defer></script>
-  <script src="/static/js/ops.js?v=20260509-5" defer></script>
+  <script src="/static/js/effects.js?v=20260510-1" defer></script>
+  <script src="/static/js/ops.js?v=20260510-1" defer></script>
 </body>
 </html>
