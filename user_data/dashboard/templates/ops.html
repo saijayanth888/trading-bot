@@ -842,6 +842,45 @@
         }
       </style>
 
+      <!-- ── LLM provider health: Ollama + Anthropic + breaker state ─── -->
+      <section class="ops-card wide-card" id="card-cb" data-status="ok">
+        <div class="card-head">
+          <h3 data-num="14">LLM provider health · Ollama primary · Anthropic fallback</h3>
+          <span class="age" id="cb-age">—</span>
+        </div>
+        <div id="cb-body">Loading…</div>
+      </section>
+
+      <style>
+        .cb-grid {
+          display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px;
+          margin-bottom: 14px;
+        }
+        .cb-card {
+          background: var(--bg-inset);
+          border: 1px solid var(--border-subtle);
+          border-radius: var(--radius-card);
+          padding: 14px 16px;
+        }
+        .cb-card[data-state="open"]      { border-left: 3px solid var(--down); }
+        .cb-card[data-state="half_open"] { border-left: 3px solid var(--warning); }
+        .cb-card[data-state="closed"]    { border-left: 3px solid #3fb950; }
+        .cb-card .cb-name {
+          font-size: 11px; color: var(--text-muted);
+          text-transform: uppercase; letter-spacing: 0.06em;
+        }
+        .cb-card .cb-state {
+          font-size: 18px; font-weight: 600; margin-top: 4px;
+        }
+        .cb-card[data-state="open"]      .cb-state { color: var(--down); }
+        .cb-card[data-state="half_open"] .cb-state { color: var(--warning); }
+        .cb-card[data-state="closed"]    .cb-state { color: #3fb950; }
+        .cb-card .cb-meta {
+          font-size: 11px; color: var(--text-muted); margin-top: 4px;
+          font-family: var(--mono);
+        }
+      </style>
+
       <!-- ── Combined portfolio: unified crypto + stocks ──────── -->
       <section class="ops-card wide-card" id="card-combined" data-status="ok">
         <div class="card-head">
@@ -1097,7 +1136,7 @@
       tick(); setInterval(tick, 1000);
     })();
   </script>
-  {% if effects_enabled %}<script src="/static/js/effects.js?v=20260510-5" defer></script>{% endif %}
-  <script src="/static/js/ops.js?v=20260510-5" defer></script>
+  {% if effects_enabled %}<script src="/static/js/effects.js?v=20260510-6" defer></script>{% endif %}
+  <script src="/static/js/ops.js?v=20260510-6" defer></script>
 </body>
 </html>

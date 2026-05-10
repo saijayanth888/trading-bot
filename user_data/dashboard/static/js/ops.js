@@ -23,6 +23,7 @@ const REFRESH_MS = {
   gates:          15000,   // gates change with each candle
   combined:       30000,   // unified crypto + stocks portfolio
   llm:            60000,   // LLM tracker stats
+  cb:             10000,   // circuit-breaker state — pulse fast for failovers
 };
 
 const REGIME_ARROW = {
@@ -340,6 +341,93 @@ async function refreshTrades() {
   }
 
   body.innerHTML = html;
+}
+
+// ─── LLM circuit breakers (Ollama primary + Anthropic fallback) ──
+async function refreshCircuitBreakers() {
+  const [cbResp, ohResp] = await Promise.all([
+    jsonFetch("/api/ops/circuit_breakers"),
+    jsonFetch("/api/ops/ollama_health"),
+  ]);
+  const cbEnv = cbResp.body;
+  const ohEnv = ohResp.body;
+  setStatus("card-cb", cbEnv.status || "down");
+  const ageEl = document.getElementById("cb-age");
+  const body = document.getElementById("cb-body");
+  if (!body) return;
+
+  const breakers = (cbEnv.data && cbEnv.data.breakers) || [];
+  const summary = (cbEnv.data && cbEnv.data.summary) || {};
+  const oh = (ohEnv.data) || null;
+
+  // Header line
+  if (ageEl) {
+    const ohState = oh
+      ? (oh.healthy ? `Ollama OK · ${oh.last_probe_latency_s ?? "—"}s probe`
+                    : `Ollama UNHEALTHY · ${oh.error || ""}`.slice(0, 60))
+      : "no Ollama health data yet";
+    const fb = summary.any_failover_active ? "  ·  ⚠ FAILOVER ACTIVE" : "";
+    ageEl.textContent = `${ohState}${fb}`;
+    ageEl.style.color = summary.any_failover_active ? "var(--down)" : "";
+  }
+
+  // Wipe + render
+  while (body.firstChild) body.removeChild(body.firstChild);
+
+  // 1. Ollama health summary (if we have it)
+  if (oh) {
+    const healthBlock = document.createElement("div");
+    healthBlock.style.cssText =
+      "background:var(--bg-inset);border:1px solid var(--border-subtle);" +
+      "border-radius:var(--radius-card);padding:14px 16px;margin-bottom:14px;";
+    const hue = oh.healthy ? "#3fb950" : "var(--down)";
+    healthBlock.innerHTML = `
+      <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em;">Ollama probe</div>
+      <div style="display:flex;gap:24px;align-items:baseline;margin-top:6px;flex-wrap:wrap;">
+        <div><span style="color:${hue};font-size:18px;font-weight:600;">${oh.healthy ? "● HEALTHY" : "● UNHEALTHY"}</span></div>
+        <div class="muted" style="font-size:11px;font-family:var(--mono);">probe ${oh.last_probe_latency_s ?? "—"}s · ${(oh.models_available || []).length} models loaded · ${oh.consecutive_failures} consecutive failures</div>
+      </div>${oh.models_missing && oh.models_missing.length ? `<div class="bad" style="font-size:11px;margin-top:6px;">missing: ${oh.models_missing.join(", ")}</div>` : ""}
+      ${oh.error ? `<div class="bad" style="font-size:11px;margin-top:6px;">${esc(String(oh.error))}</div>` : ""}
+    `;
+    body.appendChild(healthBlock);
+  }
+
+  // 2. Circuit-breakers grid
+  if (!breakers.length) {
+    const empty = document.createElement("div");
+    empty.className = "muted";
+    empty.style.cssText = "padding: 12px; font-size: 12px;";
+    empty.textContent = "— no breakers yet — they spawn on the first shark LLM call —";
+    body.appendChild(empty);
+    return;
+  }
+
+  const grid = document.createElement("div");
+  grid.className = "cb-grid";
+  // Sort: Ollama first, then Anthropic; fast then deep within each
+  const sorted = breakers.slice().sort((a, b) => {
+    const aa = (a.name || "").toLowerCase();
+    const bb = (b.name || "").toLowerCase();
+    return aa.localeCompare(bb);
+  });
+  for (const b of sorted) {
+    const card = document.createElement("div");
+    card.className = "cb-card";
+    card.dataset.state = b.state || "closed";
+    const inSec = b.in_state_seconds || 0;
+    const inStr = inSec < 60 ? `${inSec}s` : inSec < 3600 ? `${Math.floor(inSec/60)}m` : `${Math.floor(inSec/3600)}h`;
+    card.innerHTML = `
+      <div class="cb-name">${esc(b.name || "?")} · ${esc(b.tier || "?")}</div>
+      <div class="cb-state">${(b.state || "closed").toUpperCase().replace("_", " ")}</div>
+      <div class="cb-meta">
+        in state ${esc(inStr)} · ${esc(b.failure_count || 0)} failures<br>
+        p50 ${b.p50_latency_s ?? "—"}s · p95 ${b.p95_latency_s ?? "—"}s · threshold ${b.threshold_s ?? "—"}s<br>
+        ${esc(b.samples_in_window || 0)} samples in last 60s
+      </div>
+    `;
+    grid.appendChild(card);
+  }
+  body.appendChild(grid);
 }
 
 // ─── Combined portfolio (crypto + stocks unified view) ───────────
@@ -1673,6 +1761,7 @@ document.addEventListener("DOMContentLoaded", () => {
   refreshGates();
   refreshCombined();
   refreshLLMStats();
+  refreshCircuitBreakers();
   refreshRegime().then(refreshSentiment);
   refreshStockRegime();
   refreshServices(); refreshTraining(); refreshMcp(); refreshTrades();
@@ -1686,6 +1775,7 @@ document.addEventListener("DOMContentLoaded", () => {
   setInterval(refreshGates, REFRESH_MS.gates);
   setInterval(refreshCombined, REFRESH_MS.combined);
   setInterval(refreshLLMStats, REFRESH_MS.llm);
+  setInterval(refreshCircuitBreakers, REFRESH_MS.cb);
   setInterval(() => { refreshRegime().then(refreshSentiment); }, REFRESH_MS.regime);
   setInterval(refreshStockRegime, REFRESH_MS.stock_regime);
   setInterval(refreshServices, REFRESH_MS.services);

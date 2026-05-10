@@ -2039,6 +2039,60 @@ async def live_trades():
     return _envelope("ok", data={"trades": out, "summary": summary})
 
 
+@router.get("/ollama_health")
+async def ollama_health():
+    """Latest Ollama health probe — read from /tmp/ollama-health.json that
+    the cron-driven `python -m user_data.modules.ollama_health` writes."""
+    status_file = Path(os.environ.get("OLLAMA_HEALTH_STATUS_FILE", "/tmp/ollama-health.json"))
+    raw = _read_json(status_file)
+    if not raw:
+        return _envelope(
+            "down",
+            error="No health data yet — wait for the next ollama_health cron tick "
+                  "(or run `python -m user_data.modules.ollama_health` manually).",
+        )
+    age = _file_age_seconds(status_file)
+    raw["status_age_seconds"] = age
+    if age is not None and age > 300:
+        return _envelope("degraded", data=raw, error=f"health probe {age}s stale")
+    return _envelope("ok" if raw.get("healthy") else "degraded", data=raw,
+                     error=raw.get("error"))
+
+
+@router.get("/circuit_breakers")
+async def circuit_breakers():
+    """Status of all LLM circuit breakers (Ollama + Anthropic, fast + deep).
+
+    The shark process owns the breaker registry; the dashboard reads disk
+    state via discover_from_disk() so it doesn't need to share memory.
+    """
+    try:
+        import sys as _sys
+        stocks_root = STOCKS_ROOT
+        if str(stocks_root) not in _sys.path:
+            _sys.path.insert(0, str(stocks_root))
+        from shark.llm.circuit_breaker import discover_from_disk
+    except ImportError as exc:
+        return _envelope("down", error=f"circuit_breaker module unavailable: {exc}",
+                         data={"breakers": []})
+
+    breakers = discover_from_disk()
+    # Build a top-level summary so the UI can show "any breaker open" at-a-glance.
+    open_count = sum(1 for b in breakers if b.get("state") == "open")
+    half_open_count = sum(1 for b in breakers if b.get("state") == "half_open")
+    summary = {
+        "total": len(breakers),
+        "open": open_count,
+        "half_open": half_open_count,
+        "any_failover_active": open_count > 0 or half_open_count > 0,
+    }
+    return _envelope(
+        "degraded" if open_count > 0 else "ok",
+        data={"summary": summary, "breakers": breakers},
+        error=f"{open_count} breaker(s) OPEN — Anthropic fallback active" if open_count else None,
+    )
+
+
 @router.get("/llm_stats")
 async def llm_stats():
     """LLM inference monitor — latency, model routing, counterfactual cost.

@@ -178,6 +178,11 @@ services:
       # Read-only mount of the stocks subsystem so /api/ops/stocks can
       # surface shark equity + wheel positions in the unified dashboard.
       - ./stocks:/freqtrade/stocks:ro
+      # Read-only view of host /tmp so the dashboard can see the LLM
+      # circuit-breaker state files (/tmp/shark-cb-*.json) and the
+      # Ollama health probe output (/tmp/ollama-health.json) that the
+      # host-side shark process + ollama_health cron write to.
+      - /tmp:/host-tmp:ro
     environment:
       - USER_DATA_ROOT=/freqtrade/user_data
       - STOCKS_ROOT=/freqtrade/stocks
@@ -186,6 +191,10 @@ services:
       # Anthropic. Read-only display; container does not call the LLM.
       - SHARK_LLM_PROVIDER=${SHARK_LLM_PROVIDER:-ollama}
       - OLLAMA_MODEL=${OLLAMA_MODEL:-hermes3:70b}
+      # Point to the host /tmp view so /api/ops/{circuit_breakers,ollama_health}
+      # can see what shark + the host-side ollama_health cron write.
+      - SHARK_CB_DIR=/host-tmp
+      - OLLAMA_HEALTH_STATUS_FILE=/host-tmp/ollama-health.json
       # Animation gate — operator can set DASHBOARD_EFFECTS=0 to drop the
       # decorative effects.js layer for a data-first display.
       - DASHBOARD_EFFECTS=${DASHBOARD_EFFECTS:-1}
