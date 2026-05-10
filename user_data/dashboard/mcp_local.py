@@ -408,43 +408,57 @@ def get_sentiment_scores() -> list[dict]:
 
 
 def get_onchain_signals() -> dict:
+    """Read on-chain features from the new free pipeline (rebuilt 2026-05-08).
+
+    The old paid-API tables (exchange_netflow, mvrv_ratio, whale_transactions)
+    are still present in the schema but no longer written — we now ingest into
+    derivatives_features (OKX funding rate → netflow proxy via z-score) and
+    macro_features (BTC MVRV, fear & greed, mempool fees). Querying the old
+    tables silently returned empty arrays which made every MCP caller think
+    we had no on-chain signal.
+    """
     if not ops_db._HAVE_PG:
         return {}
     out: dict = {}
     with ops_db._connect() as conn, conn.cursor() as cur:
+        # derivatives_features: per-pair OKX funding rate + open interest +
+        # taker buy/sell volume. Used as the "netflow proxy" (no genuinely
+        # free spot exchange-flow API exists for retail).
         cur.execute(
-            "SELECT ts, asset, netflow, netflow_z FROM exchange_netflow "
-            "ORDER BY ts DESC LIMIT 5"
+            "SELECT ts, pair, funding_rate, open_interest_usd, "
+            "       long_short_ratio, taker_buy_vol_usd, taker_sell_vol_usd "
+            "FROM derivatives_features ORDER BY ts DESC LIMIT 8"
         )
-        out["exchange_netflow"] = [
+        out["derivatives"] = [
             {"ts": r["ts"].isoformat() if isinstance(r["ts"], datetime) else r["ts"],
-             "asset": r["asset"],
-             "netflow": float(r["netflow"] or 0),
-             "netflow_z": float(r["netflow_z"] or 0)}
+             "pair": r["pair"],
+             "funding_rate": float(r["funding_rate"]) if r.get("funding_rate") is not None else None,
+             "open_interest_usd": float(r["open_interest_usd"]) if r.get("open_interest_usd") is not None else None,
+             "long_short_ratio": float(r["long_short_ratio"]) if r.get("long_short_ratio") is not None else None,
+             "taker_buy_usd": float(r["taker_buy_vol_usd"]) if r.get("taker_buy_vol_usd") is not None else None,
+             "taker_sell_usd": float(r["taker_sell_vol_usd"]) if r.get("taker_sell_vol_usd") is not None else None}
             for r in cur.fetchall()
         ]
+        # macro_features: stablecoin mcap (delta), F&G index, BTC dominance,
+        # BTC MVRV, mempool fastest-fee.
         cur.execute(
-            "SELECT ts, asset, mvrv FROM mvrv_ratio ORDER BY ts DESC LIMIT 5"
+            "SELECT ts, stablecoin_mcap_usd, stablecoin_mcap_chg_24h, "
+            "       fear_greed_index, btc_dominance_pct, btc_mvrv, "
+            "       btc_mempool_fastest_fee "
+            "FROM macro_features ORDER BY ts DESC LIMIT 5"
         )
-        out["mvrv_ratio"] = [
+        out["macro"] = [
             {"ts": r["ts"].isoformat() if isinstance(r["ts"], datetime) else r["ts"],
-             "asset": r["asset"], "mvrv": float(r["mvrv"] or 0)}
-            for r in cur.fetchall()
-        ]
-        cur.execute(
-            "SELECT ts, hash, blockchain, amount_usd, transaction_type "
-            "FROM whale_transactions ORDER BY ts DESC LIMIT 5"
-        )
-        out["whale_transactions"] = [
-            {"ts": r["ts"].isoformat() if isinstance(r["ts"], datetime) else r["ts"],
-             "hash": r.get("hash"),
-             "blockchain": r.get("blockchain"),
-             "amount_usd": float(r["amount_usd"] or 0),
-             "type": r.get("transaction_type")}
+             "stablecoin_mcap_usd": float(r["stablecoin_mcap_usd"]) if r.get("stablecoin_mcap_usd") is not None else None,
+             "stablecoin_chg_24h_pct": float(r["stablecoin_mcap_chg_24h"]) if r.get("stablecoin_mcap_chg_24h") is not None else None,
+             "fear_greed": float(r["fear_greed_index"]) if r.get("fear_greed_index") is not None else None,
+             "btc_dominance_pct": float(r["btc_dominance_pct"]) if r.get("btc_dominance_pct") is not None else None,
+             "btc_mvrv": float(r["btc_mvrv"]) if r.get("btc_mvrv") is not None else None,
+             "btc_mempool_fastest_fee": float(r["btc_mempool_fastest_fee"]) if r.get("btc_mempool_fastest_fee") is not None else None}
             for r in cur.fetchall()
         ]
     _audit("get_onchain_signals", {},
-           f"netflow={len(out['exchange_netflow'])} mvrv={len(out['mvrv_ratio'])} whale={len(out['whale_transactions'])}")
+           f"derivatives={len(out['derivatives'])} macro={len(out['macro'])}")
     return out
 
 

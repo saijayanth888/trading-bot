@@ -504,26 +504,31 @@ async def get_sentiment_scores() -> list[dict]:
 
 @mcp.tool()
 async def get_onchain_signals() -> dict:
-    """Latest whale transfers, MVRV, exchange netflow per asset."""
-    out = {"netflow": [], "mvrv": [], "whales": []}
-    out["netflow"] = _query(
-        "SELECT DISTINCT ON (asset) asset, ts, netflow "
-        "FROM exchange_netflow ORDER BY asset, ts DESC"
+    """Latest derivatives + macro features (free pipeline rebuilt 2026-05-08).
+
+    Old paid-API tables (exchange_netflow, mvrv_ratio, whale_transactions)
+    are retained for schema compatibility but no longer written. We now
+    surface OKX funding rate, open interest, taker volume, and macro
+    features (BTC MVRV, F&G index, mempool fastest-fee, stablecoin mcap).
+    """
+    out = {"derivatives": [], "macro": []}
+    out["derivatives"] = _query(
+        "SELECT DISTINCT ON (pair) pair, ts, funding_rate, open_interest_usd, "
+        "       long_short_ratio, taker_buy_vol_usd, taker_sell_vol_usd "
+        "FROM derivatives_features ORDER BY pair, ts DESC"
     )
-    out["mvrv"] = _query(
-        "SELECT DISTINCT ON (asset) asset, ts, value "
-        "FROM mvrv_ratio ORDER BY asset, ts DESC"
-    )
-    out["whales"] = _query(
-        "SELECT id, ts, symbol, amount_usd, from_owner_type, to_owner_type "
-        "FROM whale_transactions ORDER BY ts DESC LIMIT 20"
+    out["macro"] = _query(
+        "SELECT ts, stablecoin_mcap_usd, stablecoin_mcap_chg_24h, "
+        "       fear_greed_index, btc_dominance_pct, btc_mvrv, "
+        "       btc_mempool_fastest_fee "
+        "FROM macro_features ORDER BY ts DESC LIMIT 1"
     )
     for k in out:
         for r in out[k]:
             for kk, vv in list(r.items()):
                 if isinstance(vv, datetime):
                     r[kk] = vv.isoformat()
-    _audit("get_onchain_signals", {}, f"netflow={len(out['netflow'])} mvrv={len(out['mvrv'])} whales={len(out['whales'])}")
+    _audit("get_onchain_signals", {}, f"derivatives={len(out['derivatives'])} macro={len(out['macro'])}")
     return out
 
 
