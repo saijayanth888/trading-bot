@@ -144,6 +144,7 @@
     mcp: "/api/ops/mcp",
     sentiment: "/api/ops/sentiment",
     stocks_sentiment: "/api/ops/stocks_sentiment",
+    shark_briefing: "/api/ops/shark_briefing",
   };
   const SLOW_ENDPOINTS = {
     ept_champion: { url: "/api/ops/mcp/get_champion_genome", method: "POST", body: {} },
@@ -1737,6 +1738,72 @@
     );
   }
 
+  // ─────────────── SHARK BRIEFING (today's pre-market + market-open decisions) ───────────────
+  // Surfaces Shark's actual decision flow — confirmed/skipped candidates,
+  // market regime, macro context — read from stocks/memory/DAILY-HANDOFF.md
+  // via the new /api/ops/shark_briefing endpoint. The operator's morning
+  // question was "why no stocks trades?" — this card answers it inline.
+  function SharkBriefingLive({ data }) {
+    const slot = slotState(data, "shark_briefing");
+    const env = envelopeData(slot.env) || {};
+    const phases = env.phases || [];
+    const latest = phases[phases.length - 1] || {};
+    const dateLabel = env.handoff_date || "—";
+    const regime = latest.regime || "—";
+    const macro = latest.macro || "—";
+    const regimeKlass = regime.startsWith("BULL") ? "up"
+                      : regime.startsWith("BEAR") ? "down" : "info";
+    const macroKlass = macro === "CLEAR" ? "up" : macro === "ELEVATED" ? "warn" : "info";
+
+    if (slot.phase !== "ok") {
+      return h(Card, {
+        num: "13c", title: "Shark briefing · today's decisions",
+        sub: slot.phase === "loading" ? "loading…" : "endpoint unavailable",
+        right: cardRight(slot.fetchedAt)
+      },
+        slot.phase === "loading"
+          ? h(LoadingState)
+          : h(EmptyState, { reason: slot.reason, fetchedAt: slot.fetchedAt, period: 30 })
+      );
+    }
+
+    return h(Card, {
+      num: "13c", title: "Shark briefing · " + dateLabel,
+      sub: phases.length + " phase" + (phases.length === 1 ? "" : "s") + " logged",
+      right: cardRight(slot.fetchedAt,
+        h(F, null,
+          h("span", { className: "pill " + regimeKlass, title: "Shark's market regime classifier (ATR + trend_score)" }, regime),
+          " ",
+          h("span", { className: "pill " + macroKlass, title: "Macro calendar (CPI/FOMC/NFP today or next day)" }, "MACRO " + macro)
+        )
+      )
+    },
+      phases.length === 0
+        ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)" } }, "no phase blocks for today yet")
+        : h(F, null,
+            // Per-phase rows
+            phases.map((p, i) => h("div", { key: i, style: { display: "flex", gap: 12, padding: "6px 0", borderBottom: "1px solid var(--line-2)", alignItems: "flex-start" } },
+              h("div", { className: "mono dim", style: { fontSize: "var(--t-xs)", minWidth: 100 } }, p.phase + " · " + p.time + " " + p.tz),
+              h("div", { style: { flex: 1, fontSize: "var(--t-xs)" } },
+                p.confirmed.length
+                  ? h("div", { style: { color: "var(--up)" } }, "✓ confirmed: ", p.confirmed.join(", "))
+                  : h("div", { className: "dim" }, "✓ confirmed: (none)"),
+                p.skipped.length
+                  ? h("div", { className: "dim" }, "✗ skipped: " + p.skipped.join(", "))
+                  : null,
+                p.market_summary
+                  ? h("div", { className: "dim", style: { fontSize: "var(--t-2xs)" } }, p.market_summary)
+                  : null,
+              ),
+            )),
+            // Trade-block explanation block — clarifies WHY no entries fired
+            env.trade_block_explanation
+              ? h("div", { style: { marginTop: 10, padding: "8px 10px", background: "var(--bg-inset)", borderRadius: 4, fontSize: "var(--t-2xs)", color: "var(--fg-2)", lineHeight: 1.5 } }, env.trade_block_explanation)
+              : null
+          )
+    );
+  }
+
   // ─────────────── CHAMPION GENOME (slow card, 60s) ───────────────
   function ChampionCardLive({ data }) {
     const slot = slotState(data, "ept_champion");
@@ -1935,6 +2002,8 @@
               h(StocksSentimentLive, { data })
             )
           ),
+          // SHARK BRIEFING — full-width because the candidate lists can be long
+          h(SharkBriefingLive, { data }),
           // PAIR TELEMETRY
           h(PairTelemetryLive, { data }),
           // SERVICES + POSITIONS

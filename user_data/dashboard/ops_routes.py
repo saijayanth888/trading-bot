@@ -2452,6 +2452,89 @@ async def combined_portfolio():
     )
 
 
+@router.get("/shark_briefing")
+async def shark_briefing():
+    """Parsed Shark daily handoff — today's regime, macro, candidates.
+
+    Source of truth: `stocks/memory/DAILY-HANDOFF.md`, written by every Shark
+    phase. Format (per phase block):
+        ## pre-market | 09:14 EDT
+        confirmed: NVDA
+        skipped: GOOGL, AMD, CCJ, CRDO, XOM
+        market: bullish=9 bearish=1 of 30
+        regime: BEAR_VOLATILE
+        macro: ELEVATED
+        lessons: none
+
+    This is what's behind "why no stocks trades fired today" — the operator
+    couldn't see Shark's decision flow on the dashboard until now.
+    """
+    handoff_path = STOCKS_ROOT / "memory" / "DAILY-HANDOFF.md"
+    if not handoff_path.exists():
+        return _envelope("down", error=f"missing: {handoff_path}")
+
+    try:
+        raw = handoff_path.read_text(errors="replace")
+    except Exception as exc:
+        return _envelope("down", error=str(exc))
+
+    import re
+    # Find today's date header (operator wants TODAY only)
+    today = datetime.now(timezone.utc).astimezone(
+        timezone(timedelta(hours=-4))  # ET — Shark writes in EDT
+    ).strftime("%Y-%m-%d")
+    # Locate "# Daily Handoff — <date>" block
+    day_match = re.search(r"# Daily Handoff — (\d{4}-\d{2}-\d{2})", raw)
+    handoff_date = day_match.group(1) if day_match else None
+
+    # Parse each "## phase | HH:MM TZ" sub-block
+    phases = []
+    phase_re = re.compile(
+        r"##\s+(?P<phase>[\w-]+)\s+\|\s+(?P<time>\d{2}:\d{2})\s+(?P<tz>\w+)\s*\n"
+        r"(?P<body>(?:(?!^##\s).*\n?)+)",
+        re.MULTILINE,
+    )
+    for m in phase_re.finditer(raw):
+        body = m.group("body")
+        kv: dict[str, str] = {}
+        for line in body.splitlines():
+            line = line.strip()
+            if ":" in line and not line.startswith("#"):
+                k, _, v = line.partition(":")
+                kv[k.strip()] = v.strip()
+        # Parse "confirmed: NVDA" into list; same for skipped
+        confirmed = [s.strip() for s in (kv.get("confirmed") or "").split(",") if s.strip()]
+        skipped = [s.strip() for s in (kv.get("skipped") or "").split(",") if s.strip()]
+        phases.append({
+            "phase": m.group("phase"),
+            "time": m.group("time"),
+            "tz": m.group("tz"),
+            "confirmed": confirmed,
+            "skipped": skipped,
+            "market_summary": kv.get("market"),
+            "regime": kv.get("regime"),
+            "macro": kv.get("macro"),
+            "lessons": kv.get("lessons"),
+        })
+
+    age_s = int((datetime.now(timezone.utc).timestamp() - handoff_path.stat().st_mtime))
+    return _envelope(
+        "ok" if phases else "degraded",
+        data={
+            "handoff_date": handoff_date,
+            "phases": phases,
+            "n_phases": len(phases),
+            "file_age_s": age_s,
+            "trade_block_explanation": (
+                "Shark trades when regime is BULL_QUIET or BULL_VOLATILE AND no "
+                "CPI/FOMC/NFP today or tomorrow. PAPER-mode BEAR override allows "
+                "1 trade/day at 0.5x size with confidence ≥ 0.85."
+            ),
+        },
+        error=None if phases else "no phase blocks parsed",
+    )
+
+
 @router.get("/stocks_ml")
 async def stocks_ml():
     """Stocks ML pipeline status — TFT model freshness, val_acc, generation log.
