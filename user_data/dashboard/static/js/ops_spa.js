@@ -831,7 +831,7 @@
               const data = p.closes || [];
               const pct = Number(p.pct_24h || 0);
               const px = Number(p.current || 0);
-              const href = "/dashboard_spa?pair=" + encodeURIComponent(sym) + "&venue=crypto";
+              const href = "/?pair=" + encodeURIComponent(sym) + "&venue=crypto";
               return h("a", {
                 key: sym, href, className: "card interactive",
                 style: { padding: "var(--s-3)", textDecoration: "none", color: "inherit" }
@@ -2228,7 +2228,7 @@
           ),
           h("div", { id: "mcp-console", className: "anchor" }, h(MCPToolConsole, { data })),
           h("div", { style: { padding: "var(--s-4) 0", textAlign: "center", color: "var(--fg-4)", fontSize: "var(--t-xs)", fontFamily: "var(--mono)" } },
-            "QUANTA v2.6 · /ops_spa · A/B alongside legacy /ops · build " + new Date().toISOString().slice(0, 10))
+            "QUANTA v2.6 · build " + new Date().toISOString().slice(0, 10))
         )
       )
     );

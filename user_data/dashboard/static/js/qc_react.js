@@ -1054,23 +1054,18 @@
 
   // ─────────────── Sidebar ───────────────
   function Sidebar({ active }) {
-    // Routes (see user_data/dashboard/app.py): /ops_spa and /dashboard_spa.
-    // The hand-off template carried over Vite-style `index.html`/`dashboard.html`
-    // hrefs that produce 404s under FastAPI's URL space — replaced with the
-    // server's actual routes here. Section sub-items still anchor under
-    // /ops_spa#<id> until the inline-section routes land.
     const items = [
       { sect: "MONITOR" },
-      { id: "ops", label: "Ops console", key: "1", href: "/ops_spa" },
-      { id: "dashboard", label: "Pair dashboard", key: "2", href: "/dashboard_spa" },
+      { id: "ops", label: "Ops console", key: "1", href: "/ops" },
+      { id: "dashboard", label: "Pair dashboard", key: "2", href: "/" },
       { sect: "ANALYSIS" },
-      { id: "agent", label: "Agent timeline", key: "3", href: "/ops_spa#agent" },
-      { id: "risk", label: "Risk & gates", key: "4", href: "/ops_spa#risk" },
-      { id: "research", label: "Research feed", key: "5", href: "/ops_spa#research" },
+      { id: "agent", label: "Agent timeline", key: "3", href: "/ops#agent" },
+      { id: "risk", label: "Risk & gates", key: "4", href: "/ops#risk" },
+      { id: "research", label: "Research feed", key: "5", href: "/ops#research" },
       { sect: "SYSTEM" },
-      { id: "evolution", label: "Evolution", key: "6", href: "/ops_spa#evolution" },
-      { id: "llm", label: "LLM providers", key: "7", href: "/ops_spa#llm" },
-      { id: "config", label: "Config", key: "8", href: "/ops_spa#config" },
+      { id: "evolution", label: "Evolution", key: "6", href: "/ops#evolution" },
+      { id: "llm", label: "LLM providers", key: "7", href: "/ops#llm" },
+      { id: "config", label: "Config", key: "8", href: "/ops#config" },
     ];
     useEffect(() => {
       const navItems = items.filter((it) => !it.sect);

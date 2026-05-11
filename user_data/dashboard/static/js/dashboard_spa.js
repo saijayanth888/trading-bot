@@ -28,8 +28,8 @@
     // ET clock — matches the legacy /ops topbar (operator preference, see MIGRATION_NOTES §1).
     try {
       return new Date().toLocaleTimeString("en-US", {
-        hour12: false, timeZone: "America/New_York",
-        hour: "2-digit", minute: "2-digit", second: "2-digit",
+        hour12: true, timeZone: "America/New_York",
+        hour: "numeric", minute: "2-digit", second: "2-digit",
       }) + " ET";
     } catch (_) {
       const d = new Date();
@@ -54,15 +54,16 @@
   // string is rendered as HH:MM in UTC.
   function toCandles(backendCandles, timeframe) {
     if (!Array.isArray(backendCandles)) return [];
+    const minsPerStep = ({ "1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440 })[timeframe] || 5;
+    const tz = "America/New_York";
+    const fmt = minsPerStep >= 1440
+      ? new Intl.DateTimeFormat("en-US", { timeZone: tz, month: "numeric", day: "numeric" })
+      : minsPerStep >= 60
+        ? new Intl.DateTimeFormat("en-US", { timeZone: tz, month: "numeric", day: "numeric", hour: "numeric", hour12: true })
+        : new Intl.DateTimeFormat("en-US", { timeZone: tz, month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true });
     return backendCandles.map((b, i) => {
       const d = new Date((b.time || 0) * 1000);
-      const minsPerStep = ({ "1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440 })[timeframe] || 5;
-      let t;
-      if (minsPerStep >= 1440) t = (d.getUTCMonth() + 1) + "/" + d.getUTCDate();
-      else if (minsPerStep >= 60) t = String(d.getUTCHours()).padStart(2, "0") + ":00";
-      else t = String(d.getUTCHours()).padStart(2, "0") + ":" + String(d.getUTCMinutes()).padStart(2, "0");
-      // ts (Unix epoch seconds) added so CandleChart overlays can match
-      // indicator points (which carry their own .time epoch) by timestamp.
+      const t = fmt.format(d).replace(",", "");
       return { o: Number(b.open), h: Number(b.high), l: Number(b.low), c: Number(b.close), t, i, ts: Number(b.time) };
     });
   }
@@ -467,7 +468,7 @@
           ),
 
           h("div", { style: { padding: "var(--s-4) 0", textAlign: "center", color: "var(--fg-4)", fontSize: "var(--t-xs)", fontFamily: "var(--mono)" } },
-            "QUANTA v2.6 · /dashboard_spa · A/B alongside legacy / · build " + new Date().toISOString().slice(0, 10))
+            "QUANTA v2.6 · build " + new Date().toISOString().slice(0, 10))
         )
       )
     );
