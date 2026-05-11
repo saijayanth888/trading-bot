@@ -279,6 +279,46 @@ def _sync_repo() -> None:
         logger.warning("git sync skipped: %s", exc)
 
 
+def _retry_push_if_flag_present() -> None:
+    """If a prior routine left memory/PUSH-FAILED.flag, attempt one retry push.
+
+    Idempotent and safe to call on every startup: if no flag exists, this is a
+    no-op. If the flag IS present, we try `git push origin HEAD:main`; on
+    success we delete the flag (operator-visible recovery) so the bot can
+    resume. On failure we keep the flag in place and let the downstream
+    `_check_push_failed_flag()` gate trading phases as before.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    flag = repo_root / "memory" / "PUSH-FAILED.flag"
+    if not flag.exists():
+        return
+    if os.environ.get("SHARK_AUTO_PUSH", "").lower() not in ("1", "true", "yes"):
+        logger.info(
+            "PUSH-FAILED.flag present but SHARK_AUTO_PUSH disabled — leaving for operator"
+        )
+        return
+    logger.warning("PUSH-FAILED.flag present — attempting recovery push to origin/main")
+    try:
+        retry = subprocess.run(
+            ["git", "push", "origin", "HEAD:main"],
+            cwd=str(repo_root),
+            capture_output=True, text=True, timeout=60,
+        )
+        if retry.returncode == 0:
+            try:
+                flag.unlink()
+            except OSError as exc:
+                logger.warning("Push succeeded but could not remove flag: %s", exc)
+            logger.info("Recovery push succeeded — PUSH-FAILED.flag cleared")
+        else:
+            logger.error(
+                "Recovery push failed: %s",
+                retry.stderr.strip()[:200],
+            )
+    except Exception as exc:
+        logger.error("Recovery push raised: %s", exc)
+
+
 def _check_push_failed_flag() -> bool:
     """Return True if a previous routine left a PUSH-FAILED.flag we should respect."""
     flag = Path(__file__).resolve().parents[1] / "memory" / "PUSH-FAILED.flag"
@@ -340,6 +380,11 @@ def main() -> None:
 
     logger.info("=== shark run.py starting phase=%s dry_run=%s ===", args.phase, args.dry_run)
     _sync_repo()
+
+    # If a previous routine left memory/PUSH-FAILED.flag, attempt to retry the
+    # push immediately. Runs unconditionally on startup (not gated by phase) so
+    # even non-trading phases (kb-update, daily-summary) can self-heal.
+    _retry_push_if_flag_present()
 
     # Pre-flight checks — fail fast before expensive phase execution
     if not _verify_dependencies():

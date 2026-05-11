@@ -63,13 +63,15 @@ def _score(
     if rs_data:
         rs_composite = rs_data.get("rs_composite", 0)
         rs_signal = rs_data.get("rs_rank_signal", "")
-        if rs_signal == "STRONG_OUTPERFORM":
+        # Signal vocabulary comes from shark/data/relative_strength.py:
+        #   STRONG / MODERATE / WEAK / UNDERPERFORMING
+        if rs_signal == "STRONG":
             score += 3
-        elif rs_signal == "OUTPERFORM":
+        elif rs_signal == "MODERATE":
             score += 2
-        elif rs_signal == "UNDERPERFORM":
+        elif rs_signal == "WEAK":
             score -= 2
-        elif rs_signal == "STRONG_UNDERPERFORM":
+        elif rs_signal == "UNDERPERFORMING":
             score -= 3
 
         if rs_data.get("acceleration", 0) > 0:

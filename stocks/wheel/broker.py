@@ -313,6 +313,42 @@ class Broker:
         )
         return {"id": getattr(resp, "id", None), "status": str(getattr(resp, "status", ""))}
 
+    # ── Position queries (used for assignment detection) ───────────────────
+
+    def get_option_position_qty(self, option_symbol: str) -> int:
+        """Return the broker-side quantity for one option symbol.
+
+        Convention: short positions return a NEGATIVE quantity; long positions
+        POSITIVE; the symbol-not-found case returns 0 (which is also what the
+        broker reports after an option is assigned away).
+
+        Used by wheel.runner.assignment_check() to detect when a short put
+        position has gone to zero qty at the broker. We pair that with a
+        matching long-shares position to confirm assignment vs ordinary close.
+        """
+        try:
+            pos = self.trading.get_open_position(option_symbol)
+            return int(float(getattr(pos, "qty", 0) or 0))
+        except Exception as exc:
+            # alpaca-py raises APIError("position does not exist") on flat
+            msg = str(exc).lower()
+            if "position does not exist" in msg or "not found" in msg or "404" in msg:
+                return 0
+            logger.warning("get_option_position_qty(%s) failed: %s", option_symbol, exc)
+            return 0
+
+    def get_stock_position_qty(self, underlying: str) -> int:
+        """Return the broker-side share quantity for one underlying."""
+        try:
+            pos = self.trading.get_open_position(underlying)
+            return int(float(getattr(pos, "qty", 0) or 0))
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "position does not exist" in msg or "not found" in msg or "404" in msg:
+                return 0
+            logger.warning("get_stock_position_qty(%s) failed: %s", underlying, exc)
+            return 0
+
     # ── Order maintenance ──────────────────────────────────────────────────
 
     def list_open_orders(self, symbol: Optional[str] = None) -> list:

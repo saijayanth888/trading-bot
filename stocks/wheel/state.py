@@ -50,6 +50,8 @@ class Position:
     entry_credit: float = 0.0  # premium collected (puts/calls)
     entry_price: float = 0.0  # cost basis (shares) — also strike when assigned
     opened_at: str = ""  # ISO8601
+    source: str = ""  # Free-form provenance tag, e.g. "wheel_assignment".
+    status: str = ""  # "" (open), "assigned", "called_away" — informational only.
 
 
 @dataclass
@@ -91,6 +93,27 @@ def add_position(p: Position) -> None:
 def remove_position(contract_symbol: str) -> None:
     positions = [p for p in load_positions() if p.contract_symbol != contract_symbol]
     save_positions(positions)
+
+
+def update_position(contract_symbol: str, **changes) -> bool:
+    """Update fields on an existing position. Returns True if a row was changed.
+
+    Used by wheel.runner.assignment_check() to mark a short_put as
+    `status="assigned"` rather than deleting it outright — so the trade
+    log retains the linkage between the short put and the long shares
+    that were created from it.
+    """
+    positions = load_positions()
+    changed = False
+    for p in positions:
+        if p.contract_symbol == contract_symbol:
+            for k, v in changes.items():
+                if hasattr(p, k):
+                    setattr(p, k, v)
+                    changed = True
+    if changed:
+        save_positions(positions)
+    return changed
 
 
 def find_open_csp(underlying: str) -> Optional[Position]:

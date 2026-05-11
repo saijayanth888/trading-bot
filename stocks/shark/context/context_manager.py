@@ -186,8 +186,9 @@ def _extract_sections(text: str, params: dict) -> str:
 def _extract_today(text: str, _params: dict) -> str:
     """Extract only today's entries from a markdown file with date headers."""
     today_str = date.today().isoformat()
+    # Note: braces are doubled inside f-strings — `{{1,3}}` -> `{1,3}` regex quantifier.
     pattern = re.compile(
-        rf"^(#{1,3}\s+{re.escape(today_str)}.*)$(.*?)(?=^#{1,3}\s+\d{{4}}-\d{{2}}-\d{{2}}|\Z)",
+        rf"^(#{{1,3}}\s+{re.escape(today_str)}.*)$(.*?)(?=^#{{1,3}}\s+\d{{4}}-\d{{2}}-\d{{2}}|\Z)",
         re.MULTILINE | re.DOTALL,
     )
     match = pattern.search(text)

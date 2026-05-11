@@ -152,7 +152,8 @@ def write_daily_summary(summary: dict[str, Any]) -> None:
     Args:
         summary: Dict with keys:
             date (str, optional), equity (float), cash (float),
-            day_pl (float), open_positions (int, optional),
+            day_pl OR day_pnl_dollars (float),
+            open_positions OR positions (int/list, optional),
             notes (str, optional).
     """
     _ensure_file(_TRADE_LOG_FILE, _TRADE_LOG_HEADER)
@@ -160,8 +161,13 @@ def write_daily_summary(summary: dict[str, Any]) -> None:
     date = summary.get("date") or datetime.now().strftime("%Y-%m-%d")
     equity = float(summary.get("equity", 0.0))
     cash = float(summary.get("cash", 0.0))
-    day_pl = float(summary.get("day_pl", 0.0))
-    open_positions = summary.get("open_positions", "N/A")
+    # Accept both legacy ("day_pl") and current ("day_pnl_dollars") keys.
+    day_pl = float(
+        summary.get("day_pl", summary.get("day_pnl_dollars", 0.0))
+    )
+    # Accept both "open_positions" and "positions" (the latter may be a list).
+    op_raw = summary.get("open_positions", summary.get("positions", "N/A"))
+    open_positions = len(op_raw) if isinstance(op_raw, (list, tuple)) else op_raw
     notes = summary.get("notes", "")
 
     sign = "+" if day_pl >= 0 else ""
