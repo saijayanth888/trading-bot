@@ -784,7 +784,7 @@
   // ─────────────── Topbar ───────────────
   // Note: tweaks (theme/density/accent) are NOT ported; only the props
   // (killState, setKillState, active, density) used by the prototype itself.
-  function Topbar({ killState, setKillState, active, density }) {
+  function Topbar({ killState, setKillState, active, density, onRefreshIntervalChange, onRefreshNow }) {
     const [clock, setClock] = useState(fmtClock());
     // Real uptime — poll /api/ops/uptime every 30s for freqtrade's actual
     // start time. Earlier this was page-load time, which made the pill
@@ -939,15 +939,33 @@
         ),
         h(
           "select",
-          { className: "select" },
-          h("option", null, "5s"),
-          h("option", null, "10s"),
-          h("option", null, "30s"),
-          h("option", null, "1m"),
-          h("option", null, "Off")
+          {
+            className: "select",
+            "aria-label": "Refresh interval",
+            defaultValue: "5",
+            onChange: (e) => {
+              if (typeof onRefreshIntervalChange !== "function") return;
+              const raw = e.target.value;
+              const ms = raw === "off" ? 0 : parseInt(raw, 10) * 1000;
+              onRefreshIntervalChange(ms);
+            },
+          },
+          h("option", { value: "5" }, "5s"),
+          h("option", { value: "10" }, "10s"),
+          h("option", { value: "30" }, "30s"),
+          h("option", { value: "60" }, "1m"),
+          h("option", { value: "off" }, "Off")
         ),
-        h("button", { className: "icon-btn", title: "Force refresh" }, "↻"),
-        h("button", { className: "icon-btn", title: "Cmd palette" }, "⌘K")
+        h(
+          "button",
+          {
+            className: "icon-btn",
+            title: "Force refresh",
+            "aria-label": "Refresh now",
+            onClick: () => { if (typeof onRefreshNow === "function") onRefreshNow(); },
+          },
+          "↻"
+        )
       ),
       h("div", { className: "tb-divider" }),
       h(KillSwitch, {
