@@ -108,8 +108,14 @@
   // configured via the freqtrade pair_whitelist). Stocks venue stays
   // hardcoded since the endpoint is crypto-only; STOCK_SYMBOLS matches the
   // operator's paper-trading basket (SOFI / PLTR / NVDA / AMD / SPY).
-  const FALLBACK_CRYPTO_PAIRS = ["BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD", "AVAX/USD", "LINK/USD"];
-  const STOCK_SYMBOLS = ["SOFI", "PLTR", "NVDA", "AMD", "SPY"];
+  // Fallbacks if /api/pairs or /api/ops/stocks_sparklines is unreachable.
+  // Both are now config-driven on the backend (DASHBOARD_PAIRS env var for
+  // crypto, DASHBOARD_STOCK_SYMBOLS env var for stocks) so these arrays
+  // only exist as emergency seeds. Operator can't be left with a dropdown
+  // that omits tickers they're actively trading — kept in sync with the
+  // 8-pair freqtrade whitelist + 10-symbol wheel/dashboard basket.
+  const FALLBACK_CRYPTO_PAIRS = ["BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD", "XRP/USD", "DOGE/USD", "AVAX/USD", "LINK/USD"];
+  const FALLBACK_STOCK_SYMBOLS = ["SOFI", "PLTR", "NVDA", "AMD", "SPY", "TSLA", "AAPL", "GOOGL", "MSTR", "COIN"];
 
   // ─────────────── TopbarLive ───────────────
   // Replaces the prototype's hardcoded Topbar ($119,842.42 + 1.84%). Wires
@@ -232,12 +238,27 @@
     // freqtrade pair_whitelist). Falls back to FALLBACK_CRYPTO_PAIRS on a
     // network error so the dropdown still has something selectable.
     const [cryptoPairs, setCryptoPairs] = useState(FALLBACK_CRYPTO_PAIRS);
+    // Stocks basket from /api/ops/stocks_sparklines.basket — config-driven
+    // via DASHBOARD_STOCK_SYMBOLS env var. Falls back to the 10-symbol seed
+    // if the endpoint is unreachable on boot.
+    const [stockSymbols, setStockSymbols] = useState(FALLBACK_STOCK_SYMBOLS);
     useEffect(() => {
       fetch("/api/pairs")
         .then(r => r.json())
         .then(d => {
           const arr = Array.isArray(d && d.pairs) ? d.pairs : [];
           if (arr.length) setCryptoPairs(arr);
+        })
+        .catch(() => { /* keep fallback */ });
+      // Stocks basket lives at /api/ops/stocks_sparklines.data.basket
+      // (config-driven by DASHBOARD_STOCK_SYMBOLS env). Operator added
+      // TSLA / AAPL / GOOGL / MSTR / COIN to the basket and complained the
+      // dropdown still only listed 5 — the SPA had a hardcoded array.
+      fetch("/api/ops/stocks_sparklines")
+        .then(r => r.json())
+        .then(env => {
+          const basket = (env && env.data && env.data.basket) || [];
+          if (Array.isArray(basket) && basket.length) setStockSymbols(basket);
         })
         .catch(() => { /* keep fallback */ });
     }, []);
@@ -344,7 +365,7 @@
       };
     }, [fetchState, fetchCandles, fetchTopbar, streamPaused, refreshMs]);
 
-    const venuePairs = venue === "crypto" ? cryptoPairs : STOCK_SYMBOLS;
+    const venuePairs = venue === "crypto" ? cryptoPairs : stockSymbols;
     useEffect(() => {
       // When venue switches and current pair is not in that venue, jump to first.
       // Also re-runs when cryptoPairs lands so the default selection lines up
