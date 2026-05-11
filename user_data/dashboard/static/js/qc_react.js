@@ -979,6 +979,25 @@
       { id: "llm", label: "LLM providers", key: "7", href: "/ops_spa#llm" },
       { id: "config", label: "Config", key: "8", href: "/ops_spa#config" },
     ];
+    useEffect(() => {
+      const navItems = items.filter((it) => !it.sect);
+      const onKey = (e) => {
+        const tag = e.target && e.target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+        if (e.target && e.target.isContentEditable) return;
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
+        const n = parseInt(e.key, 10);
+        if (n >= 1 && n <= navItems.length) {
+          const item = navItems[n - 1];
+          if (item && item.href) {
+            e.preventDefault();
+            window.location.assign(item.href);
+          }
+        }
+      };
+      document.addEventListener("keydown", onKey);
+      return () => document.removeEventListener("keydown", onKey);
+    }, []);
     return h(
       "nav",
       { className: "sidebar" },
