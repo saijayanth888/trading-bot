@@ -9,7 +9,7 @@
   <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js" defer></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="/static/css/app.css?v=20260511-4" />
+  <link rel="stylesheet" href="/static/css/app.css?v=20260511-6" />
 </head>
 <body class="js-on">
 <div class="app">
@@ -128,59 +128,6 @@
     #refresh-now-btn:hover { background: var(--bg-card-hover) !important; }
   </style>
 
-  <section id="live-trades-strip" class="live-trades-strip" aria-label="Active trades">
-    <div class="lt-header">
-      <span class="lt-eyebrow">Live trades · all venues</span>
-      <span class="lt-counter" id="lt-counter">— · —</span>
-    </div>
-    <div id="lt-tracks" class="lt-tracks">
-      <div class="lt-empty">Loading…</div>
-    </div>
-  </section>
-  <style>
-    .live-trades-strip {
-      margin: 12px auto;
-      width: min(100%, 1600px);
-      padding: 10px 18px 12px;
-      background: linear-gradient(180deg, var(--bg-card) 0%, var(--bg-inset) 100%);
-      border: 1px solid var(--border-subtle);
-      border-radius: var(--radius-card);
-    }
-    .live-trades-strip .lt-header {
-      display: flex; justify-content: space-between; align-items: baseline;
-      margin-bottom: 6px;
-    }
-    .live-trades-strip .lt-eyebrow {
-      font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
-      color: var(--text-muted); font-weight: 600;
-    }
-    .live-trades-strip .lt-counter {
-      font-family: var(--mono); font-size: 11px; color: var(--text-muted);
-    }
-    .live-trades-strip .lt-tracks { display: flex; flex-wrap: wrap; gap: 10px; }
-    .lt-pill {
-      display: flex; align-items: center; gap: 8px;
-      padding: 6px 12px;
-      background: var(--bg-inset);
-      border: 1px solid var(--border-subtle);
-      border-radius: 999px;
-      font-size: 12px; font-family: var(--mono);
-    }
-    .lt-pill[data-kind="crypto"] { border-left: 3px solid #9ab8ff; }
-    .lt-pill[data-kind="wheel"]  { border-left: 3px solid #ffd49a; }
-    .lt-pill[data-pnl="up"]   { background: rgba(63, 185, 80, 0.06); }
-    .lt-pill[data-pnl="down"] { background: rgba(248, 81, 73, 0.06); }
-    .lt-pill .lt-dot { width: 6px; height: 6px; border-radius: 50%; background: #6e6e78; }
-    .lt-pill[data-kind="crypto"] .lt-dot { background: #9ab8ff; }
-    .lt-pill[data-kind="wheel"]  .lt-dot { background: #ffd49a; }
-    .lt-pill .lt-label  { font-weight: 600; color: var(--text-primary); }
-    .lt-pill .lt-detail { color: var(--text-muted); font-size: 11px; }
-    .lt-empty {
-      flex: 1; padding: 14px; text-align: center; color: var(--text-muted);
-      font-size: 12px; font-family: var(--mono); letter-spacing: 0.04em;
-    }
-  </style>
-
   <main class="main">
   <div class="page-title">
     <h1 id="chart-title-hero">Pair dashboard</h1>
@@ -216,7 +163,7 @@
       </div>
     </section>
 
-    <aside class="sidebar" aria-label="Sidebar">
+    <aside class="rail" aria-label="Pair sidebar">
       <div class="card" id="stock-regime-card">
         <h3 data-num="04a">Stocks regime <span class="muted" style="font-weight:400;font-size:10px;text-transform:none;letter-spacing:0;">— SPY 50/200</span></h3>
         <div class="kv"><span>Regime</span><b id="stock-regime-label">—</b></div>
@@ -385,8 +332,8 @@
     })();
   </script>
 
-  {% if effects_enabled %}<script src="/static/js/effects.js?v=20260511-4" defer></script>{% endif %}
-  <script src="/static/js/components.js?v=20260511-4"></script>
-  <script src="/static/js/app.js?v=20260511-4" defer></script>
+  {% if effects_enabled %}<script src="/static/js/effects.js?v=20260511-6" defer></script>{% endif %}
+  <script src="/static/js/components.js?v=20260511-6"></script>
+  <script src="/static/js/app.js?v=20260511-6" defer></script>
 </body>
 </html>
