@@ -134,6 +134,7 @@
     services: "/api/ops/services",
     gates: "/api/ops/gates",
     sparklines: "/api/ops/sparklines",
+    stocks_sparklines: "/api/ops/stocks_sparklines",
     trades_risk: "/api/ops/trades_risk",
     live_trades: "/api/ops/live_trades",
     stocks_ml: "/api/ops/stocks_ml",
@@ -898,6 +899,94 @@
               );
             })
           )
+    );
+  }
+
+  // ─────────────── STOCKS PAIR TELEMETRY — sparklines live ───────────────
+  // Stocks-side parity to PairTelemetryLive. Reads from /api/ops/stocks_sparklines
+  // (5Min × 78 bars ≈ one US trading session by default). NYSE-closed window
+  // dims the card and swaps the sub-line to "last session close".
+  function StocksPairTelemetryLive({ data }) {
+    const slot = slotState(data, "stocks_sparklines");
+    const env = envelopeData(slot.env) || {};
+    const symbols = env.symbols || {};
+    const basket = Array.isArray(env.basket) ? env.basket : Object.keys(symbols);
+    const marketOpen = env.market_open;
+    const tfLabel = env.timeframe || "5Min";
+
+    if (slot.phase === "down") {
+      return h(Card, {
+        num: "23", title: "Stocks pair telemetry · " + tfLabel + " · session-to-date",
+        sub: "endpoint unavailable",
+        right: cardRight(slot.fetchedAt),
+      },
+        h(EmptyState, { reason: slot.reason, fetchedAt: slot.fetchedAt, period: 10 })
+      );
+    }
+    if (slot.phase === "loading") {
+      return h(Card, {
+        num: "23", title: "Stocks pair telemetry · " + tfLabel + " · session-to-date",
+        sub: "loading…",
+        right: cardRight(slot.fetchedAt),
+      }, h(LoadingState));
+    }
+
+    const subLine = marketOpen
+      ? basket.length + " symbols · NYSE open · auto-refresh 10s"
+      : basket.length + " symbols · NYSE closed · last session close";
+
+    const wrapperStyle = marketOpen
+      ? null
+      : { opacity: 0.78 };  // visually dim when market closed, per spec
+
+    return h(Card, {
+      num: "23", title: "Stocks pair telemetry · " + tfLabel + " · session window",
+      sub: subLine,
+      right: cardRight(slot.fetchedAt),
+    },
+      h("div", { style: wrapperStyle },
+        basket.length === 0
+          ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)" } }, "no stock symbols configured")
+          : h("div", { className: "grid g-4", style: { gap: "var(--s-3)" } },
+              basket.map(sym => {
+                const p = symbols[sym] || {};
+                const closes = p.closes || [];
+                const pct = (p.pct_session == null) ? null : Number(p.pct_session);
+                const px = (p.current == null) ? null : Number(p.current);
+                const err = p.error;
+                const cellStyle = { padding: "var(--s-3)", textDecoration: "none", color: "inherit" };
+                const sparkColor = pct == null ? "--fg-3" : (pct >= 0 ? "--up" : "--down");
+                const pctCls = pct == null ? "" : (pct >= 0 ? "up" : "down");
+
+                return h("div", {
+                  key: sym,
+                  className: "card",
+                  style: cellStyle,
+                  "data-test": "stocks-spark-" + sym,
+                },
+                  h("div", { style: { display: "flex", alignItems: "baseline", gap: 8 } },
+                    h("strong", { className: "mono" }, sym),
+                    pct == null
+                      ? h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, "—")
+                      : h("span", { className: "pill " + pctCls, style: { height: 16, fontSize: "var(--t-2xs)" } }, fmtPct(pct)),
+                    h("span", { className: "tb-spacer", style: { flex: 1 } })
+                  ),
+                  h("div", { style: { marginTop: 6 } },
+                    closes.length >= 2
+                      ? h(Sparkline, { data: closes, color: sparkColor, height: 32 })
+                      : h("div", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } },
+                          err ? err : "no closes")
+                  ),
+                  h("div", { style: { display: "flex", justifyContent: "space-between", marginTop: 4 } },
+                    h("span", { className: "num", style: { fontSize: "var(--t-sm)" } },
+                      px == null ? "—" : "$" + fmtUSD(px)),
+                    h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } },
+                      (p.bars_count != null ? p.bars_count : closes.length) + " bars")
+                  )
+                );
+              })
+            )
+      )
     );
   }
 
@@ -2288,8 +2377,9 @@
           ),
           // SHARK BRIEFING — full-width because the candidate lists can be long
           h(SharkBriefingLive, { data }),
-          // PAIR TELEMETRY
+          // PAIR TELEMETRY — crypto then stocks, both full-width.
           h(PairTelemetryLive, { data }),
+          h(StocksPairTelemetryLive, { data }),
           // SERVICES + POSITIONS
           h("div", { className: "grid g-12", style: { gap: "var(--gap-grid)" } },
             h("div", { style: { gridColumn: "span 4" } }, h(ServicesLive, { data })),
