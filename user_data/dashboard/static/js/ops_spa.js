@@ -1250,11 +1250,11 @@
       sub: "atomic config writes · snapshots auto-saved"
     },
       h("div", { className: "grid g-2", style: { gap: "var(--s-3)" } },
-        h("button", { className: "btn", onClick: doPause }, "⏸ PAUSE TRADING"),
-        h("button", { className: "btn", onClick: doResume }, "▶ RESUME"),
-        h("button", { className: "btn warn", onClick: doEvolve }, "⚡ TRIGGER EVOLUTION"),
-        h("button", { className: "btn", onClick: doRebalance }, "⚖ REBALANCE WEIGHTS"),
-        h("button", { className: "btn", onClick: doSlackBrief }, "⇣ DAILY SLACK BRIEF")
+        h("button", { className: "btn", onClick: doPause, "aria-label": "Pause trading" }, "PAUSE TRADING"),
+        h("button", { className: "btn", onClick: doResume, "aria-label": "Resume trading" }, "RESUME"),
+        h("button", { className: "btn warn", onClick: doEvolve, "aria-label": "Trigger evolution cycle" }, "TRIGGER EVOLUTION"),
+        h("button", { className: "btn", onClick: doRebalance, "aria-label": "Rebalance portfolio weights" }, "REBALANCE WEIGHTS"),
+        h("button", { className: "btn", onClick: doSlackBrief, "aria-label": "Generate daily Slack brief" }, "DAILY SLACK BRIEF")
       ),
       status.msg && h("div", {
         style: {
