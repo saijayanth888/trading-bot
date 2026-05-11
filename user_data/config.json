@@ -186,7 +186,7 @@
     "regime_gating": {
         "_doc": "Per-regime tuning. entry_delta values are added to entry_threshold; exit_delta values are added to exit_threshold. null means 'hard-block long entries in this regime'. Override at runtime with FREQTRADE__REGIME_GATING__<KEY> env vars. AGGRESSIVE first-30-day stance for $1k/mo target \u2014 risk_management floor (8% DD, 3% daily, 5-loss breaker, Kelly 0.5) is unchanged.",
         "entry_delta": {
-            "trending_up": -0.08,
+            "trending_up": -0.15,
             "mean_reverting": 0,
             "high_volatility": 0.08,
             "trending_down": 0.15,
@@ -204,7 +204,7 @@
         "mean_rev_take_profit": 0.012,
         "trending_up_trail_trigger": 0.025,
         "trending_up_trail_distance": -0.02,
-        "tft_min_confidence": 0.5,
+        "tft_min_confidence": 0.4,
         "meta_min_confidence": 0.35
     },
     "capital_allocation": {
