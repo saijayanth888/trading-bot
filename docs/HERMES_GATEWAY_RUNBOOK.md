@@ -18,6 +18,26 @@ Read this before debugging gateway/cron issues.
 
 ---
 
+## Reverse-proxy WARNING (auth safety)
+
+**Do NOT add a reverse proxy (nginx / caddy / cloudflared / Traefik) in front of the dashboard without re-enabling `Authorization: Bearer` headers on the SPA's `fetch()` calls.**
+
+The dashboard's `require_mcp_key` dependency (in `user_data/dashboard/ops_routes.py`) bypasses auth for same-origin browser POSTs — i.e. requests whose `Origin` header matches the `Host` header. As of B-17 (2026-05-11) this exemption is also gated on `request.client.host in ("127.0.0.1", "::1")` for defense-in-depth.
+
+A reverse proxy breaks both halves of this gate at once:
+- The proxy rewrites `Host` to match its own hostname, and the browser will send `Origin` matching that same hostname → same-origin check passes for **every** external request.
+- The TCP peer the dashboard sees is the proxy's local IP (`127.0.0.1` if proxy + dashboard share the host, or the proxy's container IP if dockerized) → the loopback check passes too.
+
+Net effect: every external request looks like a local same-origin operator click. **The auth gate silently re-opens.**
+
+If you ever need to put the dashboard behind HTTPS / a reverse proxy:
+1. Delete the same-origin bypass block in `require_mcp_key` (the `if host_header and origin and client_host in ("127.0.0.1", "::1")` block), forcing **every** mutating call to carry a Bearer token, AND
+2. Restore `Authorization: Bearer ${HERMES_MCP_KEY}` headers on every SPA `fetch()` to mutating endpoints (`/api/ops/pause`, `/api/ops/resume`, `/api/ops/regime_config`, `/api/ops/rebalance`, `/api/mcp/dispatch/*`).
+
+References: `user_data/dashboard/ops_routes.py::require_mcp_key`, `tests/test_ops_dashboard.py::test_pause_*` (the 4 B-17 tests pin the current behaviour).
+
+---
+
 ## Daily health check (one command)
 
 ```bash
