@@ -682,19 +682,24 @@
         items.length === 0
           ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)", padding: "var(--s-3) 0" } }, "no recent activity")
           : items.map((r, i) => {
-              const open = expanded === i;
               const dot = r.level === "warn" ? "warn"
                         : r.level === "down" ? "down"
                         : r.level === "up" ? "up"
                         : "accent";
               const srcVar = "var(--" + dot + ")";
+              // Stable identity prevents React from reusing DOM nodes when
+              // a new event unshifts at the top — expanded state previously
+              // pointed at index N which mapped to a different event after
+              // the refresh tick.
+              const stableKey = `${r.ts}:${r.src}:${(r.title || '').slice(0, 32)}`;
+              const open = expanded === stableKey;
               return h("div", {
-                key: i,
+                key: stableKey,
                 style: {
                   display: "grid", gridTemplateColumns: "60px 12px 1fr", gap: "var(--s-3)",
                   padding: "var(--s-3) 0", borderBottom: "1px solid var(--line-1)", cursor: "pointer",
                 },
-                onClick: () => setExpanded(open ? null : i)
+                onClick: () => setExpanded(open ? null : stableKey)
               },
                 h("div", { className: "mono dim", style: { fontSize: "var(--t-xs)", paddingTop: 2 } },
                   h(TimeSince, { ts: r.ts })),
