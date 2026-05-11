@@ -732,6 +732,19 @@
   }
 
   // ─────────────── ENTRY GATES — live from /api/ops/gates ───────────────
+  function GateDot({ state, label, detail }) {
+    // tiny inline dot used in EntryGatesLive's per-pair gate-strip. hover
+    // title surfaces gate name + detail so operator gets per-gate context
+    // without expanding the row.
+    const color = state === true ? "var(--c-up)"
+      : state === false ? "var(--c-down)"
+      : "color-mix(in srgb, var(--fg-3) 60%, transparent)";
+    return h("span", {
+      title: label + " — " + (state === true ? "PASS" : state === false ? "BLOCK" : "n/a") + (detail ? " · " + detail : ""),
+      style: { width: 9, height: 9, borderRadius: "50%", background: color, display: "inline-block", flexShrink: 0 },
+    });
+  }
+
   function EntryGatesLive({ data }) {
     const [expand, setExpand] = useState(null);
     const slot = slotState(data, "gates");
@@ -749,6 +762,14 @@
     const passing = all.filter(p => (p.blocking || 0) === 0).length;
     const blocked = all.length - passing;
 
+    // Aggregate which gate is the most common blocker (operator wants
+    // "what's keeping everything offline" at a glance).
+    const blockerCounts = {};
+    all.forEach(p => p.gates.filter(g => g.pass === false).forEach(g => {
+      blockerCounts[g.gate] = (blockerCounts[g.gate] || 0) + 1;
+    }));
+    const topBlockers = Object.entries(blockerCounts).sort((a, b) => b[1] - a[1]).slice(0, 2);
+
     if (slot.phase !== "ok") {
       return h(Card, {
         num: "05", title: "Entry gates · why isn't anything trading?",
@@ -763,40 +784,66 @@
 
     return h(Card, {
       num: "05", title: "Entry gates · why isn't anything trading?",
-      sub: passing + "/" + all.length + " pairs eligible",
+      sub: passing + "/" + all.length + " pair" + (all.length === 1 ? "" : "s") + " eligible",
       right: cardRight(slot.fetchedAt,
-        h("span", { className: "pill" }, h("span", { className: "dot warn" }), " ", blocked, " BLOCKED"))
+        h("span", { className: "pill " + (blocked > 0 ? "down" : "up"), style: { height: 18 } },
+          h("span", { className: "dot " + (blocked > 0 ? "down pulse" : "up") }), " ",
+          blocked > 0 ? (blocked + " BLOCKED") : "ALL CLEAR"))
     },
-      h("table", { className: "t" },
-        h("thead", null, h("tr", null,
-          h("th", null, "Pair"),
-          h("th", null, "Regime"),
-          h("th", null, "Blocking"),
-          h("th", null, "First blocker"),
-          h("th", null, "")
-        )),
-        h("tbody", null, all.length === 0
-          ? h("tr", null, h("td", { colSpan: 5, className: "dim", style: { fontSize: "var(--t-xs)", padding: "var(--s-3)" } }, "no gate data — endpoint returned empty"))
-          : all.map((p, i) => h(F, { key: p.sym },
-              h("tr", { onClick: () => setExpand(expand === i ? null : i), style: { cursor: "pointer" } },
-                h("td", null, h("strong", null, p.sym)),
-                h("td", null, h("span", { className: "pill " + (p.regime === "trending_up" ? "up" : p.regime === "trending_down" ? "down" : "info"), style: { height: 18 } }, p.regime || "—")),
-                h("td", null, h(GateBadge, { state: p.blocking === 0 ? "PASS" : "BLOCK" })),
-                h("td", { className: "dim", style: { fontSize: "var(--t-xs)" } }, p.first_blocker || "—"),
-                h("td", { className: "dim mono", style: { fontSize: "var(--t-xs)" } }, expand === i ? "▾" : "▸")
+      // ── aggregate banner: tells operator "why is everything off" in one line ──
+      blocked > 0 && topBlockers.length > 0 && h("div", {
+        style: { fontSize: "var(--t-xs)", padding: "var(--s-2) var(--s-3)",
+          marginBottom: "var(--s-2)", borderLeft: "2px solid var(--c-down)",
+          background: "color-mix(in srgb, var(--c-down) 6%, transparent)" }
+      },
+        h("span", { style: { color: "var(--fg-1)" } }, blocked + " of " + all.length + " pairs blocked"),
+        h("span", { className: "dim", style: { marginLeft: 8 } }, "most common: "),
+        topBlockers.map(([g, n], i) => h("span", { key: g, className: "mono", style: { marginLeft: 6 } },
+          (i > 0 ? "· " : "") + g + " (" + n + "×)"))
+      ),
+
+      // ── per-pair rows: pair · regime · gate-strip dots · n/M · first blocker · ▸ ──
+      all.length === 0
+        ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)", padding: "var(--s-3)" } },
+            "no gate data — endpoint returned empty")
+        : h("div", { style: { display: "flex", flexDirection: "column", gap: 0 } },
+            all.map((p, i) => h(F, { key: p.sym }, [
+              h("div", {
+                key: "row",
+                onClick: () => setExpand(expand === i ? null : i),
+                style: { cursor: "pointer", display: "grid",
+                  gridTemplateColumns: "minmax(80px,1fr) minmax(110px,1fr) minmax(120px,2fr) minmax(60px,80px) minmax(120px,1fr) 18px",
+                  gap: "var(--s-2)", alignItems: "center",
+                  padding: "var(--s-2) var(--s-2)",
+                  borderBottom: "1px solid var(--line-1)",
+                  fontSize: "var(--t-xs)" }
+              },
+                h("strong", { style: { color: "var(--fg-1)" } }, p.sym),
+                h("span", { className: "pill " + (p.regime === "trending_up" ? "up" : p.regime === "trending_down" ? "down" : "info"),
+                  style: { height: 18, justifySelf: "start" } }, p.regime || "—"),
+                h("span", { style: { display: "inline-flex", gap: 4, alignItems: "center", flexWrap: "wrap" } },
+                  p.gates.map((g, gi) => h(GateDot, { key: gi, state: g.pass, label: g.gate, detail: g.detail }))),
+                h("span", { className: "mono dim", style: { fontSize: "var(--t-2xs)" } },
+                  (p.gates.length - p.blocking) + "/" + p.gates.length + " pass"),
+                h("span", { className: p.first_blocker ? "mono" : "dim", style: { fontSize: "var(--t-xs)", color: p.first_blocker ? "var(--c-down)" : undefined } },
+                  p.first_blocker || "—"),
+                h("span", { className: "dim mono", style: { fontSize: "var(--t-xs)" } }, expand === i ? "▾" : "▸")
               ),
-              expand === i && h("tr", null, h("td", { colSpan: 5, style: { background: "var(--bg-inset)", padding: "var(--s-3) var(--s-4)" } },
-                h("div", { className: "grid g-2", style: { gap: "var(--s-2)" } },
-                  p.gates.map((g, gi) => h("div", { key: gi, style: { display: "flex", alignItems: "center", gap: 8 } },
+              expand === i && h("div", {
+                key: "exp",
+                style: { background: "var(--bg-inset)", padding: "var(--s-3) var(--s-4)",
+                  borderBottom: "1px solid var(--line-1)" }
+              },
+                h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--s-2) var(--s-4)" } },
+                  p.gates.map((g, gi) => h("div", { key: gi,
+                    style: { display: "flex", alignItems: "center", gap: 8, fontSize: "var(--t-xs)" } },
                     h(GateBadge, { state: g.pass === true ? "PASS" : g.pass === false ? "BLOCK" : "NA" }),
-                    h("span", { style: { fontSize: "var(--t-xs)", color: "var(--fg-1)" } }, g.gate),
-                    h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)", marginLeft: "auto" } }, g.detail)
-                  ))
-                )
-              ))
-            ))
-        )
-      )
+                    h("span", { style: { color: "var(--fg-1)", minWidth: 140 } }, g.gate),
+                    h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)", flex: 1, textAlign: "right" } }, g.detail)
+                  )))
+              ),
+            ].filter(Boolean)))
+          )
     );
   }
 
@@ -1999,10 +2046,31 @@
     const breakers = env.breakers || [];
     const summary = env.summary || {};
 
-    if (slot.phase === "down") {
+    // Portfolio breaker (the one operator sees in unified_risk) — separate
+    // registry from the LLM/MCP service breakers below. Reads the same
+    // combined_portfolio envelope that the hero + topbar use, so the
+    // tripped/armed state stays in lock-step with the rest of the page.
+    const cpSlot = slotState(data, "combined_portfolio");
+    const cp = envelopeData(cpSlot.env) || {};
+    const portfolioTripped = !!cp.circuit_breaker_active;
+    const dd = Number(cp.combined_drawdown_pct || 0);
+    const ddThreshold = Number(cp.threshold_pct || 10);
+    const stocksStale = !!cp.stocks_data_stale;
+    const stocksUntrusted = !!cp.stocks_data_untrusted;
+    const snapAge = Number(cp.snapshot_age_seconds || 0);
+    const portfolioConditions = [
+      { name: "combined drawdown", tripped: dd >= ddThreshold,
+        detail: dd.toFixed(2) + "% / " + ddThreshold.toFixed(1) + "% threshold" },
+      { name: "stocks data stale", tripped: stocksStale,
+        detail: stocksStale ? ("snapshot " + Math.round(snapAge) + "s old (limit 600s)") : "snapshot fresh" },
+      { name: "stocks data untrusted", tripped: stocksUntrusted,
+        detail: stocksUntrusted ? ("snapshot >2h old — combined-dd fail-safe") : "trust window OK" },
+    ];
+
+    if (slot.phase === "down" && cpSlot.phase === "down") {
       return h(Card, {
         num: "16", title: "Circuit breakers",
-        sub: "endpoint unavailable",
+        sub: "endpoints unavailable",
         right: cardRight(slot.fetchedAt)
       },
         h(EmptyState, { reason: slot.reason, fetchedAt: slot.fetchedAt, period: 10 })
@@ -2011,19 +2079,43 @@
 
     return h(Card, {
       num: "16", title: "Circuit breakers",
-      sub: (summary.open || 0) + " open · " + (summary.half_open || 0) + " half-open · " + (summary.total || 0) + " total",
-      right: cardRight(slot.fetchedAt)
+      sub: (portfolioTripped ? "PORTFOLIO TRIPPED · " : "portfolio armed · ")
+        + (summary.open || 0) + " service open · " + (summary.total || 0) + " total",
+      right: cardRight(slot.fetchedAt,
+        h("span", { className: "pill " + (portfolioTripped ? "down" : "up"), style: { height: 18 } },
+          h("span", { className: "dot " + (portfolioTripped ? "down pulse" : "up") }), " ",
+          portfolioTripped ? "TRIPPED" : "ARMED"))
     },
-      breakers.length === 0
-        ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)" } }, "no breakers registered")
-        : breakers.map((b, i) => h(StatusRow, {
-            key: i,
-            status: b.state === "open" ? "down" : b.state === "half_open" ? "warn" : "up",
-            name: b.name || b.id || "breaker",
-            sub: "failures " + (b.failure_count || 0) + " / threshold " + (b.failure_threshold || "—"),
-            value: h("span", { className: "mono dim", style: { fontSize: "var(--t-2xs)" } },
-              b.state, b.cooldown_remaining_s ? " · " + Math.round(b.cooldown_remaining_s) + "s" : "")
-          }))
+      // ── Section A: portfolio breaker (unified_risk) ──
+      h("div", { style: { marginBottom: "var(--s-3)" } },
+        h("div", { className: "dim2 mono", style: { fontSize: "var(--t-2xs)", letterSpacing: ".08em", textTransform: "uppercase", marginBottom: "var(--s-2)" } },
+          "Portfolio · unified_risk"),
+        h("div", { style: { display: "flex", flexDirection: "column", gap: "var(--s-1)" } },
+          portfolioConditions.map((c, i) => h("div", { key: i,
+            style: { display: "flex", alignItems: "center", gap: 8, fontSize: "var(--t-xs)",
+              padding: "var(--s-1) var(--s-2)", borderLeft: "2px solid " + (c.tripped ? "var(--c-down)" : "var(--c-up)"),
+              background: c.tripped ? "color-mix(in srgb, var(--c-down) 7%, transparent)" : "transparent" } },
+            h(GateBadge, { state: c.tripped ? "BLOCK" : "PASS" }),
+            h("span", { style: { color: "var(--fg-1)" } }, c.name),
+            h("span", { className: "tb-spacer", style: { flex: 1 } }),
+            h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, c.detail)
+          )))
+      ),
+      // ── Section B: service breakers (LLM / MCP / Anthropic) ──
+      h("div", null,
+        h("div", { className: "dim2 mono", style: { fontSize: "var(--t-2xs)", letterSpacing: ".08em", textTransform: "uppercase", marginBottom: "var(--s-2)" } },
+          "Service · LLM / MCP"),
+        breakers.length === 0
+          ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)", padding: "var(--s-1) 0" } }, "no service breakers registered · all paths armed")
+          : breakers.map((b, i) => h(StatusRow, {
+              key: i,
+              status: b.state === "open" ? "down" : b.state === "half_open" ? "warn" : "up",
+              name: b.name || b.id || "breaker",
+              sub: "failures " + (b.failure_count || 0) + " / threshold " + (b.failure_threshold || "—"),
+              value: h("span", { className: "mono dim", style: { fontSize: "var(--t-2xs)" } },
+                b.state, b.cooldown_remaining_s ? " · " + Math.round(b.cooldown_remaining_s) + "s" : "")
+            }))
+      )
     );
   }
 
@@ -2057,10 +2149,15 @@
       const url = "/api/ops/explainability/"
         + encodeURIComponent(base) + "/" + encodeURIComponent(quote)
         + "?limit=5";
-      setErr(null);
-      safeJsonFetch(url)
-        .then(j => { setEnv(j); setFetchedAt(new Date().toISOString()); })
-        .catch(e => { setErr(String(e && e.message || e)); setFetchedAt(new Date().toISOString()); });
+      const fetchNow = () => {
+        setErr(null);
+        safeJsonFetch(url)
+          .then(j => { setEnv(j); setFetchedAt(new Date().toISOString()); })
+          .catch(e => { setErr(String(e && e.message || e)); setFetchedAt(new Date().toISOString()); });
+      };
+      fetchNow();
+      const iv = setInterval(fetchNow, 30_000);
+      return () => clearInterval(iv);
     }, [selected]);
 
     const data = envelopeData(env) || {};
