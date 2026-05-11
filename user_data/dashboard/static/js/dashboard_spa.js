@@ -103,11 +103,11 @@
     });
   }
 
-  // Default crypto pairs and stock symbols — the operator can override
-  // via URL params. STOCK_SYMBOLS matches the operator's actual paper-trading
-  // basket (SOFI / PLTR / NVDA / AMD / SPY); the overnight prompt requires
-  // these specific symbols in the stocks dropdown for the ?venue=stocks probe.
-  const CRYPTO_PAIRS = ["BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD", "AVAX/USD", "LINK/USD"];
+  // Crypto pairs are fetched from /api/pairs (server is source of truth —
+  // configured via the freqtrade pair_whitelist). Stocks venue stays
+  // hardcoded since the endpoint is crypto-only; STOCK_SYMBOLS matches the
+  // operator's paper-trading basket (SOFI / PLTR / NVDA / AMD / SPY).
+  const FALLBACK_CRYPTO_PAIRS = ["BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD", "AVAX/USD", "LINK/USD"];
   const STOCK_SYMBOLS = ["SOFI", "PLTR", "NVDA", "AMD", "SPY"];
 
   // ─────────────── TopbarLive ───────────────
@@ -203,6 +203,20 @@
       combined_fetched_at: null,
     });
 
+    // Crypto pair list — fetched from /api/pairs (server has the canonical
+    // freqtrade pair_whitelist). Falls back to FALLBACK_CRYPTO_PAIRS on a
+    // network error so the dropdown still has something selectable.
+    const [cryptoPairs, setCryptoPairs] = useState(FALLBACK_CRYPTO_PAIRS);
+    useEffect(() => {
+      fetch("/api/pairs")
+        .then(r => r.json())
+        .then(d => {
+          const arr = Array.isArray(d && d.pairs) ? d.pairs : [];
+          if (arr.length) setCryptoPairs(arr);
+        })
+        .catch(() => { /* keep fallback */ });
+    }, []);
+
     // URL params on mount
     useEffect(() => {
       const params = new URLSearchParams(window.location.search);
@@ -296,11 +310,13 @@
       return () => { clearInterval(isvc); clearInterval(ic); clearInterval(itb); };
     }, [fetchState, fetchCandles, fetchTopbar]);
 
-    const venuePairs = venue === "crypto" ? CRYPTO_PAIRS : STOCK_SYMBOLS;
+    const venuePairs = venue === "crypto" ? cryptoPairs : STOCK_SYMBOLS;
     useEffect(() => {
-      // When venue switches and current pair is not in that venue, jump to first
-      if (!venuePairs.includes(pair)) setPair(venuePairs[0]);
-    }, [venue]);  // eslint-disable-line react-hooks/exhaustive-deps
+      // When venue switches and current pair is not in that venue, jump to first.
+      // Also re-runs when cryptoPairs lands so the default selection lines up
+      // with the server's first whitelisted pair.
+      if (venuePairs.length && !venuePairs.includes(pair)) setPair(venuePairs[0]);
+    }, [venue, cryptoPairs]);  // eslint-disable-line react-hooks/exhaustive-deps
 
     // Build dataset for hero strip
     const pairState = (state && state.pair_state) || (meta && meta.pair_state) || (state || {});
