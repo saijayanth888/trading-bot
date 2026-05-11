@@ -319,7 +319,14 @@
   //   dblclick resets to full range
   //   crosshair + OHLC tag on hover
   //   "N bars · scroll = zoom · drag = pan · dbl-click = reset" legend top-right
-  function CandleChart({ candles, markers = [], height = 460, showVolume = true }) {
+  function CandleChart({ candles, markers = [], height = 460, showVolume = true, overlays = null }) {
+    // overlays: {
+    //   bb_upper: [{time, value}], bb_mid: [...], bb_lower: [...],
+    //   ema20: [...], ema50: [...], vwap: [...]
+    // }
+    // Each is matched to candles by timestamp (lookup table built each draw).
+    // Path-A close: legacy /charts had these overlays on the TradingView
+    // chart; ported here so /dashboard_spa users see the same context.
     const ref = useRef(null);
     const wrapRef = useRef(null);
     const [hover, setHover] = useState(null);
@@ -415,6 +422,42 @@
           const top = Math.min(yo, yc), bh = Math.max(1, Math.abs(yc - yo));
           ctx.fillRect(x - bodyW / 2, top, bodyW, bh);
         });
+
+        // ── Overlays (BB / EMA20 / EMA50 / VWAP) ──
+        // Series come from /api/candles indicators as [{time, value}].
+        // Match each indicator point to a candle by timestamp.
+        if (overlays && slice.length > 0) {
+          // Build a candle-timestamp → slice-index lookup
+          const tsToIdx = new Map();
+          slice.forEach((c, i) => { if (c && c.ts) tsToIdx.set(c.ts, i); });
+          const drawLine = (series, color, width) => {
+            if (!Array.isArray(series) || series.length === 0) return;
+            ctx.strokeStyle = color; ctx.lineWidth = width; ctx.lineCap = "round";
+            ctx.beginPath();
+            let started = false;
+            series.forEach((p) => {
+              if (!p || typeof p.value !== "number" || typeof p.time !== "number") return;
+              const idx = tsToIdx.get(p.time);
+              if (idx == null) return;
+              const x = px(idx), y = py(p.value);
+              if (!started) { ctx.moveTo(x, y); started = true; }
+              else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+          };
+          // Bollinger bands — translucent upper/lower + dashed mid
+          drawLine(overlays.bb_upper, "rgba(79,141,247,0.7)", 1);
+          drawLine(overlays.bb_lower, "rgba(79,141,247,0.7)", 1);
+          if (overlays.bb_mid && overlays.bb_mid.length) {
+            ctx.setLineDash([3, 3]);
+            drawLine(overlays.bb_mid, "rgba(79,141,247,0.55)", 1);
+            ctx.setLineDash([]);
+          }
+          // EMA20 (amber) + EMA50 (purple) + VWAP (cyan)
+          drawLine(overlays.ema20, "#f59e0b", 1.4);
+          drawLine(overlays.ema50, "rgba(147,51,234,0.85)", 1.4);
+          drawLine(overlays.vwap, "rgba(34,211,238,0.85)", 1.2);
+        }
 
         // volume
         if (showVolume) {

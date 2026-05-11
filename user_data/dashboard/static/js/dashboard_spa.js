@@ -61,7 +61,9 @@
       if (minsPerStep >= 1440) t = (d.getUTCMonth() + 1) + "/" + d.getUTCDate();
       else if (minsPerStep >= 60) t = String(d.getUTCHours()).padStart(2, "0") + ":00";
       else t = String(d.getUTCHours()).padStart(2, "0") + ":" + String(d.getUTCMinutes()).padStart(2, "0");
-      return { o: Number(b.open), h: Number(b.high), l: Number(b.low), c: Number(b.close), t, i };
+      // ts (Unix epoch seconds) added so CandleChart overlays can match
+      // indicator points (which carry their own .time epoch) by timestamp.
+      return { o: Number(b.open), h: Number(b.high), l: Number(b.low), c: Number(b.close), t, i, ts: Number(b.time) };
     });
   }
   // Backend /api/trades/{b}/{q} returns lightweight-charts-formatted markers:
@@ -386,7 +388,20 @@
                 )
               },
                 candles.length > 0
-                  ? h(CandleChart, { candles, markers, height: 420 })
+                  ? h(CandleChart, {
+                      candles,
+                      markers,
+                      height: 420,
+                      // BB / EMA20 / EMA50 / VWAP overlays from /api/candles indicators
+                      overlays: (venue === "crypto" ? {
+                        bb_upper: indicators.bb_upper,
+                        bb_mid:   indicators.bb_mid,
+                        bb_lower: indicators.bb_lower,
+                        ema20:    indicators.ema20,
+                        ema50:    indicators.ema50,
+                        vwap:     indicators.vwap,
+                      } : null),
+                    })
                   : h("div", { className: "dim", style: { padding: "var(--s-4)", fontSize: "var(--t-xs)" } }, "loading candles…")
               ),
               // RSI subchart — closes the path-A gap (legacy /charts has this).
