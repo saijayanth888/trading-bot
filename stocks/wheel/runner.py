@@ -42,7 +42,7 @@ from .state import (
     Position, TradeRecord,
     add_position, append_trade, find_open_csp, find_open_cc,
     is_killed, kill_ticker, load_positions, now_iso, remove_position,
-    shares_held,
+    shares_held, update_position,
 )
 from .strategy import (
     OptionContract,
@@ -206,21 +206,168 @@ def _try_sell_csp(broker, sym: str, cfg, acct, summary: dict) -> None:
     })
 
 
+# ── Entry: assignment_check ────────────────────────────────────────────────
+
+
+def assignment_check(broker=None, positions: Optional[List[Position]] = None) -> dict:
+    """Detect short_put → long_shares assignment and bridge the wheel cycle.
+
+    For each open short_put position in the journal:
+      1. Query the broker for the option's qty. If it is non-zero (still open),
+         the position has NOT been assigned; skip.
+      2. Query the broker for the underlying's share qty. If it equals
+         100 * contracts (after subtracting any pre-existing shares we tracked),
+         this short put was assigned: write a `long_shares` Position with
+         entry_price=strike, source="wheel_assignment", and mark the short_put
+         as status="assigned" (kept on file for audit; sell_covered_calls only
+         consults `kind == "long_shares"`).
+      3. If the option went to zero but no matching shares appeared, this was
+         either an ordinary buy-to-close (handled by profit_take_check) or an
+         externally cancelled position. Drop the stale row to keep state clean.
+
+    Args:
+        broker: Optional injected Broker (test seam). Defaults to from_env().
+        positions: Optional injected positions list (test seam).
+
+    Returns: same summary shape as the other entries.
+    """
+    summary = {"phase": "assignment_check", "actions": [], "skipped": [], "errors": []}
+    open_positions = positions if positions is not None else load_positions()
+    open_csps = [p for p in open_positions if p.kind == "short_put"]
+
+    if not open_csps:
+        summary["skipped"].append("no open CSPs to check for assignment")
+        return summary
+
+    if broker is None:
+        broker = from_env()
+
+    for pos in open_csps:
+        try:
+            _check_one_assignment(broker, pos, open_positions, summary)
+        except Exception as exc:
+            logger.exception("assignment_check(%s) crashed", pos.contract_symbol)
+            summary["errors"].append(f"{pos.contract_symbol}: {exc!s}")
+    return summary
+
+
+def _check_one_assignment(
+    broker,
+    pos: Position,
+    all_positions: List[Position],
+    summary: dict,
+) -> None:
+    """Inspect one short_put position for assignment evidence."""
+    # 1. Option still open at broker? Then nothing happened yet.
+    opt_qty = broker.get_option_position_qty(pos.contract_symbol)
+    if opt_qty != 0:
+        summary["skipped"].append(
+            f"{pos.contract_symbol}: option qty={opt_qty} (still open)"
+        )
+        return
+
+    # 2. Option went flat. Look at the share side to disambiguate.
+    expected_assigned_shares = 100 * pos.qty
+    broker_shares = broker.get_stock_position_qty(pos.underlying)
+    # How many shares does our journal already attribute to wheel positions
+    # on this underlying? (Could be from prior assignments still rolling.)
+    journal_shares = sum(
+        p.qty for p in all_positions
+        if p.kind == "long_shares" and p.underlying == pos.underlying
+    )
+    new_shares = broker_shares - journal_shares
+
+    if new_shares >= expected_assigned_shares:
+        # ASSIGNMENT confirmed: write the long_shares row, mark short_put assigned.
+        add_position(Position(
+            underlying=pos.underlying,
+            contract_symbol="",  # shares have no contract symbol
+            kind="long_shares",
+            qty=expected_assigned_shares,
+            strike=0.0,
+            expiry=None,
+            entry_credit=0.0,
+            entry_price=pos.strike,
+            opened_at=now_iso(),
+            source="wheel_assignment",
+        ))
+        update_position(pos.contract_symbol, status="assigned")
+        append_trade(TradeRecord(
+            timestamp=now_iso(),
+            underlying=pos.underlying,
+            cycle="csp_assigned",
+            pnl=0.0,  # premium retained; share P&L realized at call-away
+            notes=(
+                f"assigned: {pos.qty} put(s) @ strike ${pos.strike:.2f} → "
+                f"{expected_assigned_shares} shares; credit ${pos.entry_credit:.2f} retained"
+            ),
+        ))
+        summary["actions"].append({
+            "underlying": pos.underlying,
+            "action": "assignment_detected",
+            "symbol": pos.contract_symbol,
+            "strike": pos.strike,
+            "shares_acquired": expected_assigned_shares,
+            "credit_retained_usd": round(pos.entry_credit, 2),
+        })
+        logger.warning(
+            "WHEEL ASSIGNMENT %s: %d short put(s) @ $%.2f → %d shares; cycle continues with CC",
+            pos.underlying, pos.qty, pos.strike, expected_assigned_shares,
+        )
+        return
+
+    # 3. Option flat but no matching shares — stale row from external close.
+    logger.info(
+        "wheel: %s option flat at broker but no matching shares "
+        "(broker=%d, journal=%d) — removing stale row",
+        pos.contract_symbol, broker_shares, journal_shares,
+    )
+    remove_position(pos.contract_symbol)
+    summary["actions"].append({
+        "underlying": pos.underlying,
+        "action": "stale_csp_removed",
+        "symbol": pos.contract_symbol,
+        "reason": "option flat at broker but no matching shares — closed externally",
+    })
+
+
 # ── Entry: profit_take_check ────────────────────────────────────────────────
 
 
 def profit_take_check() -> dict:
     """Walk open short puts; buy-to-close any whose mid is at or below the
-    profit-take threshold. One-shot."""
+    profit-take threshold. One-shot.
+
+    Also pre-runs assignment_check() to detect short puts that have already
+    been assigned to shares — this is what bridges the put-leg → covered-call
+    leg of the wheel and was the missing piece in pilot v1.
+    """
     cfg = load_config()
     summary = {"phase": "profit_take_check", "actions": [], "skipped": [], "errors": []}
 
-    open_csps = [p for p in load_positions() if p.kind == "short_put"]
+    broker = from_env()
+
+    # ── Assignment bridge: turn any flat-at-broker short_put into long_shares
+    #    so sell_covered_calls() can pick it up on its next firing.
+    try:
+        ac_summary = assignment_check(broker=broker)
+        for action in ac_summary.get("actions", []):
+            summary["actions"].append(action)
+        for skipped in ac_summary.get("skipped", []):
+            # Don't pollute the main summary with noisy "still open" lines.
+            if "still open" not in skipped:
+                summary["skipped"].append(f"assignment_check: {skipped}")
+        for err in ac_summary.get("errors", []):
+            summary["errors"].append(f"assignment_check: {err}")
+    except Exception as exc:
+        logger.exception("assignment_check crashed inside profit_take_check")
+        summary["errors"].append(f"assignment_check: {exc!s}")
+
+    # Reload after potential assignment-driven mutations.
+    open_csps = [p for p in load_positions() if p.kind == "short_put" and p.status != "assigned"]
     if not open_csps:
         summary["skipped"].append("no open CSPs")
         return summary
-
-    broker = from_env()
 
     for pos in open_csps:
         try:
