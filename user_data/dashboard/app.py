@@ -123,15 +123,26 @@ async def api_universe() -> dict[str, Any]:
     Reads user_data/universe.json. Frontend SPAs hit this on mount so
     the hero strip + dropdowns reflect whatever's currently configured
     without hardcoded fallback lists drifting out of sync.
+
+    Path resolution: tries USER_DATA_ROOT env first (default
+    /freqtrade/user_data inside the container, mounted from host's
+    user_data/), then falls back to repo-relative for host-side dev.
     """
-    try:
-        path = HERE.parent / "universe.json"
-        if not path.exists():
-            return {"error": "universe.json not found", "crypto": {"pairs": []}, "stocks": {"wheel_universe": [], "dashboard_basket": []}}
-        return json.loads(path.read_text())
-    except Exception as exc:
-        logger.warning("api_universe failed: %s", exc)
-        return {"error": str(exc), "crypto": {"pairs": []}, "stocks": {"wheel_universe": [], "dashboard_basket": []}}
+    candidates = [
+        Path(os.environ.get("USER_DATA_ROOT", "/freqtrade/user_data")) / "universe.json",
+        HERE.parent.parent / "user_data" / "universe.json",  # repo-relative
+        HERE.parent / "universe.json",  # legacy
+    ]
+    for path in candidates:
+        if path.exists():
+            try:
+                return json.loads(path.read_text())
+            except Exception as exc:
+                logger.warning("api_universe parse failed for %s: %s", path, exc)
+    return {"error": "universe.json not found in any candidate path",
+            "candidates": [str(p) for p in candidates],
+            "crypto": {"pairs": []},
+            "stocks": {"wheel_universe": [], "dashboard_basket": []}}
 
 
 @app.get("/api/mode")
