@@ -659,16 +659,22 @@
   function currentPair() { return els.pair.value; }
   function currentTimeframe() { return els.tf.value; }
 
-  // Support deep-linking from /ops: e.g. http://host:8081/?pair=SOFI&tf=5m
+  // Support deep-linking from /ops: e.g. http://host:8081/?pair=SOFI&tf=5m&venue=stocks
   (function applyUrlParams() {
     const params = new URLSearchParams(window.location.search);
     const wantPair = params.get("pair");
     const wantTf = params.get("tf");
+    const wantVenue = params.get("venue");
     if (wantPair && [...els.pair.options].some((o) => o.value === wantPair)) {
       els.pair.value = wantPair;
     }
     if (wantTf && [...els.tf.options].some((o) => o.value === wantTf)) {
       els.tf.value = wantTf;
+    }
+    // Stash the requested venue for wireVenueTabs() below — it runs next and
+    // will pick this up before deciding which tab to activate.
+    if (wantVenue === "crypto" || wantVenue === "stocks") {
+      window.__urlVenue = wantVenue;
     }
   })();
 
@@ -705,12 +711,16 @@
       });
     }
 
-    // Restore venue: URL pair > localStorage > active selection
+    // Restore venue: ?venue= URL > URL pair > localStorage > active selection
     let initial = activeKind();
     const saved = localStorage.getItem(VENUE_LS_KEY);
     const urlPair = new URLSearchParams(window.location.search).get("pair");
-    if (urlPair) {
-      // URL wins — keep whatever venue the URL pair belongs to
+    const urlVenue = window.__urlVenue;
+    if (urlVenue === "crypto" || urlVenue === "stocks") {
+      // Explicit venue param wins over everything
+      initial = urlVenue;
+    } else if (urlPair) {
+      // URL pair wins — keep whatever venue the URL pair belongs to
       initial = activeKind();
     } else if (saved === "crypto" || saved === "stocks") {
       initial = saved;

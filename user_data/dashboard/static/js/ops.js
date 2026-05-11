@@ -91,6 +91,25 @@ function setRefresh(ts) {
   }) + " ET";
 }
 
+// Swap a card's static age span for a live QC.TimeSince span that ticks every 5s
+// on its own — operator no longer has to wait for the next poll to see the
+// label move from "10s ago" → "15s ago". Caches the instance on the element
+// via __ts so we never leak intervals across re-renders.
+function setAgeLive(id, checkedAt) {
+  const el = document.getElementById(id);
+  if (!el || !checkedAt) return;
+  if (!window.QC || typeof window.QC.TimeSince !== "function") return;
+  if (!el.__ts) {
+    el.__ts = window.QC.TimeSince(checkedAt);
+  } else {
+    el.__ts.set(checkedAt);
+  }
+  if (el.firstChild !== el.__ts.el) {
+    while (el.firstChild) el.removeChild(el.firstChild);
+    el.appendChild(el.__ts.el);
+  }
+}
+
 // ─── Hero (regime + sentiment) ──────────────────────────────────────
 async function refreshRegime() {
   const r = await jsonFetch("/api/ops/regime");
@@ -157,7 +176,7 @@ async function refreshServices() {
   const r = await jsonFetch("/api/ops/services");
   const env = r.body;
   setStatus("card-services", env.status || "down");
-  document.getElementById("services-age").textContent = env.error || "live";
+  setAgeLive("services-age", env.checked_at);
   const body = document.getElementById("services-body");
   if (!env.data) { body.textContent = env.error || "—"; return; }
   body.replaceChildren();
@@ -298,7 +317,7 @@ async function refreshTrades() {
   const r = await jsonFetch("/api/ops/trades_risk");
   const env = r.body;
   setStatus("card-trades", env.status || "down");
-  document.getElementById("trades-age").textContent = env.error || "live";
+  setAgeLive("trades-age", env.checked_at);
   const body = document.getElementById("trades-body");
   if (!env.data) { body.textContent = env.error || "—"; return; }
   const d = env.data;
@@ -360,32 +379,12 @@ async function refreshStocksML() {
   const env = r.body;
   setStatus("card-stocks-ml", env.status || "down");
   const body = document.getElementById("stocks-ml-body");
-  const ageEl = document.getElementById("stocks-ml-age");
+  setAgeLive("stocks-ml-age", env.checked_at);
   if (!body) return;
   if (!env.data) { body.textContent = env.error || "—"; return; }
   const d = env.data;
 
   const isTraining = d.training_state === "running";
-
-  // Status pill in header — show "TRAINING" prominently when a worker is active.
-  if (ageEl) {
-    if (isTraining) {
-      const ep = d.current_epoch != null
-        ? `epoch ${d.current_epoch}/${d.epochs_target || "?"}`
-        : "starting up";
-      ageEl.textContent = `🟡 TRAINING · ${ep} · pid ${d.training_pid}`;
-      ageEl.style.color = "#f4b942";
-    } else {
-      const enabled = d.ml_enabled ? "🟢 INFLUENCING TRADES" : "⚪ COMPUTE ONLY";
-      const age = d.weights_age_seconds == null
-        ? "no model yet"
-        : d.weights_age_seconds < 86400
-          ? `${Math.floor(d.weights_age_seconds/3600)}h old`
-          : `${Math.floor(d.weights_age_seconds/86400)}d old`;
-      ageEl.textContent = `${enabled} · model ${age}${d.ml_alpha ? " · ALPHA" : ""}`;
-      ageEl.style.color = d.ml_enabled ? "#3fb950" : "var(--text-muted)";
-    }
-  }
 
   // Live training progress banner — only while a worker is mid-flight.
   let html = "";
@@ -575,20 +574,14 @@ async function refreshCombined() {
   const r = await jsonFetch("/api/ops/combined_portfolio");
   const env = r.body;
   setStatus("card-combined", env.status || "down");
-  const ageEl = document.getElementById("combined-age");
+  setAgeLive("combined-age", env.checked_at);
   const body = document.getElementById("combined-body");
   if (!body) return;
   if (!env.data) {
     body.textContent = env.error || "—";
-    if (ageEl) ageEl.textContent = env.error || "—";
     return;
   }
   const d = env.data;
-  if (ageEl) {
-    const breaker = d.circuit_breaker_active ? " · BREAKER TRIPPED" : "";
-    ageEl.textContent = `${d.combined_open_positions} open${breaker}`;
-    ageEl.style.color = d.circuit_breaker_active ? "#f85149" : "";
-  }
 
   // 4-up KPI grid: crypto / stocks / total / drawdown
   const ddPct = d.combined_drawdown_pct;
@@ -639,7 +632,7 @@ async function refreshLLMStats() {
   const r = await jsonFetch("/api/ops/llm_stats");
   const env = r.body;
   setStatus("card-llm", env.status || "down");
-  const ageEl = document.getElementById("llm-age");
+  setAgeLive("llm-age", env.checked_at);
   const body = document.getElementById("llm-body");
   if (!body) return;
   if (!env.data) {
@@ -651,10 +644,6 @@ async function refreshLLMStats() {
   const crypto = d.crypto || {};
   const provider = d.provider || "ollama";
   const isLocal = d.is_local;
-
-  if (ageEl) {
-    ageEl.textContent = `provider: ${provider} · ${shark.total_calls || 0} shark calls 24h · ${crypto.calls_24h || 0} crypto calls 24h`;
-  }
 
   const providerBadge = isLocal
     ? `<span class="pill-local">● LOCAL · ZERO COST</span>`
@@ -829,17 +818,12 @@ async function refreshGates() {
   const r = await jsonFetch("/api/ops/gates");
   const env = r.body;
   setStatus("card-gates", env.status || "down");
-  const ageEl = document.getElementById("gates-age");
+  setAgeLive("gates-age", env.checked_at);
   const body = document.getElementById("gates-body");
   if (!body) return;
   if (!env.data) { body.textContent = env.error || "—"; return; }
 
   const acct = env.data.account || {};
-  if (ageEl) {
-    const breakerStr = acct.breaker_active ? " · BREAKER" : "";
-    const paperStr = acct.paper === false ? "LIVE" : "PAPER";
-    ageEl.textContent = `${acct.open_count ?? 0}/${acct.max_open ?? 6} open · ${paperStr}${breakerStr}`;
-  }
 
   // Wipe + rerender
   while (body.firstChild) body.removeChild(body.firstChild);
@@ -869,6 +853,15 @@ async function refreshLiveTrades() {
     return;
   }
 
+  // Swap in the shared QC.liveTicker primitive — seamless marquee + pause-on-hover.
+  if (window.QC && typeof window.QC.liveTicker === "function") {
+    while (host.firstChild) host.removeChild(host.firstChild);
+    host.appendChild(window.QC.liveTicker(trades));
+    return;
+  }
+
+  // Fallback (should not happen — components.js loads before ops.js) — keep
+  // the legacy pill renderer so the strip never goes blank if QC is missing.
   const fragments = trades.map((t) => {
     const pnlPct = t.pnl_pct;
     const pnlDir = pnlPct == null ? "" : pnlPct > 0 ? "up" : pnlPct < 0 ? "down" : "";
@@ -954,20 +947,20 @@ async function refreshStocks() {
   const env = r.body;
   const mh = mhResp.body && mhResp.body.data;
   setStatus("card-stocks", env.status || "down");
-  const ageEl = document.getElementById("stocks-age");
-  if (ageEl) {
-    const reopen = mh && mh.next_open_utc
+  setAgeLive("stocks-age", env.checked_at);
+  // Market-hours badge — moved from header age (now a TimeSince ticker) to
+  // a card-body banner so operator still sees NYSE open/closed/reopen at a glance.
+  let mhBadge = "";
+  if (mh) {
+    const reopen = mh.next_open_utc
       ? new Date(mh.next_open_utc).toLocaleString("en-US", {
           weekday: "short", hour: "numeric", minute: "2-digit",
           hour12: true, timeZone: "America/New_York",
         }) + " ET"
       : null;
-    let mhBadge;
-    if (!mh) mhBadge = "";
-    else if (mh.is_open) mhBadge = "● NYSE open";
+    if (mh.is_open) mhBadge = "● NYSE open";
     else if (mh.is_extended) mhBadge = "● Extended hours";
     else mhBadge = `🔒 closed · reopens ${reopen}`;
-    ageEl.textContent = (env.error || "live") + (mhBadge ? "  ·  " + mhBadge : "");
   }
   const body = document.getElementById("stocks-body");
   if (!body) return;
@@ -985,7 +978,10 @@ async function refreshStocks() {
     ? `<span class="muted" style="font-size:10px;">no snapshot — run \`wheel snapshot\`</span>`
     : `<span class="muted" style="font-size:10px;">snapshot ${esc(fmtAge(alpaca.age_seconds))}</span>`;
 
-  let html = `<div style="display:grid;grid-template-columns:repeat(4, 1fr);gap:14px;">` +
+  const mhLine = mhBadge
+    ? `<div class="muted" style="font-size:11px;margin:0 0 10px;font-family:var(--mono);">${esc(mhBadge)}</div>`
+    : "";
+  let html = mhLine + `<div style="display:grid;grid-template-columns:repeat(4, 1fr);gap:14px;">` +
     `<div><div class="muted" style="font-size:11px;">alpaca cash ${paperBadge}</div>` +
     `<div style="font-size:22px;font-variant-numeric:tabular-nums;">${esc(fmtUsdPlain(alpaca.cash))}</div></div>` +
     `<div><div class="muted" style="font-size:11px;">buying power</div>` +
