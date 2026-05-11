@@ -219,14 +219,12 @@
     const stocksEq = Number(cp.stocks_equity || stocksAlpaca.portfolio_value || 0);
     const equity = cp.total_equity != null ? Number(cp.total_equity) : (cryptoEq + stocksEq);
     const peak = cp.combined_peak_equity != null ? Number(cp.combined_peak_equity) : equity;
-    // Day P&L — prefer the backend-supplied figure (closed trades today, UTC).
-    // The legacy fallback (total_equity − combined_peak_equity) is the
-    // *drawdown*, never positive on bad days, never accurate on good ones.
-    // We keep it only when the backend omits day_pnl_usd entirely.
-    const dayPnl = cp.day_pnl_usd != null ? Number(cp.day_pnl_usd) : (equity - peak);
-    const dayPct = cp.day_pnl_pct != null
-      ? Number(cp.day_pnl_pct)
-      : (peak > 0 ? (dayPnl / peak) * 100 : 0);
+    // Day P&L — closed-trade day P&L from trade_journal, computed server-side
+    // at ops_routes.py:2549-2550 (commit 58ea6b2). Backend always sets these
+    // fields (defaults to 0.0 on enrichment failure), so no fallback needed.
+    // day_pnl_pct is already × 100 on the server.
+    const dayPnl = Number(cp.day_pnl_usd ?? 0);
+    const dayPct = Number(cp.day_pnl_pct ?? 0);
     // Per-leg day P&L (kept for the Mini strip).
     const cryptoStart = Number((cp.sources && cp.sources.crypto_starting_equity) || cp.crypto_peak_equity || cryptoEq || 1);
     const cryptoDayPnl = cryptoEq - Number(cp.crypto_peak_equity || cryptoStart);
@@ -684,19 +682,24 @@
         items.length === 0
           ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)", padding: "var(--s-3) 0" } }, "no recent activity")
           : items.map((r, i) => {
-              const open = expanded === i;
               const dot = r.level === "warn" ? "warn"
                         : r.level === "down" ? "down"
                         : r.level === "up" ? "up"
                         : "accent";
               const srcVar = "var(--" + dot + ")";
+              // Stable identity prevents React from reusing DOM nodes when
+              // a new event unshifts at the top — expanded state previously
+              // pointed at index N which mapped to a different event after
+              // the refresh tick.
+              const stableKey = `${r.ts}:${r.src}:${(r.title || '').slice(0, 32)}`;
+              const open = expanded === stableKey;
               return h("div", {
-                key: i,
+                key: stableKey,
                 style: {
                   display: "grid", gridTemplateColumns: "60px 12px 1fr", gap: "var(--s-3)",
                   padding: "var(--s-3) 0", borderBottom: "1px solid var(--line-1)", cursor: "pointer",
                 },
-                onClick: () => setExpanded(open ? null : i)
+                onClick: () => setExpanded(open ? null : stableKey)
               },
                 h("div", { className: "mono dim", style: { fontSize: "var(--t-xs)", paddingTop: 2 } },
                   h(TimeSince, { ts: r.ts })),
@@ -1061,6 +1064,22 @@
     );
   }
 
+  // /api/ops/market_hours — NYSE session state. Cache 60s; the response only
+  // changes at 09:30 / 16:00 ET so polling more often is wasted work.
+  function useMarketHours() {
+    const [mh, setMh] = useState(null);
+    useEffect(() => {
+      let cancelled = false;
+      const fetchNow = () => safeJsonFetch("/api/ops/market_hours")
+        .then(j => { if (!cancelled) setMh(envelopeData(j) || null); })
+        .catch(() => { /* leave null — pill renders "—" placeholder */ });
+      fetchNow();
+      const iv = setInterval(fetchNow, 60_000);
+      return () => { cancelled = true; clearInterval(iv); };
+    }, []);
+    return mh;
+  }
+
   // ─────────────── STOCKS — wheel + shark Alpaca state ───────────────
   function StocksLive({ data }) {
     const slot = slotState(data, "stocks");
@@ -1068,12 +1087,36 @@
     const alpaca = env.alpaca || {};
     const wheel = env.wheel || {};
     const shark = env.shark || {};
+    const mh = useMarketHours();
+
+    // Market hours pill — formats NYSE session state next to the card title.
+    // Shows OPEN/CLOSED/EXT with a title attribute carrying the next
+    // open/close time so hovering surfaces the schedule without a banner.
+    let marketPill = null;
+    if (mh) {
+      const isOpen = !!mh.is_open;
+      const isExt = !!mh.is_extended;
+      const label = isOpen ? "OPEN" : isExt ? "EXT" : "CLOSED";
+      const cls = isOpen ? "up" : isExt ? "warn" : "down";
+      const fmtEt = (iso) => {
+        if (!iso) return "—";
+        try { return new Date(iso).toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", month: "short", day: "numeric" }); }
+        catch (_) { return iso; }
+      };
+      const titleText = isOpen
+        ? "NYSE open · closes " + fmtEt(mh.next_close_utc) + " ET"
+        : "NYSE closed · opens " + fmtEt(mh.next_open_utc) + " ET";
+      marketPill = h("span", { className: "pill " + cls, title: titleText, style: { height: 18 } },
+        h("span", { className: "dot " + cls }), " NYSE ", label);
+    } else {
+      marketPill = h("span", { className: "pill", title: "loading market hours" }, "NYSE —");
+    }
 
     if (slot.phase === "down") {
       return h(Card, {
         num: "10", title: "Stocks · Wheel + Shark",
         sub: "endpoint unavailable",
-        right: cardRight(slot.fetchedAt)
+        right: cardRight(slot.fetchedAt, marketPill)
       },
         h(EmptyState, { reason: slot.reason, fetchedAt: slot.fetchedAt, period: 10 })
       );
@@ -1082,7 +1125,7 @@
     return h(Card, {
       num: "10", title: "Stocks · Wheel + Shark",
       sub: alpaca.paper ? "Alpaca · paper" : "Alpaca · live",
-      right: cardRight(slot.fetchedAt)
+      right: cardRight(slot.fetchedAt, marketPill)
     },
       h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, fontSize: "var(--t-xs)" } },
         h("div", { className: "dim mono" }, "PORTFOLIO"),
@@ -1181,14 +1224,6 @@
         .catch(e => toast("RESUME error · " + e.message, "warn"));
     };
 
-    const doReload = () => postJSON("/api/v1/reload_config", {})
-      .then(r => {
-        if (r.ok) return toast("freqtrade reload_config OK", "ok");
-        if (r.status === 404) return toast("RELOAD CONFIG: backend proxy missing · regime_config POST already reloads on each write", "warn");
-        return toast("reload_config failed · HTTP " + r.status, "warn");
-      })
-      .catch(e => toast("reload_config error · " + e.message, "warn"));
-
     const doEvolve = () => postJSON("/api/ops/mcp/trigger_evolution_cycle", {})
       .then(r => r.ok ? toast("Evolution cycle kicked off · check EPT card", "ok") : toast("evolution trigger failed · HTTP " + r.status, "warn"))
       .catch(e => toast("evolution trigger error · " + e.message, "warn"));
@@ -1217,7 +1252,6 @@
       h("div", { className: "grid g-2", style: { gap: "var(--s-3)" } },
         h("button", { className: "btn", onClick: doPause }, "⏸ PAUSE TRADING"),
         h("button", { className: "btn", onClick: doResume }, "▶ RESUME"),
-        h("button", { className: "btn", onClick: doReload }, "↻ RELOAD CONFIG"),
         h("button", { className: "btn warn", onClick: doEvolve }, "⚡ TRIGGER EVOLUTION"),
         h("button", { className: "btn", onClick: doRebalance }, "⚖ REBALANCE WEIGHTS"),
         h("button", { className: "btn", onClick: doSlackBrief }, "⇣ DAILY SLACK BRIEF")
@@ -1372,6 +1406,70 @@
   }
 
   // ─────────────── REGIME CONFIG EDITOR (data-num 19) ───────────────
+  // Operator education block, ported verbatim from legacy ops.html:1204-1278
+  // with italic tags (<i>, <em>) and decorative emojis stripped per the
+  // operator design spec. Regime-name spans flattened to <code> since the
+  // legacy regime-tag-* CSS classes don't live in quanta.css.
+  const REGIME_PARAMS_GUIDE_HTML = (
+    '<h4 style="font-family:var(--mono);font-size:var(--t-2xs);font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-3);margin:8px 0 6px;">The 5 market regimes</h4>' +
+    '<p style="margin:0 0 10px;">A 4-state HMM classifies each candle into one of these regimes per pair. The strategy adapts entries, exits, sizing, and trailing-stop behaviour to the active regime.</p>' +
+    '<dl style="display:grid;grid-template-columns:160px 1fr;gap:4px 14px;margin:0 0 6px;">' +
+      '<dt><code>trending_up</code></dt>' +
+      '<dd>Sustained uptrend. <strong>Strategy:</strong> loosen entries, hold longer, activate trailing stop on winners.</dd>' +
+      '<dt><code>trending_down</code></dt>' +
+      '<dd>Sustained downtrend. <strong>Strategy:</strong> longs are <strong>hard-blocked</strong> — bot waits for regime change. The <code>entry_delta</code> here is belt-and-suspenders.</dd>' +
+      '<dt><code>mean_reverting</code></dt>' +
+      '<dd>Range-bound, oscillating market. <strong>Strategy:</strong> quick scalps with tight take-profit (<code>mean_rev_take_profit</code>).</dd>' +
+      '<dt><code>high_volatility</code></dt>' +
+      '<dd>Whippy, hard-to-predict. <strong>Strategy:</strong> shrink position size (<code>high_vol_stake_factor</code>) and require higher conviction (<code>high_vol_min_confidence</code>).</dd>' +
+      '<dt><code>unknown</code></dt>' +
+      '<dd>HMM uncertain. <strong>Strategy:</strong> conservative defaults — neither blocked nor preferred.</dd>' +
+    '</dl>' +
+    '<h4 style="font-family:var(--mono);font-size:var(--t-2xs);font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-3);margin:14px 0 6px;">Entry &amp; exit deltas</h4>' +
+    '<p style="margin:0 0 10px;">These add a per-regime offset to the base thresholds. Base entry = <code>0.62</code> (TFT up-probability needed to fire a long); base exit = <code>0.55</code> (down-probability needed to close).</p>' +
+    '<dl style="display:grid;grid-template-columns:160px 1fr;gap:4px 14px;margin:0 0 6px;">' +
+      '<dt><code>entry_delta = +0.15</code></dt>' +
+      '<dd>Require <code>up_prob ≥ 0.62 + 0.15 = 0.77</code>. <strong>Harder to enter</strong> in this regime.</dd>' +
+      '<dt><code>entry_delta = −0.05</code></dt>' +
+      '<dd>Require <code>up_prob ≥ 0.62 − 0.05 = 0.57</code>. <strong>Easier to enter</strong>.</dd>' +
+      '<dt><code>entry_delta = blank</code></dt>' +
+      '<dd><strong>Hard-block</strong> — no longs allowed in this regime. Same as setting threshold to ∞.</dd>' +
+      '<dt><code>exit_delta = −0.20</code></dt>' +
+      '<dd>Require <code>down_prob ≥ 0.55 − 0.20 = 0.35</code>. <strong>Faster exits</strong> — close on weaker signals.</dd>' +
+      '<dt><code>exit_delta = +0.05</code></dt>' +
+      '<dd>Require <code>down_prob ≥ 0.60</code>. <strong>Hold longer</strong>, only exit on strong reversal.</dd>' +
+    '</dl>' +
+    '<h4 style="font-family:var(--mono);font-size:var(--t-2xs);font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-3);margin:14px 0 6px;">Scalar parameters</h4>' +
+    '<dl style="display:grid;grid-template-columns:160px 1fr;gap:4px 14px;margin:0 0 6px;">' +
+      '<dt><code>high_vol_stake_factor</code></dt>' +
+      '<dd>In <code>high_volatility</code>, multiply position size by this. Default <code>0.7</code> (30% smaller). Set <code>0.5</code> for half-size, <code>0</code> to skip entries entirely. Lower if drawdowns spike in volatile markets.</dd>' +
+      '<dt><code>high_vol_min_confidence</code></dt>' +
+      '<dd>In <code>high_volatility</code>, require <code>up_prob ≥ this</code> on top of the regular threshold. Default <code>0.65</code>. Higher = fewer but higher-conviction trades.</dd>' +
+      '<dt><code>mean_rev_take_profit</code></dt>' +
+      '<dd>In <code>mean_reverting</code>, exit immediately when profit reaches this fraction. Default <code>0.012</code> = +1.2%. Lower = quicker scalps; higher = let winners run further.</dd>' +
+      '<dt><code>trending_up_trail_trigger</code></dt>' +
+      '<dd>In <code>trending_up</code>, when profit exceeds this, activate trailing stop. Default <code>0.025</code> = 2.5%. Lower = trail sooner (lock in smaller wins); higher = wait for bigger wins before trailing.</dd>' +
+      '<dt><code>trending_up_trail_distance</code></dt>' +
+      '<dd>Once trailing is active, trail this far below the high-water mark (must be negative). Default <code>−0.02</code> = 2% below peak. More negative (e.g. <code>−0.03</code>) = wider trail, more room for noise; closer to <code>0</code> = tighter trail, gives back less but stops out sooner.</dd>' +
+      '<dt><code>tft_min_confidence</code></dt>' +
+      '<dd>TFT model\'s quantile-spread confidence floor. Default <code>0.35</code>. Below this, no entries fire in any regime. Raise to <code>0.45</code>+ to filter out low-conviction signals at the cost of fewer trades.</dd>' +
+      '<dt><code>meta_min_confidence</code></dt>' +
+      '<dd>When the DRL meta-agent (PPO + A2C + DQN ensemble) is active, require this confidence on the <code>meta_signal</code>. Same logic for entries (<code>signal=+1</code>) and exits (<code>signal=−1</code>). Default <code>0.35</code>.</dd>' +
+    '</dl>' +
+    '<h4 style="font-family:var(--mono);font-size:var(--t-2xs);font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-3);margin:14px 0 6px;">Recommended tuning order</h4>' +
+    '<ol style="margin:0 0 10px;padding-left:20px;">' +
+      '<li><strong>Start with defaults</strong> — they\'re calibrated to work end-to-end.</li>' +
+      '<li><strong>Too many losing entries:</strong> raise <code>tft_min_confidence</code> (+0.05 increments) or <code>meta_min_confidence</code>.</li>' +
+      '<li><strong>No trades firing:</strong> lower <code>tft_min_confidence</code>, then check that no allowed regime has <code>entry_delta = blank</code>.</li>' +
+      '<li><strong>Drawdowns in volatile markets:</strong> drop <code>high_vol_stake_factor</code> to <code>0.4</code>, raise <code>high_vol_min_confidence</code> to <code>0.8</code>.</li>' +
+      '<li><strong>Profits get given back in trends:</strong> tighten <code>trending_up_trail_distance</code> closer to <code>0</code> (e.g. <code>−0.015</code>).</li>' +
+      '<li><strong>Whipsawing in chop:</strong> raise <code>mean_rev_take_profit</code> to <code>0.018</code>+ to ignore tiny moves.</li>' +
+    '</ol>' +
+    '<div style="margin-top:10px;padding:8px 12px;background:var(--warn-bg);border-left:3px solid var(--warn);border-radius:4px;color:var(--fg-1);">' +
+      '<strong>Apply changes</strong> writes <code>config.json</code> atomically (with timestamped backup) and triggers a freqtrade reload — the bot keeps running, but new candles will use the updated values. Open trades are not affected mid-flight; only future entries/exits use the new parameters.' +
+    '</div>'
+  );
+
   function RegimeConfigEditor({ data }) {
     const env = envelopeData(data.regime_config) || {};
     const cfg = env.regime_gating || {};
@@ -1443,7 +1541,7 @@
         .catch(e => setToastMsg({ msg: "POST error · " + e.message, level: "warn" }));
     };
 
-    const numCell = (val, range, onChange) => h("input", {
+    const numCell = (val, range, onChange, ariaLabel) => h("input", {
       type: "number",
       value: val != null ? val : 0,
       step: 0.01,
@@ -1451,6 +1549,7 @@
       max: range ? range[1] : undefined,
       onChange: e => onChange(Number(e.target.value)),
       className: "select",
+      "aria-label": ariaLabel,
       style: { width: 86, fontFamily: "var(--mono)", fontSize: "var(--t-xs)", textAlign: "right" },
     });
 
@@ -1459,27 +1558,54 @@
       sub: "atomic write · " + (env.config_path || "config.json"),
       right: h(TimeSince, { ts: data.regime_config_fetched_at, className: "mono dim", style: { fontSize: "var(--t-2xs)" } })
     },
+      h("details", { className: "decision-guide", style: {
+        marginBottom: "var(--s-3)",
+        background: "var(--bg-inset)",
+        border: "1px solid var(--line-1)",
+        borderRadius: 4,
+      } },
+        h("summary", { style: {
+          padding: "var(--s-3) var(--s-4)",
+          cursor: "pointer",
+          fontSize: "var(--t-sm)",
+          fontWeight: 600,
+          color: "var(--fg-1)",
+        } }, "Parameter guide · read before changing values"),
+        h("div", {
+          className: "guide-body",
+          style: {
+            padding: "var(--s-2) var(--s-4) var(--s-4)",
+            borderTop: "1px solid var(--line-1)",
+            fontSize: "var(--t-xs)",
+            lineHeight: 1.6,
+            color: "var(--fg-2)",
+          },
+          // Static template literal embedded above in this file; no user
+          // input ever flows here — XSS surface is nil.
+          dangerouslySetInnerHTML: { __html: REGIME_PARAMS_GUIDE_HTML }
+        })
+      ),
       h("div", { className: "metric-label" }, "ENTRY DELTA · per regime"),
       h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, marginTop: 4 } },
-        regimes.map(r => h("div", { key: r, style: { display: "flex", flexDirection: "column", gap: 4 } },
+        regimes.map(r => h("label", { key: r, style: { display: "flex", flexDirection: "column", gap: 4 } },
           h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, r),
-          numCell(form.entry_delta[r], schema.delta_range, (v) => setDelta("entry_delta", r, v))
+          numCell(form.entry_delta[r], schema.delta_range, (v) => setDelta("entry_delta", r, v), `entry delta for ${r}`)
         ))
       ),
       h("div", { className: "hr" }),
       h("div", { className: "metric-label" }, "EXIT DELTA · per regime"),
       h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, marginTop: 4 } },
-        regimes.map(r => h("div", { key: r, style: { display: "flex", flexDirection: "column", gap: 4 } },
+        regimes.map(r => h("label", { key: r, style: { display: "flex", flexDirection: "column", gap: 4 } },
           h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, r),
-          numCell(form.exit_delta[r], schema.delta_range, (v) => setDelta("exit_delta", r, v))
+          numCell(form.exit_delta[r], schema.delta_range, (v) => setDelta("exit_delta", r, v), `exit delta for ${r}`)
         ))
       ),
       h("div", { className: "hr" }),
       h("div", { className: "metric-label" }, "SCALAR PARAMS"),
       h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginTop: 4 } },
-        scalars.map(k => h("div", { key: k, style: { display: "grid", gridTemplateColumns: "1fr auto", gap: 6, alignItems: "center" } },
+        scalars.map(k => h("label", { key: k, style: { display: "grid", gridTemplateColumns: "1fr auto", gap: 6, alignItems: "center" } },
           h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, k),
-          numCell(form[k], (schema.scalar_ranges || {})[k], (v) => setScalar(k, v))
+          numCell(form[k], (schema.scalar_ranges || {})[k], (v) => setScalar(k, v), k)
         ))
       ),
       h("div", { className: "hr" }),
@@ -1901,6 +2027,90 @@
     );
   }
 
+  // ─────────────── DECISION AUDIT — per-pair why-trade rationale ───────────────
+  // Mirrors the legacy /ops "Decision audit" card. Fetches the pair list from
+  // /api/pairs and the last 5 decisions for the selected pair from
+  // /api/ops/explainability/{base}/{quote}?limit=5. Decisions come in two
+  // kinds: "entered" (full TFT/DRL/sentiment context) and "blocked" (risk
+  // governor refused, with constraint name + reason).
+  function ExplainabilityCardLive() {
+    const [pairs, setPairs] = useState([]);
+    const [selected, setSelected] = useState("");
+    const [env, setEnv] = useState(null);
+    const [fetchedAt, setFetchedAt] = useState(null);
+    const [err, setErr] = useState(null);
+
+    useEffect(() => {
+      safeJsonFetch("/api/pairs")
+        .then(j => {
+          const list = (j && j.pairs) || [];
+          setPairs(list);
+          if (list.length && !selected) setSelected(list[0]);
+        })
+        .catch(() => { /* leave pairs empty — card renders the empty placeholder */ });
+    }, []);
+
+    useEffect(() => {
+      if (!selected) return;
+      const [base, quote] = selected.split("/");
+      if (!base || !quote) return;
+      const url = "/api/ops/explainability/"
+        + encodeURIComponent(base) + "/" + encodeURIComponent(quote)
+        + "?limit=5";
+      setErr(null);
+      safeJsonFetch(url)
+        .then(j => { setEnv(j); setFetchedAt(new Date().toISOString()); })
+        .catch(e => { setErr(String(e && e.message || e)); setFetchedAt(new Date().toISOString()); });
+    }, [selected]);
+
+    const data = envelopeData(env) || {};
+    const status = envelopeStatus(env);
+    const decisions = data.decisions || [];
+    const placeholder = (status === "degraded" || status === "down" || err || decisions.length === 0);
+
+    return h(Card, {
+      num: "22", title: "Decision audit",
+      sub: selected ? ("last " + decisions.length + " decisions · " + selected) : "pick a pair…",
+      right: cardRight(fetchedAt,
+        h("select", {
+          className: "select",
+          value: selected,
+          onChange: e => setSelected(e.target.value),
+          "aria-label": "Pair selector for decision audit",
+          style: { fontFamily: "var(--mono)", fontSize: "var(--t-xs)", minWidth: 110 },
+        }, pairs.map(p => h("option", { key: p, value: p }, p))))
+    },
+      placeholder
+        ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)", padding: "var(--s-2) 0" } },
+            err ? "—" : (data.decisions != null ? "no recent decisions for this pair" : "—"))
+        : h("div", { style: { display: "flex", flexDirection: "column", gap: "var(--s-3)" } },
+            decisions.map((d, i) => {
+              const isBlocked = d.kind === "blocked";
+              const verdictCls = isBlocked ? "warn" : "up";
+              const verdict = isBlocked ? "NO ENTRY · blocked" : ("ENTRY · " + (d.side || "long"));
+              const reason = isBlocked
+                ? (d.reason || "—") + " (constraint=" + (d.constraint || "—") + ")"
+                : (d.reasoning || ((d.regime || "—") + " · conf " + (d.confidence != null ? Number(d.confidence).toFixed(2) : "—")));
+              const ts = (d.ts || "").replace("T", " ").slice(0, 19);
+              return h("div", {
+                key: i,
+                style: {
+                  border: "1px solid var(--line-1)", borderRadius: 4,
+                  padding: "var(--s-2) var(--s-3)",
+                  display: "flex", flexDirection: "column", gap: 4,
+                }
+              },
+                h("div", { style: { display: "flex", alignItems: "baseline", gap: "var(--s-2)" } },
+                  h("span", { className: "mono dim", style: { fontSize: "var(--t-2xs)" } }, ts || "—"),
+                  h("span", { className: "tb-spacer", style: { flex: 1 } }),
+                  h("span", { className: "pill " + verdictCls, style: { height: 18 } }, verdict)),
+                h("div", { className: "dim", style: { fontSize: "var(--t-xs)", lineHeight: 1.45 } }, reason)
+              );
+            })
+          )
+    );
+  }
+
   // ─────────────── MAIN ───────────────
   function OpsApp() {
     const [killState, setKillStateRaw] = useState("normal");
@@ -1999,6 +2209,8 @@
             h("div", { style: { gridColumn: "span 8" } }, h(TradesRiskLive, { data })),
             h("div", { style: { gridColumn: "span 4" } }, h(ChampionCardLive, { data }))
           ),
+          // DECISION AUDIT — per-pair why-trade rationale (parity port from legacy /ops)
+          h("div", { id: "decision-audit", className: "anchor" }, h(ExplainabilityCardLive)),
           // BREAKERS detail + CONTROL PANEL
           h("div", { id: "config", className: "grid g-12 anchor", style: { gap: "var(--gap-grid)" } },
             h("div", { style: { gridColumn: "span 6" } }, h(CircuitBreakersLive, { data })),
