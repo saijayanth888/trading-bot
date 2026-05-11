@@ -219,14 +219,12 @@
     const stocksEq = Number(cp.stocks_equity || stocksAlpaca.portfolio_value || 0);
     const equity = cp.total_equity != null ? Number(cp.total_equity) : (cryptoEq + stocksEq);
     const peak = cp.combined_peak_equity != null ? Number(cp.combined_peak_equity) : equity;
-    // Day P&L — prefer the backend-supplied figure (closed trades today, UTC).
-    // The legacy fallback (total_equity − combined_peak_equity) is the
-    // *drawdown*, never positive on bad days, never accurate on good ones.
-    // We keep it only when the backend omits day_pnl_usd entirely.
-    const dayPnl = cp.day_pnl_usd != null ? Number(cp.day_pnl_usd) : (equity - peak);
-    const dayPct = cp.day_pnl_pct != null
-      ? Number(cp.day_pnl_pct)
-      : (peak > 0 ? (dayPnl / peak) * 100 : 0);
+    // Day P&L — closed-trade day P&L from trade_journal, computed server-side
+    // at ops_routes.py:2549-2550 (commit 58ea6b2). Backend always sets these
+    // fields (defaults to 0.0 on enrichment failure), so no fallback needed.
+    // day_pnl_pct is already × 100 on the server.
+    const dayPnl = Number(cp.day_pnl_usd ?? 0);
+    const dayPct = Number(cp.day_pnl_pct ?? 0);
     // Per-leg day P&L (kept for the Mini strip).
     const cryptoStart = Number((cp.sources && cp.sources.crypto_starting_equity) || cp.crypto_peak_equity || cryptoEq || 1);
     const cryptoDayPnl = cryptoEq - Number(cp.crypto_peak_equity || cryptoStart);
