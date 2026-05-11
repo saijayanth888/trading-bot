@@ -1009,7 +1009,10 @@ def _evaluate_readiness_inline(mode: str = "standard") -> dict:
     wr = len(wins) / n
     pf = (sum(wins) / abs(sum(losses))) if losses else float("inf")
 
-    # Daily P&L pct buckets → annualised Sharpe (× √365)
+    # Daily P&L pct buckets → annualised Sharpe (× √365). pnl_pct is
+    # fractional (-0.0123 = -1.23%); Sharpe = mean/std is scale-invariant
+    # so the result is the same whether we feed fractions or percents.
+    # Thresholds in _READINESS_MODES mirror scripts/validate_readiness.py.
     daily: dict[str, float] = {}
     for r in rows:
         day = r["closed_at"].astimezone(timezone.utc).strftime("%Y-%m-%d")
