@@ -454,7 +454,8 @@
             // INTELLIGENCE RAIL
             h("div", { style: { gridColumn: "span 4", display: "flex", flexDirection: "column", gap: "var(--gap-grid)" } },
               h(ModelViewLive, { state, fetchedAt: meta.state_fetched_at }),
-              h(MarketContextLive, { state, fetchedAt: meta.state_fetched_at })
+              h(MarketContextLive, { state, fetchedAt: meta.state_fetched_at }),
+              h(ChampionGenome, { state, fetchedAt: meta.state_fetched_at })
             )
           ),
 
@@ -567,6 +568,33 @@
         h("span", { className: "num", style: { textAlign: "right" } },
           onchain.whale_count_1h != null ? Number(onchain.whale_count_1h).toFixed(2) : "—")
       )
+    );
+  }
+
+  // Champion genome sidebar — parity with legacy /charts. Reads state.champion
+  // from /api/state. Backend shape (data_sources.fetch_champion):
+  //   { generation, champion_id, runner_up_id, champion_fitness }
+  function ChampionGenome({ state, fetchedAt }) {
+    const c = (state && state.champion) || {};
+    const has = c && (c.generation != null || c.champion_id || c.runner_up_id);
+    return h(Card, {
+      num: "06", title: "Champion genome", sub: "evolution snapshot",
+      right: h(TimeSince, { ts: fetchedAt, className: "mono dim", style: { fontSize: "var(--t-2xs)" } })
+    },
+      !has
+        ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)" } }, "no snapshot yet")
+        : h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, fontSize: "var(--t-xs)" } },
+            h("span", { className: "dim" }, "Gen"),
+            h("span", { className: "num", style: { textAlign: "right" } },
+              c.generation != null ? String(c.generation) : "—"),
+            h("span", { className: "dim" }, "Champion"),
+            h("span", { className: "mono", style: { textAlign: "right" } }, c.champion_id || "—"),
+            h("span", { className: "dim" }, "Fitness"),
+            h("span", { className: "num", style: { textAlign: "right" } },
+              c.champion_fitness != null ? Number(c.champion_fitness).toFixed(3) : "—"),
+            h("span", { className: "dim" }, "Runner-up"),
+            h("span", { className: "mono", style: { textAlign: "right" } }, c.runner_up_id || "—")
+          )
     );
   }
 
