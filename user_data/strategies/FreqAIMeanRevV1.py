@@ -350,6 +350,16 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
     def META_MIN_CONFIDENCE(self) -> float:
         return float(self._regime_gating["meta_min_confidence"])
     # Cache loaded ensembles per save_dir so we don't re-deserialize each candle.
+    # 3-state cache semantics:
+    #   - key absent              → never attempted, try to load
+    #   - cache value is _DRL_LOAD_FAILED  → load failed permanently, skip
+    #   - cache value is DRLEnsemble instance → loaded, use it
+    # A previous design stored `None` for "load failed" but also treated an
+    # absent key as `None` (via .get default), which caused the strategy to
+    # re-attempt the load on every candle AND defeat the once-only warning
+    # log — spamming the journal and adding pointless disk I/O. The sentinel
+    # makes "failed-and-cached" distinguishable from "not yet attempted".
+    _DRL_LOAD_FAILED: object = object()
     _DRL_CACHE: "dict[str, object]" = {}
 
     # Risk governor instance — populated in bot_start. Gates every entry.
@@ -926,22 +936,40 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
     # ------------------------------------------------------------------
 
     def _load_drl_ensemble(self):
-        """Lazy, cached load of the DRL ensemble. Returns None on miss."""
+        """Lazy, cached load of the DRL ensemble. Returns None on miss.
+
+        Uses a 3-state cache to avoid retrying the load on every candle when
+        the weights aren't present. We log exactly one warning per save_dir
+        on the first failure, then short-circuit silently thereafter.
+        """
         if not _DRL_AVAILABLE or DRLEnsemble is None:
             return None
         save_dir = str(DRL_SAVE_DIR)
-        cached = self._DRL_CACHE.get(save_dir)
-        if cached is not None:
+        # Distinguish "not yet attempted" (key absent) from "loaded a real
+        # ensemble" (truthy instance) from "failed, don't retry" (sentinel).
+        if save_dir in self._DRL_CACHE:
+            cached = self._DRL_CACHE[save_dir]
+            if cached is self._DRL_LOAD_FAILED:
+                return None
             return cached
         try:
             ensemble = DRLEnsemble(save_dir=DRL_SAVE_DIR, device="cpu")
             ensemble.load()
         except FileNotFoundError:
-            self._DRL_CACHE[save_dir] = None
+            logger.warning(
+                "DRL ensemble: not available at %s, meta-agent will fall back "
+                "to TFT-only (this message logs once per process)",
+                save_dir,
+            )
+            self._DRL_CACHE[save_dir] = self._DRL_LOAD_FAILED
             return None
         except Exception as exc:
-            logger.warning("DRL ensemble failed to load (%s); falling back to TFT", exc)
-            self._DRL_CACHE[save_dir] = None
+            logger.warning(
+                "DRL ensemble failed to load (%s); meta-agent will fall back "
+                "to TFT-only (this message logs once per process)",
+                exc,
+            )
+            self._DRL_CACHE[save_dir] = self._DRL_LOAD_FAILED
             return None
         self._DRL_CACHE[save_dir] = ensemble
         return ensemble
