@@ -97,6 +97,20 @@ _FORBIDDEN_RE = re.compile(
     r"COPY|VACUUM|CLUSTER|REINDEX|REFRESH)\b",
     re.IGNORECASE,
 )
+# Dangerous tokens that survived the keyword blocklist: pg_sleep can be used
+# to DoS the dashboard (lock a Postgres connection for hours); pg_read_file
+# / pg_ls_dir leak host filesystem state; comment / statement-terminator
+# sequences enable union-stacking and trailing-payload injection. See
+# REVIEW_2026-05-11 §P0-Q for the verified bypasses. We blocklist explicitly
+# in addition to the read-only transaction layer so any future widening of
+# the role's grants still trips here first.
+_SQLI_DENY_RE = re.compile(
+    r"(--|/\*|\*/|;|"
+    r"\bunion\b|\bpg_sleep\b|\bpg_read_file\b|\bpg_ls_dir\b|"
+    r"\bpg_read_binary_file\b|\bcurrent_setting\b|\bdblink\b|"
+    r"\blo_import\b|\blo_export\b|\bcopy\s+from\b)",
+    re.IGNORECASE,
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -776,22 +790,35 @@ async def query_trade_journal(sql: str) -> dict:
     """
     Read-only SELECT/CTE queries against the trade_journal table only.
     Other tables and any write/DDL operation are rejected.
+
+    Defence-in-depth: the transaction itself is RO (psycopg sets
+    ``default_transaction_read_only = on`` before execute), and the SQL
+    text is filtered for dangerous tokens (`;`, comments, union, pg_sleep,
+    pg_read_file, etc.) that survived the keyword blocklist in the past.
+    Reject before we ever hand the string to psycopg.
     """
-    if not _READ_ONLY_RE.match(sql or ""):
+    raw = sql or ""
+    if not _READ_ONLY_RE.match(raw):
         return {"error": "only SELECT or WITH (CTE) statements allowed"}
-    if _FORBIDDEN_RE.search(sql):
+    if _FORBIDDEN_RE.search(raw):
         return {"error": "forbidden keyword detected — read-only enforcement"}
-    if not re.search(r"\btrade_journal\b", sql, re.IGNORECASE):
+    sqli_hit = _SQLI_DENY_RE.search(raw)
+    if sqli_hit:
+        # Don't leak the exact match (defence-in-depth + don't help attackers
+        # iterate); audit-log the full input below so we can review later.
+        _audit("query_trade_journal", {"sql": raw[:120]}, f"reject: sqli_token={sqli_hit.group(0)!r}")
+        return {"error": "query rejected — disallowed token (comments, semicolons, union, pg_sleep, etc.)"}
+    if not re.search(r"\btrade_journal\b", raw, re.IGNORECASE):
         return {"error": "query must reference the trade_journal table"}
     try:
-        rows = _query(sql, ())
+        rows = _query(raw, ())
     except Exception as exc:
         return {"error": str(exc)[:200]}
     for r in rows[:1000]:
         for k, v in list(r.items()):
             if isinstance(v, datetime):
                 r[k] = v.isoformat()
-    _audit("query_trade_journal", {"sql": sql[:120]}, f"{len(rows)} rows")
+    _audit("query_trade_journal", {"sql": raw[:120]}, f"{len(rows)} rows")
     return {"rows": rows[:1000], "truncated": len(rows) > 1000, "n": len(rows)}
 
 

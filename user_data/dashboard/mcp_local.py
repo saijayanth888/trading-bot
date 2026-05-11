@@ -30,6 +30,7 @@ import statistics
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Callable
 
@@ -54,17 +55,70 @@ CONFIG_PATH = Path(os.environ.get(
 FREQTRADE_API = os.environ.get("FREQTRADE_API_URL", "http://freqtrade:8080")
 HERMES_MCP_KEY = os.environ.get("HERMES_MCP_KEY", "").strip()
 
+# Rotate at the same size/backup count as hermes-mcp/server.py:_audit so the
+# unified log file can't grow unbounded — REVIEW_2026-05-11 §P0-R found the
+# old path used raw ``AUDIT_LOG.open("a")`` calls that bypassed any rotation,
+# producing a 600+MB hermes_mcp.log on the host.
+_AUDIT_LOG_MAX_BYTES = 2_000_000
+_AUDIT_LOG_BACKUPS = 5
+
+_audit_logger: logging.Logger | None = None
+
+
+def _get_audit_logger() -> logging.Logger:
+    """Lazy single-instance RotatingFileHandler logger for MCP audit lines.
+
+    Idempotent: the second caller gets the same logger (and the same single
+    handler). We attach our own handler instead of reusing logger.handlers
+    so a parent app.py changing root-logger handlers doesn't accidentally
+    duplicate this log into stderr / Slack / etc.
+    """
+    global _audit_logger
+    if _audit_logger is not None:
+        return _audit_logger
+    lg = logging.getLogger("hermes_mcp.audit.dashboard")
+    lg.setLevel(logging.INFO)
+    # Don't propagate to the root — the audit channel is a wire/wire-tap; we
+    # don't want a stray Sentry / Slack handler picking up every tool call.
+    lg.propagate = False
+    if not lg.handlers:
+        try:
+            AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+            h = RotatingFileHandler(
+                str(AUDIT_LOG),
+                maxBytes=_AUDIT_LOG_MAX_BYTES,
+                backupCount=_AUDIT_LOG_BACKUPS,
+            )
+            # %(message)s only — we format the audit string ourselves
+            # (timestamp + via= + tool= + args= + result=) to stay
+            # byte-compatible with hermes-mcp/server.py's audit lines so
+            # the ops "MCP wire" parser sees one homogenous log.
+            h.setFormatter(logging.Formatter("%(message)s"))
+            lg.addHandler(h)
+        except OSError:
+            # If we can't open the file (read-only volume, missing dir),
+            # fall back silently — audit is best-effort.
+            pass
+    _audit_logger = lg
+    return lg
+
 
 def _audit(tool: str, args: dict, result_summary: str = "ok") -> None:
-    """Append an audit line in the same format as hermes-mcp/server.py."""
+    """Emit an audit line in the same format as hermes-mcp/server.py.
+
+    Routes through the RotatingFileHandler in _get_audit_logger() instead of
+    raw open(..., "a") so the log can't grow unbounded; rotates at ~2 MB,
+    five backups.
+    """
     try:
-        AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
-        with AUDIT_LOG.open("a") as f:
-            ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            args_str = json.dumps(args, default=str)[:300]
-            f.write(f"{ts} INFO via=dashboard tool={tool} args={args_str} result={result_summary[:200]}\n")
-    except OSError:
-        pass
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        args_str = json.dumps(args, default=str)[:300]
+        _get_audit_logger().info(
+            "%s INFO via=dashboard tool=%s args=%s result=%s",
+            ts, tool, args_str, result_summary[:200],
+        )
+    except Exception as exc:  # noqa: BLE001 — audit must never crash a caller
+        logger.debug("audit log failed: %s", exc)
 
 
 def _require_auth() -> dict | None:
@@ -261,23 +315,64 @@ def get_evolution_status() -> dict:
     return out
 
 
-def trigger_evolution_cycle() -> dict:
+def trigger_evolution_cycle(mode: str = "mock") -> dict:
+    """❗ Kick off a new EPT generation — mirrors hermes-mcp/server.py.
+
+    The previous wiring fired ``scripts/train_drl.py`` which trains the DRL
+    component and leaves evolution.json empty — confirming "wrong script"
+    in REVIEW_2026-05-11 §P0-S. The right runner is
+    ``user_data/scripts/run_ept_generation.py`` (used by the MCP server's
+    trigger_evolution_cycle tool and the nightly evolution cron).
+
+    We invoke it synchronously with a 5-minute timeout and return the
+    parsed champion summary so callers see real generation numbers, not
+    a fire-and-forget pid.
+    """
     refused = _require_auth()
     if refused:
         return refused
-    script = USER_DATA_ROOT.parent / "scripts" / "train_drl.py"
+    script = USER_DATA_ROOT / "scripts" / "run_ept_generation.py"
     if not script.exists():
-        # Try the alternate location
-        script = USER_DATA_ROOT / "scripts" / "train_drl.py"
-        if not script.exists():
-            return {"error": f"script missing: {script}"}
-    proc = subprocess.Popen(
-        ["python3", str(script), "--synthetic", "--timesteps", "20000"],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        env=os.environ.copy(), cwd=str(USER_DATA_ROOT.parent),
+        return {"error": f"script missing: {script}"}
+    try:
+        proc = subprocess.run(
+            ["python3", str(script), "--mode", str(mode)],
+            capture_output=True, text=True, timeout=300,
+            env=os.environ.copy(), cwd=str(USER_DATA_ROOT.parent),
+        )
+    except subprocess.TimeoutExpired:
+        _audit("trigger_evolution_cycle", {"mode": mode}, "TIMEOUT >5min")
+        return {"error": "evolution cycle timed out after 5 minutes"}
+    except Exception as exc:  # noqa: BLE001
+        _audit("trigger_evolution_cycle", {"mode": mode}, f"exec failed: {exc}")
+        return {"error": f"could not execute runner: {exc}"}
+
+    if proc.returncode != 0:
+        _audit(
+            "trigger_evolution_cycle",
+            {"mode": mode},
+            f"exit={proc.returncode} stderr={(proc.stderr or '')[-400:]}",
+        )
+        return {
+            "error": f"runner exited with code {proc.returncode}",
+            "stderr_tail": (proc.stderr or "")[-1200:],
+        }
+    summary: dict[str, Any]
+    try:
+        # The runner prints a JSON summary on its final line; we use the
+        # last `{...}` we can find rather than a strict splitlines parse
+        # to be robust to trailing newlines / warnings on stdout.
+        stdout = (proc.stdout or "").strip()
+        last_brace = stdout.rfind("{")
+        summary = json.loads(stdout[last_brace:]) if last_brace >= 0 else {}
+    except Exception:
+        summary = {"ok": True, "raw_stdout": (proc.stdout or "")[-2000:]}
+    _audit(
+        "trigger_evolution_cycle",
+        {"mode": mode},
+        f"gen={summary.get('generation')} champ={(summary.get('champion') or {}).get('member_id')}",
     )
-    _audit("trigger_evolution_cycle", {}, f"pid={proc.pid}")
-    return {"started": True, "pid": proc.pid, "note": "running in background"}
+    return summary
 
 
 def get_champion_genome() -> dict:
@@ -475,20 +570,41 @@ _FORBIDDEN_RE = re.compile(
     r"COPY|VACUUM|CLUSTER|REINDEX|REFRESH)\b",
     re.IGNORECASE,
 )
+# Dangerous tokens that survived the keyword blocklist before
+# (REVIEW_2026-05-11 §P0-Q): semicolons / comments / union-stacking and
+# Postgres-specific privilege-leaks. ops_db._connect() already enforces a
+# 2-second statement_timeout, but pg_read_file and friends can leak host
+# state in well under 2 seconds; we must reject them at the input layer.
+_SQLI_DENY_RE = re.compile(
+    r"(--|/\*|\*/|;|"
+    r"\bunion\b|\bpg_sleep\b|\bpg_read_file\b|\bpg_ls_dir\b|"
+    r"\bpg_read_binary_file\b|\bcurrent_setting\b|\bdblink\b|"
+    r"\blo_import\b|\blo_export\b|\bcopy\s+from\b)",
+    re.IGNORECASE,
+)
 
 
 def query_trade_journal(sql: str) -> dict:
-    if not _READ_ONLY_RE.match(sql or ""):
+    raw = sql or ""
+    if not _READ_ONLY_RE.match(raw):
         return {"error": "only SELECT or WITH (CTE) statements allowed"}
-    if _FORBIDDEN_RE.search(sql):
+    if _FORBIDDEN_RE.search(raw):
         return {"error": "forbidden keyword detected — read-only enforcement"}
-    if not re.search(r"\btrade_journal\b", sql, re.IGNORECASE):
+    sqli_hit = _SQLI_DENY_RE.search(raw)
+    if sqli_hit:
+        _audit("query_trade_journal", {"sql": raw[:120]}, f"reject: sqli_token={sqli_hit.group(0)!r}")
+        return {"error": "query rejected — disallowed token (comments, semicolons, union, pg_sleep, etc.)"}
+    if not re.search(r"\btrade_journal\b", raw, re.IGNORECASE):
         return {"error": "query must reference the trade_journal table"}
     if not ops_db._HAVE_PG:
         return {"error": "psycopg not installed"}
     try:
         with ops_db._connect() as conn, conn.cursor() as cur:
-            cur.execute(sql)
+            # Defence-in-depth — force the transaction to RO at the DB level
+            # so even if our input filter is bypassed, the planner refuses
+            # mutations. Mirrors hermes-mcp/server.py:_query.
+            cur.execute("SET default_transaction_read_only = on")
+            cur.execute(raw)
             rows = cur.fetchall()
     except Exception as exc:
         return {"error": str(exc)[:200]}
@@ -498,7 +614,7 @@ def query_trade_journal(sql: str) -> dict:
             k: (v.isoformat() if isinstance(v, datetime) else v)
             for k, v in r.items()
         })
-    _audit("query_trade_journal", {"sql": sql[:120]}, f"{len(rows)} rows")
+    _audit("query_trade_journal", {"sql": raw[:120]}, f"{len(rows)} rows")
     return {"rows": serialised, "truncated": len(rows) > 1000, "n": len(rows)}
 
 
@@ -739,8 +855,9 @@ TOOLS: dict[str, dict[str, Any]] = {
     },
     "trigger_evolution_cycle": {
         "func": trigger_evolution_cycle, "async": False, "mutating": True,
-        "params": [],
-        "doc": "❗ Kick off a new EPT generation in the background.",
+        "params": [{"name": "mode", "type": "str", "default": "mock", "required": False,
+                    "doc": "'mock' (deterministic surrogate) or 'live' (reads trade_journal)"}],
+        "doc": "❗ Kick off a new EPT generation synchronously (runs run_ept_generation.py).",
     },
     "get_champion_genome": {
         "func": get_champion_genome, "async": False, "mutating": False,
