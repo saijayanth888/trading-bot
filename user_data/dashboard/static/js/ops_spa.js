@@ -349,11 +349,26 @@
   }
 
   function BotStateCellLive({ mode, killState, data }) {
+    // Derive posture from regime + open positions so the pill doesn't say
+    // "RUNNING" alongside a "TRENDING DOWN" regime — that confused the
+    // operator on legacy /ops; mirror the same fix here.
+    const regimeEnv = envelopeData(data.regime) || {};
+    const cryptoDown = String(regimeEnv.current || "").toLowerCase() === "trending_down";
+    const liveEnv = envelopeData(data.live_trades) || {};
+    const openCount = (liveEnv.trades || []).length || 0;
     const klass = killState === "killed" ? "down" : killState === "armed" ? "warn"
               : mode.state === "running" ? "up"
               : mode.state === "paused" ? "warn" : "info";
-    const lbl = killState === "killed" ? "KILLED" : killState === "armed" ? "ARMED"
-              : (mode.state || "—").toUpperCase();
+    let lbl;
+    if (killState === "killed") lbl = "KILLED";
+    else if (killState === "armed") lbl = "ARMED";
+    else if (mode.state === "running") {
+      if (openCount > 0)     lbl = "ACTIVE · IN TRADE";
+      else if (cryptoDown)   lbl = "ACTIVE · HOLD (DOWN)";
+      else                   lbl = "ACTIVE · READY";
+    } else {
+      lbl = (mode.state || "—").toUpperCase();
+    }
     const champEnv = envelopeData(data.ept_champion) || {};
     const champion = (champEnv.member_id || champEnv.genome_id || champEnv.id || "—");
     const metrics = champEnv.metrics || {};
