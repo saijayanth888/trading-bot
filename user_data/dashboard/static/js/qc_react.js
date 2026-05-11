@@ -1069,7 +1069,7 @@
           const sideClass = t.side === "BUY" || t.side === "CSP" ? "up" : "down";
           return h(
             "span",
-            { key: i, className: "tick" },
+            { key: t.pair + ":" + t.side + ":" + i, className: "tick" },
             h("span", { className: "dot " + sideClass }),
             h("span", { className: "tick-sym" }, t.pair),
             h("span", { className: "dim" }, t.side),
