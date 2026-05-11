@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
@@ -68,6 +68,52 @@ async def _bounded(coro, fallback_fn, *fallback_args):
         return await asyncio.wait_for(coro, timeout=ENDPOINT_TIMEOUT_S)
     except asyncio.TimeoutError:
         return fallback_fn(*fallback_args)
+
+
+# --------------------------------------------------------------------------
+# Auth dependency for mutating ops endpoints (P0-A through P0-E)
+# --------------------------------------------------------------------------
+#
+# Same key the hermes-mcp server uses for its mutating tools — pause, resume,
+# regime_config, rebalance, and the local MCP shim's mutating tools. Read
+# endpoints stay open (the dashboard is on the LAN; read-only data is fine).
+#
+# Header format: ``Authorization: Bearer <HERMES_MCP_KEY>``.  Mirrors the
+# hermes-mcp/server.py convention so a single key gates every mutation path.
+#
+# Behaviour:
+#   - HERMES_MCP_KEY unset in the dashboard container env → 503 with a clear
+#     "auth not configured" message. Refuse rather than silently allow.
+#   - Header missing or doesn't match → 401.
+#
+# Tests / dev: set HERMES_MCP_KEY=<some-secret> in .env and pass
+# ``Authorization: Bearer <some-secret>`` from the Ops UI's fetch calls.
+
+_DASHBOARD_MCP_KEY = os.environ.get("HERMES_MCP_KEY", "").strip()
+
+
+def require_mcp_key(authorization: str | None = Header(default=None)) -> None:
+    """FastAPI dependency: gate mutating endpoints behind the shared MCP key.
+
+    Raises 503 if the key isn't configured (refuse-by-default), 401 if the
+    caller's Bearer token doesn't match. Returns None on success.
+    """
+    if not _DASHBOARD_MCP_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="MCP authentication not configured. "
+                   "Set HERMES_MCP_KEY in .env to enable mutating ops endpoints.",
+        )
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="missing Authorization: Bearer <HERMES_MCP_KEY> header",
+        )
+    presented = authorization.split(" ", 1)[1].strip()
+    # Constant-time compare to avoid timing leaks on the shared secret.
+    import hmac
+    if not hmac.compare_digest(presented, _DASHBOARD_MCP_KEY):
+        raise HTTPException(status_code=401, detail="invalid MCP key")
 
 
 # --------------------------------------------------------------------------
@@ -439,7 +485,7 @@ async def _freqtrade_post(endpoint: str) -> tuple[int, dict | None, str | None]:
             return r.status_code, None, "non-JSON response"
 
 
-@router.post("/pause")
+@router.post("/pause", dependencies=[Depends(require_mcp_key)])
 async def pause(request: Request):
     body = await request.json() if request.headers.get("content-length") else {}
     note = body.get("reason", "ops-tab manual pause")
@@ -601,7 +647,7 @@ def regime_config_get():
     })
 
 
-@router.post("/regime_config")
+@router.post("/regime_config", dependencies=[Depends(require_mcp_key)])
 async def regime_config_post(request: Request):
     """Validate + atomically write the new regime_gating block.
 
@@ -721,7 +767,7 @@ async def regime_config_post(request: Request):
 # --------------------------------------------------------------------------
 
 
-@router.post("/resume")
+@router.post("/resume", dependencies=[Depends(require_mcp_key)])
 async def resume(request: Request):
     body = await request.json() if request.headers.get("content-length") else {}
     if not body.get("confirm"):
@@ -1095,7 +1141,7 @@ async def rebalance_dryrun(window: int = 14):
     return _envelope("ok", data=result)
 
 
-@router.post("/rebalance")
+@router.post("/rebalance", dependencies=[Depends(require_mcp_key)])
 async def rebalance_apply(request: Request):
     body: dict = {}
     if request.headers.get("content-length"):
@@ -1153,13 +1199,25 @@ async def mcp_tools():
 
 
 @router.post("/mcp/{tool_name}")
-async def mcp_call(tool_name: str, request: Request):
+async def mcp_call(
+    tool_name: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
     body: dict = {}
     if request.headers.get("content-length"):
         try:
             body = await request.json()
         except Exception:
             body = {}
+    # P0-E: gate mutating MCP tools at the HTTP layer too, not just inside
+    # the tool body (which currently returns a 200 with {"error": ...}).
+    # Read-only tools (mutating=False) stay open for the dashboard's pull
+    # paths. Unknown tool names fall through to dispatch's error handling.
+    tool_meta = mcp_local.TOOLS.get(tool_name)
+    if tool_meta and tool_meta.get("mutating"):
+        # Reuse the dependency body — raises 401/503 on missing/invalid key.
+        require_mcp_key(authorization=authorization)
     try:
         result = await asyncio.wait_for(
             mcp_local.dispatch(tool_name, body or {}),
