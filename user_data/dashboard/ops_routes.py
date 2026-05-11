@@ -92,12 +92,32 @@ async def _bounded(coro, fallback_fn, *fallback_args):
 _DASHBOARD_MCP_KEY = os.environ.get("HERMES_MCP_KEY", "").strip()
 
 
-def require_mcp_key(authorization: str | None = Header(default=None)) -> None:
+def require_mcp_key(
+    request: Request | None = None,
+    authorization: str | None = Header(default=None),
+) -> None:
     """FastAPI dependency: gate mutating endpoints behind the shared MCP key.
+
+    Same-origin exemption: browser POSTs from the dashboard's own UI carry an
+    Origin/Referer matching the host. Since the dashboard binds 127.0.0.1 (P0-V),
+    same-origin == local operator clicking the UI — allowed without bearer.
+    External Hermes callers (different origin) must still send Authorization.
 
     Raises 503 if the key isn't configured (refuse-by-default), 401 if the
     caller's Bearer token doesn't match. Returns None on success.
     """
+    if request is not None:
+        origin = request.headers.get("origin") or request.headers.get("referer") or ""
+        host_header = request.headers.get("host") or ""
+        if host_header and origin:
+            try:
+                from urllib.parse import urlsplit
+                origin_host = urlsplit(origin).netloc or origin
+                if origin_host == host_header:
+                    return
+            except Exception:
+                pass
+
     if not _DASHBOARD_MCP_KEY:
         raise HTTPException(
             status_code=503,
@@ -110,7 +130,6 @@ def require_mcp_key(authorization: str | None = Header(default=None)) -> None:
             detail="missing Authorization: Bearer <HERMES_MCP_KEY> header",
         )
     presented = authorization.split(" ", 1)[1].strip()
-    # Constant-time compare to avoid timing leaks on the shared secret.
     import hmac
     if not hmac.compare_digest(presented, _DASHBOARD_MCP_KEY):
         raise HTTPException(status_code=401, detail="invalid MCP key")
