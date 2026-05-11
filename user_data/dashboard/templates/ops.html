@@ -8,7 +8,7 @@
   <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='6' fill='%237c5cff'/></svg>" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="/static/css/app.css?v=20260511-9" />
+  <link rel="stylesheet" href="/static/css/app.css?v=20260512-1" />
   <style>
     /* ── Page grid ────────────────────────────────────────────────── */
     .ops-grid {
@@ -634,7 +634,7 @@
     </div>
     <span class="tb-spacer"></span>
     <div class="tb-group">
-      <span id="topbar-clock" class="num" style="font-size:var(--t-sm);color:var(--fg-2);">— UTC</span>
+      <span id="topbar-clock" class="num" style="font-size:var(--t-sm);color:var(--fg-2);">— ET</span>
     </div>
     <span class="tb-divider"></span>
     <div class="tb-group">
@@ -1415,11 +1415,19 @@
       const modePill = document.getElementById("topbar-mode-pill");
       const svcPill = document.getElementById("topbar-service-pill");
       function tickClock() {
-        const now = new Date();
-        const hh = String(now.getUTCHours()).padStart(2, "0");
-        const mm = String(now.getUTCMinutes()).padStart(2, "0");
-        const ss = String(now.getUTCSeconds()).padStart(2, "0");
-        if (clockEl) clockEl.textContent = `${hh}:${mm}:${ss} UTC`;
+        if (!clockEl) return;
+        // Render in America/New_York (NYSE) — handles EST/EDT automatically.
+        // Operator explicitly requested ET, not UTC.
+        try {
+          const parts = new Intl.DateTimeFormat("en-US", {
+            timeZone: "America/New_York",
+            hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+            timeZoneName: "short",
+          }).formatToParts(new Date()).reduce((m, p) => (m[p.type] = p.value, m), {});
+          clockEl.textContent = `${parts.hour}:${parts.minute}:${parts.second} ${parts.timeZoneName || "ET"}`;
+        } catch (_) {
+          clockEl.textContent = new Date().toLocaleTimeString("en-US", { hour12: false }) + " ET";
+        }
       }
       tickClock(); setInterval(tickClock, 1000);
       function setSvcPill(ok) {
@@ -1854,8 +1862,45 @@
   })();
   </script>
 
-  {% if effects_enabled %}<script src="/static/js/effects.js?v=20260511-9" defer></script>{% endif %}
-  <script src="/static/js/components.js?v=20260511-9"></script>
-  <script src="/static/js/ops.js?v=20260511-9" defer></script>
+  {% if effects_enabled %}<script src="/static/js/effects.js?v=20260512-1" defer></script>{% endif %}
+  <script src="/static/js/utils.js?v=20260512-1"></script>
+  <script src="/static/js/components.js?v=20260512-1"></script>
+  <script src="/static/js/ops.js?v=20260512-1" defer></script>
+
+  <!-- NumberRoll upgrade for topbar + hero equity (prototype primitive) -->
+  <script>
+    (function () {
+      // Defer until QC.NumberRoll is registered
+      if (!window.QC || !window.QC.NumberRoll) return;
+      function mountRoll(spanId, opts) {
+        const old = document.getElementById(spanId);
+        if (!old) return null;
+        const roll = window.QC.NumberRoll(opts);
+        // Preserve the original element's classes (so styling carries over).
+        roll.el.id = spanId + "-roll";
+        roll.el.className = (roll.el.className + " " + (old.className || "")).trim();
+        roll.el.style.cssText = old.style.cssText;
+        old.replaceWith(roll.el);
+        return roll;
+      }
+      // Topbar: $X,XXX.XX with prefix $
+      window.__topbarEquityRoll = mountRoll("topbar-equity", { decimals: 2, prefix: "$" });
+      // Hero: same but at hero font size
+      window.__heroEquityRoll   = mountRoll("hero-equity-value", { decimals: 2, prefix: "$" });
+      // Hook into the existing refresh by polling the data periodically
+      async function refreshEquityRolls() {
+        try {
+          const r = await fetch("/api/ops/combined_portfolio").then(r => r.json());
+          const te = r && r.data && r.data.total_equity;
+          if (typeof te === "number") {
+            if (window.__topbarEquityRoll) window.__topbarEquityRoll.set(te);
+            if (window.__heroEquityRoll)   window.__heroEquityRoll.set(te);
+          }
+        } catch (_) {}
+      }
+      refreshEquityRolls();
+      setInterval(refreshEquityRolls, 10000);
+    })();
+  </script>
 </body>
 </html>

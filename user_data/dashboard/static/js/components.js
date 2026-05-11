@@ -281,6 +281,224 @@
   }
 
   // ──────────────────────────────────────────────────────────────────
+  // NumberRoll — port of prototype components.jsx NumberRoll.
+  //
+  // Renders a number with each digit in its own cell. When the value
+  // changes, digits roll vertically (translateY in 0.1em units) and a
+  // 600ms flash overlay (green up / red down) fires. No JSX — produces
+  // raw DOM nodes the caller appends.
+  //
+  // Usage:
+  //   const n = QC.NumberRoll({ initial: 119000, decimals: 2, prefix: "$" });
+  //   container.appendChild(n.el);
+  //   n.set(119_842.42);  // animates the diff
+  //
+  // No-digit-leak guarantee: each cell has overflow: hidden, a 1em
+  // height, line-height: 1, and the inner track has flex column with
+  // 10 children sized exactly 1em each. translateY can never exceed
+  // the bounds of any cell.
+  // ──────────────────────────────────────────────────────────────────
+  function NumberRoll(opts) {
+    opts = opts || {};
+    const decimals = opts.decimals != null ? opts.decimals : 2;
+    const prefix   = opts.prefix || "";
+    const suffix   = opts.suffix || "";
+    const className = opts.className || "";
+
+    const wrap = el("span", { class: "numroll num " + className });
+    let prevValue = null;
+    let cells = [];   // {ch: string, node: <span>, track?: <span>}
+
+    function formatString(v) {
+      if (v == null || isNaN(v)) return "—";
+      return Math.abs(v).toLocaleString("en-US", {
+        minimumFractionDigits: decimals, maximumFractionDigits: decimals,
+      });
+    }
+
+    function clearCells() {
+      while (wrap.firstChild) wrap.removeChild(wrap.firstChild);
+      cells = [];
+    }
+
+    function makeDigit(ch, flashClass) {
+      const isDigit = /[0-9]/.test(ch);
+      if (!isDigit) {
+        const c = document.createElement("span");
+        c.className = "numroll-cell wide";
+        const inner = document.createElement("span");
+        inner.textContent = ch;
+        c.appendChild(inner);
+        return { ch, node: c };
+      }
+      const c = document.createElement("span");
+      c.className = "numroll-cell" + (flashClass ? " " + flashClass : "");
+      const track = document.createElement("span");
+      track.className = "numroll-track";
+      for (let i = 0; i < 10; i++) {
+        const d = document.createElement("span");
+        d.textContent = String(i);
+        track.appendChild(d);
+      }
+      const n = parseInt(ch, 10);
+      track.style.transform = `translateY(-${n}em)`;
+      c.appendChild(track);
+      return { ch, node: c, track };
+    }
+
+    function set(value) {
+      const flashFlag = (prevValue != null && value != null && value !== prevValue)
+        ? (value > prevValue ? "flash-up" : "flash-down")
+        : null;
+      const valStr = formatString(value);
+      const sign = (value != null && value < 0) ? "−" : "";
+      const fullStr = prefix + sign + valStr + suffix;
+      const chars = fullStr.split("");
+
+      // First-time render or length mismatch — rebuild
+      if (cells.length !== chars.length) {
+        clearCells();
+        for (const ch of chars) {
+          const cell = makeDigit(ch, flashFlag);
+          cells.push(cell);
+          wrap.appendChild(cell.node);
+        }
+      } else {
+        // Same length — update each cell in place
+        for (let i = 0; i < chars.length; i++) {
+          const ch = chars[i];
+          const cell = cells[i];
+          if (cell.ch !== ch || !/[0-9]/.test(ch)) {
+            const fresh = makeDigit(ch, flashFlag);
+            wrap.replaceChild(fresh.node, cell.node);
+            cells[i] = fresh;
+          } else if (cell.track) {
+            // Same digit position, just animate to new value if changed
+            const n = parseInt(ch, 10);
+            cell.track.style.transform = `translateY(-${n}em)`;
+            if (flashFlag) {
+              cell.node.classList.remove("flash-up", "flash-down");
+              // force reflow
+              void cell.node.offsetWidth;
+              cell.node.classList.add(flashFlag);
+              setTimeout(() => cell.node.classList.remove(flashFlag), 600);
+            }
+          }
+        }
+      }
+      prevValue = value;
+    }
+
+    // Initial render
+    set(opts.initial != null ? opts.initial : null);
+    return { el: wrap, set, get: () => prevValue };
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // KillSwitchProto — exact prototype timing.
+  // Wires up an existing <button>/<div> as a hold-to-confirm trigger.
+  //   * 1500ms fill animation
+  //   * Pointermove-cancel on early release (matches prototype)
+  //   * Confirm fires once; subsequent presses do nothing until reset
+  //   * Returns { dispose, reset }
+  //
+  // The caller is responsible for the visual chrome (label, ARM button,
+  // breath glow). This helper just runs the timing.
+  // ──────────────────────────────────────────────────────────────────
+  function killHoldProto(btnEl, onConfirm, opts) {
+    opts = opts || {};
+    const HOLD_MS = opts.holdMs || 1500;
+    let raf = null, t0 = 0, holding = false, confirmed = false;
+
+    // Inject fill element if absent
+    let fill = btnEl.querySelector(".kill-hold-fill");
+    if (!fill) {
+      fill = document.createElement("span");
+      fill.className = "kill-hold-fill";
+      btnEl.classList.add("kill-hold");
+      btnEl.insertBefore(fill, btnEl.firstChild);
+    }
+
+    function step(now) {
+      if (!holding) return;
+      const pct = Math.min(100, ((now - t0) / HOLD_MS) * 100);
+      fill.style.width = pct + "%";
+      if (pct >= 100) {
+        if (!confirmed) {
+          confirmed = true;
+          holding = false;
+          try { onConfirm(); } catch (e) { console.error("kill confirm:", e); }
+        }
+        return;
+      }
+      raf = requestAnimationFrame(step);
+    }
+
+    function start(e) {
+      if (confirmed) return;
+      if (e && e.preventDefault) e.preventDefault();
+      holding = true;
+      t0 = performance.now();
+      raf = requestAnimationFrame(step);
+    }
+    function end() {
+      if (!holding) return;
+      holding = false;
+      cancelAnimationFrame(raf);
+      fill.style.width = "0%";
+    }
+    function reset() {
+      confirmed = false;
+      holding = false;
+      cancelAnimationFrame(raf);
+      fill.style.width = "0%";
+    }
+
+    btnEl.addEventListener("mousedown",  start);
+    btnEl.addEventListener("touchstart", start, { passive: false });
+    ["mouseup", "mouseleave", "blur"].forEach(ev => btnEl.addEventListener(ev, end));
+    ["touchend", "touchcancel"].forEach(ev => btnEl.addEventListener(ev, end));
+    // Pointermove cancel (matches prototype's "release on drag-off")
+    btnEl.addEventListener("pointerleave", end);
+
+    return {
+      reset,
+      dispose() {
+        btnEl.removeEventListener("mousedown", start);
+        btnEl.removeEventListener("touchstart", start);
+        ["mouseup", "mouseleave", "blur", "touchend", "touchcancel", "pointerleave"]
+          .forEach(ev => btnEl.removeEventListener(ev, end));
+        if (fill) fill.remove();
+      },
+    };
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // TimeSince — auto-updating "Ns ago" / "Nm ago" label.
+  // Pass an ISO string or epoch ms; the element updates every 5s.
+  // ──────────────────────────────────────────────────────────────────
+  function TimeSince(initialTs) {
+    const span = el("span", { class: "mono dim" });
+    let ts = initialTs;
+    function render() {
+      if (ts == null) { span.textContent = "—"; return; }
+      const t = typeof ts === "string" ? new Date(ts).getTime() : ts;
+      const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+      span.textContent = s < 5 ? "just now"
+        : s < 60 ? s + "s ago"
+        : s < 3600 ? Math.floor(s / 60) + "m ago"
+        : Math.floor(s / 3600) + "h ago";
+    }
+    render();
+    const iv = setInterval(render, 5000);
+    return {
+      el: span,
+      set(t) { ts = t; render(); },
+      dispose() { clearInterval(iv); },
+    };
+  }
+
+  // ──────────────────────────────────────────────────────────────────
   // Public surface
   // ──────────────────────────────────────────────────────────────────
   global.QC = {
@@ -288,5 +506,6 @@
     gateBadge, pill, dot, statusRow, metric,
     sparkline, regimeRibbon, liveTicker,
     holdToConfirm, flashChange,
+    NumberRoll, killHoldProto, TimeSince,
   };
 })(window);
