@@ -810,11 +810,14 @@ async def resume(request: Request):
         raise HTTPException(status_code=400, detail="confirm=true required")
 
     # Pre-flight: refuse if drawdown > 6% or circuit breaker active.
+    # ops_db.trades_risk_summary returns drawdown_pct_30d as a fraction
+    # (e.g. -0.012 = -1.2%); convert to percent for the threshold check
+    # and the human-readable error string.
     loop = asyncio.get_running_loop()
     risk = await loop.run_in_executor(None, ops_db.trades_risk_summary)
-    dd = risk.get("drawdown_pct_30d") or 0
-    if dd < -6.0:
-        raise HTTPException(status_code=409, detail=f"resume refused: 30d max drawdown {dd:.1f}% (limit -6%)")
+    dd_pct = (risk.get("drawdown_pct_30d") or 0) * 100
+    if dd_pct < -6.0:
+        raise HTTPException(status_code=409, detail=f"resume refused: 30d max drawdown {dd_pct:.1f}% (limit -6%)")
     if risk.get("circuit_breaker", {}).get("active"):
         raise HTTPException(status_code=409, detail="resume refused: circuit breaker active")
 
