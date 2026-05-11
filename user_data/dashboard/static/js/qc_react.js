@@ -1066,6 +1066,8 @@
       { id: "evolution", label: "Evolution", key: "6", href: "/ops#evolution" },
       { id: "llm", label: "LLM providers", key: "7", href: "/ops#llm" },
       { id: "config", label: "Config", key: "8", href: "/ops#config" },
+      { sect: "REFERENCE" },
+      { id: "docs", label: "Docs · glossary", key: "9", href: "/docs" },
     ];
     useEffect(() => {
       const navItems = items.filter((it) => !it.sect);

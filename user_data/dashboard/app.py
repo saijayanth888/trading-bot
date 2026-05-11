@@ -94,6 +94,11 @@ async def index(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "dashboard_spa.html", {})
 
 
+@app.get("/docs", response_class=HTMLResponse, name="docs_page")
+async def docs_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request, "docs.html", {})
+
+
 # ---------------------------------------------------------------------------
 # Pairs
 # ---------------------------------------------------------------------------
