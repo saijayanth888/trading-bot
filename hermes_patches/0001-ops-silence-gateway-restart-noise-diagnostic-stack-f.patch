@@ -1,0 +1,68 @@
+From fa475aecbd6068d0c2210b10647a54bfb751ff69 Mon Sep 17 00:00:00 2001
+From: sai jayanth <saijayanth532@gmail.com>
+Date: Mon, 11 May 2026 11:40:53 -0400
+Subject: [PATCH 1/2] ops: silence gateway-restart noise + diagnostic stack for
+ clean-exit
+
+Two changes to the Hermes installation, both authorized by operator
+during 2026-05-11 morning stabilization:
+
+1. ~/.hermes/config.yaml: added top-level
+       platforms:
+         telegram:
+           gateway_restart_notification: false
+         slack:
+           gateway_restart_notification: false
+   Earlier attempts placed this under display.platforms (commit
+   placeholder), which is NOT where gateway/config.py:GatewayConfig.from_dict
+   reads it. The top-level platforms key is the correct location per the
+   data.get("platforms", {}) loader. Suppresses per-restart "Gateway
+   offline" Telegram/Slack messages.
+
+2. gateway/run.py: added DIAG stack-trace logging on every self.stop()
+   invocation. Captures the exact call site that triggers shutdown so
+   future restart-cycle investigations don't require code-spelunking.
+   WARN-level; fires once per actual stop (rare in a healthy gateway),
+   not per tick.
+
+Root cause of the morning's gateway restart cycle was a
+SYSTEM-LEVEL + USER-LEVEL gateway race: both /etc/systemd/system/
+hermes-gateway.service AND ~/.config/systemd/user/hermes-gateway.service
+were running, each spawning a `gateway run --replace` instance that
+SIGTERMed the other's gateway. Cycle: ~5 min. Resolved by operator
+disabling the system-level service.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ gateway/run.py | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/gateway/run.py b/gateway/run.py
+index 6c652e7cf..bf9cbf75e 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -4813,6 +4813,21 @@ class GatewayRunner:
+         service_restart: bool = False,
+     ) -> None:
+         """Stop the gateway and disconnect all adapters."""
++        # DIAGNOSTIC: capture the call stack of EVERY stop() invocation so
++        # we can identify what triggered the gateway shutdown. Operator
++        # reported gateway restart cycles every ~3 min with no obvious
++        # cause; this trace pinpoints the caller. Safe to leave in
++        # production — fires once per actual stop, not per tick.
++        try:
++            import traceback as _tb
++            _stack = "".join(_tb.format_stack()[:-1])
++            logger.warning(
++                "DIAG stop() invoked  restart=%s detached_restart=%s "
++                "service_restart=%s\nCALL STACK:\n%s",
++                restart, detached_restart, service_restart, _stack,
++            )
++        except Exception:
++            pass
+         if restart:
+             self._restart_requested = True
+             self._restart_detached = detached_restart
+-- 
+2.43.0
+

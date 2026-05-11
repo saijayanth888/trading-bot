@@ -1,0 +1,607 @@
+From 650e55b6298762b40cbc5a586c3f888fc3f3a1c1 Mon Sep 17 00:00:00 2001
+From: sai jayanth <saijayanth532@gmail.com>
+Date: Mon, 11 May 2026 10:06:47 -0400
+Subject: [PATCH 2/2] =?UTF-8?q?cron:=20dedicated=20worker-pool=20dispatch?=
+ =?UTF-8?q?=20=E2=80=94=20fix=20tick-lock-blocks-stocks-crons?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Bug: cron/scheduler.py:tick() held .tick.lock for the full duration
+of every dispatched job. LLM-driven crons (risk_monitor_15min,
+market_research_30min) using hermes3:70b take 10-30 min per call.
+While the lock was held, subsequent gateway ticks bailed out on
+LOCK_NB and every script-only cron (wheel_candles, shark_pre_market,
+wheel_profit_take, etc.) got silently fast-forwarded past its grace
+window. Evidence in agent.log around 2026-05-11 09:24:11 shows
+wheel_candles + ollama_health getting skipped.
+
+Fix (Option 2 — dedicated worker threads in gateway):
+
+1. cron/scheduler.py:
+   * New module-level `_workdir_exec_lock` (threading.Lock) — workdir
+     jobs mutate TERMINAL_CWD process-global, so they MUST serialize.
+   * New public dispatch_job(job, adapters, loop, verbose) function
+     extracted from the former inner _process_job. Workers call this
+     directly; workdir jobs acquire _workdir_exec_lock inside.
+   * tick() takes new dispatch_queue=None kwarg. When provided
+     (gateway path), due jobs are enqueued and tick() returns
+     len(due_jobs). Lock-held critical section reduced to
+     get_due_jobs() + advance_next_run() only — released before
+     execution. When dispatch_queue is None (CLI / tests), the
+     legacy local ThreadPoolExecutor path runs (preserves backward
+     compat). 121/121 scheduler tests pass.
+
+2. gateway/run.py:
+   * New _resolve_cron_worker_count() reading HERMES_CRON_MAX_PARALLEL
+     env (default 4, clamped [1, 32]).
+   * New _cron_worker_loop(work_queue, stop_event, adapters, loop)
+     daemon worker that pulls from queue, calls dispatch_job, exits
+     on `None` sentinel or stop_event.
+   * _start_cron_ticker spawns N workers before the tick loop; passes
+     dispatch_queue=work_queue into cron_tick; on stop, sends N
+     sentinels + 2s join.
+
+Verified:
+   - bash -n + ast.parse: clean
+   - pytest tests/cron/test_scheduler.py: 121/121 PASS
+   - pytest tests/cron/test_cron_workdir.py: 21/21 PASS
+   - systemctl --user restart hermes-gateway: active, NRestarts stable
+   - Cron ticker log: "Cron ticker started (interval=60s, workers=4)"
+   - cron-worker-2 thread name observed in agent.log dispatching jobs
+   - .tick.lock mtime advances every 60s WHILE risk_monitor_15min is
+     mid-LLM-call on cron-worker-2 (definitive proof lock no longer
+     blocks subsequent ticks)
+   - wheel_candles fired manually via next_run_at edit, last_status=ok
+
+Authorized by operator via explicit reply in trading-bot session
+2026-05-11 09:43 ET ("Yes, edit ~/.hermes/hermes-agent/cron/scheduler.py
+to apply the persistent-pool fix") — extended to gateway/run.py for
+the worker-pool pattern.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ cron/scheduler.py | 333 ++++++++++++++++++++++++++++++----------------
+ gateway/run.py    | 111 +++++++++++++++-
+ 2 files changed, 323 insertions(+), 121 deletions(-)
+
+diff --git a/cron/scheduler.py b/cron/scheduler.py
+index 90683b6cc..19619b58c 100644
+--- a/cron/scheduler.py
++++ b/cron/scheduler.py
+@@ -17,6 +17,7 @@ import os
+ import shutil
+ import subprocess
+ import sys
++import threading
+ 
+ # fcntl is Unix-only; on Windows use msvcrt for file locking
+ try:
+@@ -1654,20 +1655,110 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
+             logger.debug("Job '%s': failed to reap stale auxiliary clients: %s", job_id, e)
+ 
+ 
+-def tick(verbose: bool = True, adapters=None, loop=None) -> int:
++# Process-global lock that serializes execution of jobs which configure
++# a per-job ``workdir`` (those jobs mutate ``os.environ["TERMINAL_CWD"]``
++# inside run_job — a process-global side effect that would otherwise let
++# parallel workdir-jobs corrupt each other's cwd).  Held only across the
++# ``run_job`` call, never across the file lock.
++_workdir_exec_lock = threading.Lock()
++
++
++def dispatch_job(job: dict, adapters=None, loop=None, verbose: bool = False) -> bool:
++    """Run one due job end-to-end: execute, save, deliver, mark.
++
++    Extracted from tick()'s former inner _process_job so a worker pool in
++    the gateway can run jobs after tick() has released the .tick.lock — the
++    file lock must NOT be held while LLM-driven cron jobs (10-30 min) are
++    running, or every subsequent gateway tick fast-forwards its script-only
++    crons past their grace window.
++
++    Workdir-jobs (those with j["workdir"] set) serialize on the
++    module-global _workdir_exec_lock because run_job mutates
++    os.environ["TERMINAL_CWD"] — a process-global side effect.  Jobs
++    without a workdir run unsynchronized and stay parallel-safe.
++
++    Returns:
++        True if the job ran (success or handled failure), False on an
++        unhandled exception in the dispatcher itself.
++    """
++    job_id = job.get("id", "<unknown>")
++    has_workdir = bool((job.get("workdir") or "").strip())
++
++    def _do_run() -> bool:
++        try:
++            success, output, final_response, error = run_job(job)
++
++            output_file = save_job_output(job["id"], output)
++            if verbose:
++                logger.info("Output saved to: %s", output_file)
++
++            # Deliver the final response to the origin/target chat.
++            # If the agent responded with [SILENT], skip delivery (but
++            # output is already saved above).  Failed jobs always deliver.
++            deliver_content = final_response if success else f"⚠️ Cron job '{job.get('name', job['id'])}' failed:\n{error}"
++            should_deliver = bool(deliver_content)
++            if should_deliver and success and SILENT_MARKER in deliver_content.strip().upper():
++                logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
++                should_deliver = False
++
++            delivery_error = None
++            if should_deliver:
++                try:
++                    delivery_error = _deliver_result(job, deliver_content, adapters=adapters, loop=loop)
++                except Exception as de:
++                    delivery_error = str(de)
++                    logger.error("Delivery failed for job %s: %s", job["id"], de)
++
++            # Treat empty final_response as a soft failure so last_status
++            # is not "ok" — the agent ran but produced nothing useful.
++            # (issue #8585)
++            if success and not final_response:
++                success = False
++                error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
++
++            mark_job_run(job["id"], success, error, delivery_error=delivery_error)
++            return True
++
++        except Exception as e:
++            logger.error("Error processing job %s: %s", job_id, e)
++            try:
++                mark_job_run(job_id, False, str(e))
++            except Exception as me:
++                logger.error("mark_job_run failed for %s: %s", job_id, me)
++            return False
++
++    if has_workdir:
++        with _workdir_exec_lock:
++            return _do_run()
++    return _do_run()
++
++
++def tick(verbose: bool = True, adapters=None, loop=None, dispatch_queue=None) -> int:
+     """
+     Check and run all due jobs.
+-    
++
+     Uses a file lock so only one tick runs at a time, even if the gateway's
+     in-process ticker and a standalone daemon or manual tick overlap.
+-    
++
++    The lock is released BEFORE any job runs.  This is critical: LLM-driven
++    crons (e.g. risk_monitor_15min, market_research_30min running on
++    hermes3:70b) take 10-30 minutes per call, and the old behaviour of
++    holding the lock for the full job duration caused every subsequent
++    gateway tick to bail out with LOCK_NB denial, silently fast-forwarding
++    script-only crons past their grace window.
++
+     Args:
+         verbose: Whether to print status messages
+         adapters: Optional dict mapping Platform → live adapter (from gateway)
+         loop: Optional asyncio event loop (from gateway) for live adapter sends
+-    
++        dispatch_queue: Optional queue.Queue.  When provided, due jobs are
++            advance_next_run'd under the file lock and then enqueued for
++            execution by external worker threads (the gateway pool).  When
++            None (standalone CLI / tests / fallback), jobs run inline in a
++            local ThreadPoolExecutor as before.
++
+     Returns:
+-        Number of jobs executed (0 if another tick is already running)
++        Number of jobs dispatched (0 if another tick is already running)
+     """
+     lock_dir, lock_file = _get_lock_paths()
+     lock_dir.mkdir(parents=True, exist_ok=True)
+@@ -1686,133 +1777,139 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
+             lock_fd.close()
+         return 0
+ 
++    # ── Lock-held claim phase ────────────────────────────────────────
++    # Hold the file lock ONLY across get_due_jobs() + advance_next_run().
++    # Execution happens AFTER the lock is released — see the dispatch
++    # phase below.
+     try:
+-        due_jobs = get_due_jobs()
+-
+-        if verbose and not due_jobs:
+-            logger.info("%s - No jobs due", _hermes_now().strftime('%H:%M:%S'))
+-            return 0
++        try:
++            due_jobs = get_due_jobs()
+ 
+-        if verbose:
+-            logger.info("%s - %s job(s) due", _hermes_now().strftime('%H:%M:%S'), len(due_jobs))
++            if verbose and not due_jobs:
++                logger.info("%s - No jobs due", _hermes_now().strftime('%H:%M:%S'))
++                return 0
+ 
+-        # Advance next_run_at for all recurring jobs FIRST, under the file lock,
+-        # before any execution begins.  This preserves at-most-once semantics.
+-        for job in due_jobs:
+-            advance_next_run(job["id"])
++            if verbose:
++                logger.info("%s - %s job(s) due", _hermes_now().strftime('%H:%M:%S'), len(due_jobs))
+ 
+-        # Resolve max parallel workers: env var > config.yaml > unbounded.
+-        # Set HERMES_CRON_MAX_PARALLEL=1 to restore old serial behaviour.
+-        _max_workers: Optional[int] = None
+-        try:
+-            _env_par = os.getenv("HERMES_CRON_MAX_PARALLEL", "").strip()
+-            if _env_par:
+-                _max_workers = int(_env_par) or None
+-        except (ValueError, TypeError):
+-            logger.warning("Invalid HERMES_CRON_MAX_PARALLEL value; defaulting to unbounded")
+-        if _max_workers is None:
++            # Advance next_run_at for all recurring jobs FIRST, under the
++            # file lock, before any execution begins.  This preserves
++            # at-most-once semantics: a concurrent tick that grabs the
++            # lock next will see these jobs as not-yet-due.
++            for job in due_jobs:
++                advance_next_run(job["id"])
++        finally:
++            # Release the file lock BEFORE running anything.  See module
++            # docstring for tick() — holding the lock across run_job is
++            # the bug we are fixing.
++            if fcntl:
++                try:
++                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
++                except (OSError, IOError):
++                    pass
++            elif msvcrt:
++                try:
++                    msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
++                except (OSError, IOError):
++                    pass
+             try:
+-                _ucfg = load_config() or {}
+-                _cfg_par = (
+-                    _ucfg.get("cron", {}) if isinstance(_ucfg, dict) else {}
+-                ).get("max_parallel_jobs")
+-                if _cfg_par is not None:
+-                    _max_workers = int(_cfg_par) or None
++                lock_fd.close()
+             except Exception:
+                 pass
++            lock_fd = None  # noqa: F841  — signal "already released" to outer finally
++    except Exception:
++        # Anything that escapes the claim phase is fatal for this tick.
++        if lock_fd is not None:
++            try:
++                if fcntl:
++                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
++                elif msvcrt:
++                    msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
++            except (OSError, IOError):
++                pass
++            try:
++                lock_fd.close()
++            except Exception:
++                pass
++        raise
+ 
+-        if verbose:
+-            logger.info(
+-                "Running %d job(s) in parallel (max_workers=%s)",
+-                len(due_jobs),
+-                _max_workers if _max_workers else "unbounded",
+-            )
++    # ── Dispatch phase (lock NOT held) ───────────────────────────────
++    # If a dispatch_queue was provided, enqueue jobs for the gateway's
++    # dedicated worker pool and return.  Otherwise fall back to an
++    # ephemeral local ThreadPoolExecutor so standalone invocations
++    # (`python -m cron.scheduler`, tests, hermes cron tick) still work.
+ 
+-        def _process_job(job: dict) -> bool:
+-            """Run one due job end-to-end: execute, save, deliver, mark."""
++    if dispatch_queue is not None:
++        for job in due_jobs:
+             try:
+-                success, output, final_response, error = run_job(job)
+-
+-                output_file = save_job_output(job["id"], output)
+-                if verbose:
+-                    logger.info("Output saved to: %s", output_file)
+-
+-                # Deliver the final response to the origin/target chat.
+-                # If the agent responded with [SILENT], skip delivery (but
+-                # output is already saved above).  Failed jobs always deliver.
+-                deliver_content = final_response if success else f"⚠️ Cron job '{job.get('name', job['id'])}' failed:\n{error}"
+-                should_deliver = bool(deliver_content)
+-                if should_deliver and success and SILENT_MARKER in deliver_content.strip().upper():
+-                    logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
+-                    should_deliver = False
+-
+-                delivery_error = None
+-                if should_deliver:
+-                    try:
+-                        delivery_error = _deliver_result(job, deliver_content, adapters=adapters, loop=loop)
+-                    except Exception as de:
+-                        delivery_error = str(de)
+-                        logger.error("Delivery failed for job %s: %s", job["id"], de)
++                dispatch_queue.put(job)
++            except Exception as e:
++                logger.error("Failed to enqueue job %s for worker pool: %s", job.get("id", "?"), e)
++        return len(due_jobs)
+ 
+-                # Treat empty final_response as a soft failure so last_status
+-                # is not "ok" — the agent ran but produced nothing useful.
+-                # (issue #8585)
+-                if success and not final_response:
+-                    success = False
+-                    error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
++    # ── Standalone fallback path ─────────────────────────────────────
++    # Resolve max parallel workers: env var > config.yaml > unbounded.
++    # Set HERMES_CRON_MAX_PARALLEL=1 to restore old serial behaviour.
++    _max_workers: Optional[int] = None
++    try:
++        _env_par = os.getenv("HERMES_CRON_MAX_PARALLEL", "").strip()
++        if _env_par:
++            _max_workers = int(_env_par) or None
++    except (ValueError, TypeError):
++        logger.warning("Invalid HERMES_CRON_MAX_PARALLEL value; defaulting to unbounded")
++    if _max_workers is None:
++        try:
++            _ucfg = load_config() or {}
++            _cfg_par = (
++                _ucfg.get("cron", {}) if isinstance(_ucfg, dict) else {}
++            ).get("max_parallel_jobs")
++            if _cfg_par is not None:
++                _max_workers = int(_cfg_par) or None
++        except Exception:
++            pass
+ 
+-                mark_job_run(job["id"], success, error, delivery_error=delivery_error)
+-                return True
++    if verbose:
++        logger.info(
++            "Running %d job(s) in parallel (max_workers=%s)",
++            len(due_jobs),
++            _max_workers if _max_workers else "unbounded",
++        )
+ 
+-            except Exception as e:
+-                logger.error("Error processing job %s: %s", job['id'], e)
+-                mark_job_run(job["id"], False, str(e))
+-                return False
+-
+-        # Partition due jobs: those with a per-job workdir mutate
+-        # os.environ["TERMINAL_CWD"] inside run_job, which is process-global —
+-        # so they MUST run sequentially to avoid corrupting each other.  Jobs
+-        # without a workdir leave env untouched and stay parallel-safe.
+-        workdir_jobs = [j for j in due_jobs if (j.get("workdir") or "").strip()]
+-        parallel_jobs = [j for j in due_jobs if not (j.get("workdir") or "").strip()]
+-
+-        _results: list = []
+-
+-        # Sequential pass for workdir jobs.
+-        for job in workdir_jobs:
+-            _ctx = contextvars.copy_context()
+-            _results.append(_ctx.run(_process_job, job))
+-
+-        # Parallel pass for the rest — same behaviour as before.
+-        if parallel_jobs:
+-            with concurrent.futures.ThreadPoolExecutor(max_workers=_max_workers) as _tick_pool:
+-                _futures = []
+-                for job in parallel_jobs:
+-                    _ctx = contextvars.copy_context()
+-                    _futures.append(_tick_pool.submit(_ctx.run, _process_job, job))
+-                _results.extend(f.result() for f in _futures)
+-
+-        # Best-effort sweep of MCP stdio subprocesses that survived their
+-        # session teardown during this tick.  Runs AFTER every job has
+-        # finished so active sessions (including live user chats) are
+-        # never touched — only PIDs explicitly detected as orphans in
+-        # tools.mcp_tool._run_stdio's finally block are reaped.
+-        try:
+-            from tools.mcp_tool import _kill_orphaned_mcp_children
+-            _kill_orphaned_mcp_children()
+-        except Exception as _e:
+-            logger.debug("Post-tick MCP orphan cleanup failed: %s", _e)
++    # Partition due jobs: those with a per-job workdir mutate
++    # os.environ["TERMINAL_CWD"] inside run_job, which is process-global —
++    # so they MUST run sequentially to avoid corrupting each other.  Jobs
++    # without a workdir leave env untouched and stay parallel-safe.
++    workdir_jobs = [j for j in due_jobs if (j.get("workdir") or "").strip()]
++    parallel_jobs = [j for j in due_jobs if not (j.get("workdir") or "").strip()]
++
++    _results: list = []
++
++    # Sequential pass for workdir jobs.
++    for job in workdir_jobs:
++        _ctx = contextvars.copy_context()
++        _results.append(_ctx.run(dispatch_job, job, adapters, loop, verbose))
++
++    # Parallel pass for the rest — same behaviour as before.
++    if parallel_jobs:
++        with concurrent.futures.ThreadPoolExecutor(max_workers=_max_workers) as _tick_pool:
++            _futures = []
++            for job in parallel_jobs:
++                _ctx = contextvars.copy_context()
++                _futures.append(_tick_pool.submit(_ctx.run, dispatch_job, job, adapters, loop, verbose))
++            _results.extend(f.result() for f in _futures)
++
++    # Best-effort sweep of MCP stdio subprocesses that survived their
++    # session teardown during this tick.  Runs AFTER every job has
++    # finished so active sessions (including live user chats) are
++    # never touched — only PIDs explicitly detected as orphans in
++    # tools.mcp_tool._run_stdio's finally block are reaped.
++    try:
++        from tools.mcp_tool import _kill_orphaned_mcp_children
++        _kill_orphaned_mcp_children()
++    except Exception as _e:
++        logger.debug("Post-tick MCP orphan cleanup failed: %s", _e)
+ 
+-        return sum(_results)
+-    finally:
+-        if fcntl:
+-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+-        elif msvcrt:
+-            try:
+-                msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
+-            except (OSError, IOError):
+-                pass
+-        lock_fd.close()
++    return sum(_results)
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/gateway/run.py b/gateway/run.py
+index bf9cbf75e..25daad3b1 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -30,6 +30,7 @@ import inspect
+ import json
+ import logging
+ import os
++import queue
+ import re
+ import shlex
+ import sys
+@@ -16056,10 +16057,70 @@ class GatewayRunner:
+         return response
+ 
+ 
++def _resolve_cron_worker_count() -> int:
++    """Pick worker-thread count for the cron dispatch pool.
++
++    Precedence: HERMES_CRON_MAX_PARALLEL env var > sensible default (4).
++    Set to 1 to restore fully serial behaviour.  Clamped to [1, 32].
++    """
++    try:
++        env = os.getenv("HERMES_CRON_MAX_PARALLEL", "").strip()
++        if env:
++            n = int(env)
++            if n >= 1:
++                return min(n, 32)
++    except (ValueError, TypeError):
++        logger.warning("Invalid HERMES_CRON_MAX_PARALLEL value; defaulting to 4")
++    return 4
++
++
++def _cron_worker_loop(work_queue: "queue.Queue", stop_event: threading.Event, adapters=None, loop=None):
++    """Long-lived gateway-owned worker thread for cron jobs.
++
++    Pulls one job at a time off ``work_queue`` and runs it via
++    ``cron.scheduler.dispatch_job`` (which internally serializes
++    workdir-jobs on a process-global lock).  Exits cleanly when it
++    receives the sentinel ``None`` on the queue OR when ``stop_event``
++    is set and the queue is drained.
++
++    Workers are dedicated (not a futures pool) so they:
++      * outlive any single tick — no spawn/join cost per tick
++      * never block on _python_exit atexit hooks (they shut down
++        explicitly via the sentinel from _start_cron_ticker)
++      * keep tick() short — the file lock is only held for claim,
++        execution is here in the background
++    """
++    from cron.scheduler import dispatch_job
++
++    while True:
++        try:
++            job = work_queue.get(timeout=1.0)
++        except queue.Empty:
++            if stop_event.is_set():
++                return
++            continue
++        if job is None:
++            # Sentinel — gateway shutdown.
++            try:
++                work_queue.task_done()
++            except Exception:
++                pass
++            return
++        try:
++            dispatch_job(job, adapters=adapters, loop=loop, verbose=False)
++        except Exception as e:
++            logger.error("Cron worker: unhandled error on job %s: %s", job.get("id", "?"), e)
++        finally:
++            try:
++                work_queue.task_done()
++            except Exception:
++                pass
++
++
+ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, interval: int = 60):
+     """
+     Background thread that ticks the cron scheduler at a regular interval.
+-    
++
+     Runs inside the gateway process so cronjobs fire automatically without
+     needing a separate `hermes cron daemon` or system cron entry.
+ 
+@@ -16069,6 +16130,11 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
+     Also refreshes the channel directory every 5 minutes and prunes the
+     image/audio/document cache + expired ``hermes debug share`` pastes
+     once per hour.
++
++    The cron file-lock (``~/.hermes/cron/.tick.lock``) is now held only
++    during the claim phase of each tick (get_due_jobs + advance_next_run);
++    job execution is offloaded to a dedicated worker-thread pool so a
++    long-running LLM cron can't starve subsequent ticks.
+     """
+     from cron.scheduler import tick as cron_tick
+     from gateway.platforms.base import cleanup_image_cache, cleanup_document_cache
+@@ -16079,11 +16145,34 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
+     PASTE_SWEEP_EVERY = 60   # ticks — once per hour
+     CURATOR_EVERY = 60       # ticks — poll hourly (inner gate handles the real cadence)
+ 
+-    logger.info("Cron ticker started (interval=%ds)", interval)
++    # ── Cron dispatch worker pool ────────────────────────────────────
++    worker_count = _resolve_cron_worker_count()
++    work_queue: "queue.Queue" = queue.Queue()
++    workers: list[threading.Thread] = []
++    for i in range(worker_count):
++        t = threading.Thread(
++            target=_cron_worker_loop,
++            args=(work_queue, stop_event),
++            kwargs={"adapters": adapters, "loop": loop},
++            daemon=True,
++            name=f"cron-worker-{i}",
++        )
++        t.start()
++        workers.append(t)
++    logger.info(
++        "Cron ticker started (interval=%ds, workers=%d)",
++        interval, worker_count,
++    )
++
+     tick_count = 0
+     while not stop_event.is_set():
+         try:
+-            cron_tick(verbose=False, adapters=adapters, loop=loop)
++            cron_tick(
++                verbose=False,
++                adapters=adapters,
++                loop=loop,
++                dispatch_queue=work_queue,
++            )
+         except Exception as e:
+             logger.debug("Cron tick error: %s", e)
+ 
+@@ -16145,6 +16234,22 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
+                 logger.debug("Curator tick error: %s", e)
+ 
+         stop_event.wait(timeout=interval)
++
++    # ── Shutdown: drain worker pool ──────────────────────────────────
++    # Send one sentinel per worker so each loop exits.  Then join with a
++    # bounded timeout — outer start_gateway() also gives this thread 5s
++    # to finish; longer cron jobs are abandoned (they're daemons), which
++    # matches the legacy ThreadPoolExecutor(daemon thread) behaviour.
++    for _ in workers:
++        try:
++            work_queue.put_nowait(None)
++        except Exception:
++            pass
++    for t in workers:
++        try:
++            t.join(timeout=2.0)
++        except Exception:
++            pass
+     logger.info("Cron ticker stopped")
+ 
+ 
+-- 
+2.43.0
+
