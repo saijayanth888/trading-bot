@@ -114,8 +114,8 @@
   // only exist as emergency seeds. Operator can't be left with a dropdown
   // that omits tickers they're actively trading — kept in sync with the
   // 8-pair freqtrade whitelist + 10-symbol wheel/dashboard basket.
-  const FALLBACK_CRYPTO_PAIRS = ["BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD", "XRP/USD", "DOGE/USD", "AVAX/USD", "LINK/USD"];
-  const FALLBACK_STOCK_SYMBOLS = ["SOFI", "PLTR", "NVDA", "AMD", "SPY", "TSLA", "AAPL", "GOOGL", "MSTR", "COIN"];
+  const FALLBACK_CRYPTO_PAIRS = ["BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD", "XRP/USD", "DOGE/USD", "AVAX/USD", "LINK/USD", "DOT/USD", "ATOM/USD", "LTC/USD", "BCH/USD"];
+  const FALLBACK_STOCK_SYMBOLS = ["SOFI", "PLTR", "NVDA", "AMD", "SPY", "TSLA", "AAPL", "GOOGL", "MSTR", "COIN", "MARA", "F", "QQQ", "IWM", "HOOD"];
 
   // ─────────────── TopbarLive ───────────────
   // Replaces the prototype's hardcoded Topbar ($119,842.42 + 1.84%). Wires
