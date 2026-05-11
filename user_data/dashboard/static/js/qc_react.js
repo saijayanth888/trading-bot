@@ -986,24 +986,6 @@
           : null
       ),
       h("span", { className: "tb-spacer" }),
-      // A/B fallback link back to legacy console — Path-B cutover plan:
-      // SPA is preview-tier this week; operator can switch back any time.
-      h(
-        "div",
-        { className: "tb-group" },
-        h(
-          "a",
-          {
-            href: active === "ops" ? "/ops" : "/",
-            className: "pill",
-            style: { height: 24, fontSize: 11, textDecoration: "none", color: "var(--fg-2)" },
-            title: "Switch back to the legacy console",
-          },
-          h("span", { className: "dot dim" }),
-          " Classic console"
-        )
-      ),
-      h("div", { className: "tb-divider" }),
       h(
         "div",
         { className: "tb-group" },

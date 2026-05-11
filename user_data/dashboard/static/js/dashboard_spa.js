@@ -190,6 +190,11 @@
     const [state, setState] = useState(null);
     const [candles, setCandles] = useState([]);
     const [markers, setMarkers] = useState([]);
+    // Live-stream control: operator can pause candle auto-refresh. Refresh
+    // interval ms drives the setInterval that re-fetches candles + markers.
+    // Default 10s — matches the other fast-cycle fetches on the page.
+    const [streamPaused, setStreamPaused] = useState(false);
+    const [refreshMs, setRefreshMs] = useState(10_000);
     // Indicators for the RSI/MACD subcharts under the main candle chart.
     // Pulled from /api/candles/{base}/{quote} → {indicators: {...}}.
     // Stocks venue doesn't currently expose these (different pipeline).
@@ -306,10 +311,15 @@
       fetchCandles();
       fetchTopbar();
       const isvc = setInterval(fetchState, 10_000);
-      const ic = setInterval(fetchCandles, 30_000); // candles refresh slower
       const itb = setInterval(fetchTopbar, 10_000);
-      return () => { clearInterval(isvc); clearInterval(ic); clearInterval(itb); };
-    }, [fetchState, fetchCandles, fetchTopbar]);
+      // Candle live-stream — driven by refreshMs + streamPaused so operator
+      // can throttle or stop the auto-refresh from the chart card header.
+      const ic = streamPaused ? null : setInterval(fetchCandles, refreshMs);
+      return () => {
+        clearInterval(isvc); clearInterval(itb);
+        if (ic) clearInterval(ic);
+      };
+    }, [fetchState, fetchCandles, fetchTopbar, streamPaused, refreshMs]);
 
     const venuePairs = venue === "crypto" ? cryptoPairs : STOCK_SYMBOLS;
     useEffect(() => {
@@ -407,8 +417,35 @@
             // CHART
             h("div", { style: { gridColumn: "span 8", display: "flex", flexDirection: "column", gap: "var(--gap-grid)" } },
               h(Card, {
-                num: "01", title: pair + " · " + tf, sub: "entries + exits annotated · scroll = zoom",
-                right: h("div", { style: { display: "flex", gap: 6 } },
+                num: "01", title: pair + " · " + tf,
+                sub: streamPaused
+                  ? "stream paused · click LIVE to resume"
+                  : "entries + exits annotated · live every " + Math.round(refreshMs / 1000) + "s · scroll = zoom",
+                right: h("div", { style: { display: "flex", gap: 6, alignItems: "center" } },
+                  // LIVE/PAUSE toggle — pulses green when streaming, red when paused
+                  h("button", {
+                    className: "icon-btn",
+                    onClick: () => setStreamPaused(p => !p),
+                    "aria-label": streamPaused ? "Resume live candle stream" : "Pause live candle stream",
+                    title: streamPaused ? "Click to resume live stream" : "Click to pause live stream",
+                    style: { display: "inline-flex", alignItems: "center", gap: 4 },
+                  },
+                    h("span", { className: "dot " + (streamPaused ? "down" : "up pulse") }),
+                    streamPaused ? "PAUSED" : "LIVE"),
+                  // refresh-interval selector — only meaningful when LIVE
+                  h("select", {
+                    className: "select",
+                    value: String(refreshMs),
+                    onChange: e => setRefreshMs(parseInt(e.target.value, 10)),
+                    "aria-label": "Candle refresh interval",
+                    style: { fontFamily: "var(--mono)", fontSize: "var(--t-xs)" },
+                    disabled: streamPaused,
+                  },
+                    [[5000,"5s"],[10000,"10s"],[15000,"15s"],[30000,"30s"],[60000,"1m"]].map(([v, lbl]) =>
+                      h("option", { key: v, value: v }, lbl))),
+                  // manual refresh button
+                  h("button", { className: "icon-btn", onClick: () => fetchCandles(),
+                    "aria-label": "Refresh candles now", title: "Refresh now" }, "↻"),
                   ["1m","5m","15m","1h","4h","1d"].map(x =>
                     h("button", { key: x, className: "icon-btn " + (tf === x ? "active" : ""), onClick: () => setTf(x) }, x))
                 )
