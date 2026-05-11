@@ -499,6 +499,165 @@
   }
 
   // ──────────────────────────────────────────────────────────────────
+  // TweaksFab — React FAB + drawer that toggles theme + density and
+  // persists the operator's choice to localStorage. Ported from the
+  // legacy /ops in-page script at templates/ops.html:1402-1440 so the
+  // SPA reaches operator-parity for the ⌥ panel. dYdX/Geist-compliant:
+  //   * 1px solid border, no box-shadow on the drawer (legacy app.css:866
+  //     had a 32-blur shadow that violated spec — dropped here).
+  //   * Slides in from right via translateX, no scale, no fade-stagger.
+  //   * ESC closes.
+  //
+  // The component lives here (not in qc_react.js) so it stays optional —
+  // a self-bootstrapping IIFE below appends a root <div> to <body> and
+  // calls ReactDOM.createRoot() on it, which means neither dashboard_spa
+  // nor ops_spa has to thread it through their existing component tree
+  // (keeps the merge surface with agent C minimal).
+  // ──────────────────────────────────────────────────────────────────
+  function TweaksFab(props) {
+    var React = global.React;
+    if (!React) return null;
+    var h = React.createElement;
+    var F = React.Fragment;
+
+    function readLS(key, fallback) {
+      try { return global.localStorage.getItem(key) || fallback; }
+      catch (e) { return fallback; }
+    }
+    function writeLS(key, value) {
+      try { global.localStorage.setItem(key, value); }
+      catch (e) { /* localStorage may be unavailable */ }
+    }
+
+    var openState = React.useState(false);
+    var open = openState[0], setOpen = openState[1];
+    var themeState = React.useState(function () { return readLS("quanta.theme", "control"); });
+    var theme = themeState[0], setTheme = themeState[1];
+    var densityState = React.useState(function () { return readLS("quanta.density", "default"); });
+    var density = densityState[0], setDensity = densityState[1];
+
+    // Sync <html> attribute when the operator picks a value. The inline
+    // boot script in the SPA template already seeded this on first load
+    // — this effect keeps it in sync after the React tree mounts.
+    React.useEffect(function () {
+      document.documentElement.setAttribute("data-theme", theme);
+      writeLS("quanta.theme", theme);
+    }, [theme]);
+    React.useEffect(function () {
+      document.documentElement.setAttribute("data-density", density);
+      writeLS("quanta.density", density);
+    }, [density]);
+
+    // ESC closes the drawer.
+    React.useEffect(function () {
+      if (!open) return;
+      function onKey(e) { if (e.key === "Escape") setOpen(false); }
+      document.addEventListener("keydown", onKey);
+      return function () { document.removeEventListener("keydown", onKey); };
+    }, [open]);
+
+    var fabStyle = {
+      position: "fixed", right: 16, bottom: 16,
+      width: 36, height: 36,
+      background: "var(--bg-card)",
+      border: "1px solid var(--line-3)",
+      borderRadius: "50%",
+      color: "var(--fg-2)",
+      cursor: "pointer",
+      display: "grid", placeItems: "center",
+      zIndex: 60,
+      fontFamily: "var(--mono)",
+      fontSize: "var(--t-sm)",
+    };
+    var drawerStyle = {
+      position: "fixed", right: 16, bottom: 64,
+      width: 280,
+      background: "var(--bg-card)",
+      border: "1px solid var(--line-3)",
+      borderRadius: "var(--r-base)",
+      padding: "var(--s-3)",
+      zIndex: 61,
+      transform: open ? "translateX(0)" : "translateX(calc(100% + 24px))",
+      transition: "transform 180ms var(--ease-out, ease-out)",
+      pointerEvents: open ? "auto" : "none",
+    };
+    var headStyle = {
+      margin: "0 0 var(--s-2)",
+      fontSize: "var(--t-xs)",
+      fontFamily: "var(--mono)",
+      letterSpacing: ".14em",
+      textTransform: "uppercase",
+      color: "var(--fg-3)",
+    };
+    var rowStyle = { display: "flex", gap: 4, marginBottom: "var(--s-3)" };
+    function optStyle(active) {
+      return {
+        flex: 1, padding: 6,
+        background: active ? "var(--accent-bg, var(--bg-inset))" : "var(--bg-inset)",
+        border: "1px solid " + (active ? "var(--accent-line, var(--line-3))" : "var(--line-2)"),
+        borderRadius: "var(--r-sm)",
+        color: active ? "var(--fg-1)" : "var(--fg-2)",
+        fontFamily: "var(--mono)",
+        fontSize: "var(--t-xs)",
+        cursor: "pointer",
+        textAlign: "center",
+      };
+    }
+    function optBtn(label, value, current, setter) {
+      return h("button", {
+        key: value,
+        type: "button",
+        style: optStyle(current === value),
+        "aria-pressed": current === value,
+        onClick: function () { setter(value); },
+      }, label);
+    }
+
+    return h(F, null,
+      h("button", {
+        type: "button",
+        style: fabStyle,
+        title: "Theme & density",
+        "aria-label": "Open theme and density tweaks",
+        "aria-expanded": open,
+        onClick: function () { setOpen(function (v) { return !v; }); },
+      }, "⌥"),
+      h("div", { role: "dialog", "aria-label": "Theme and density tweaks", style: drawerStyle },
+        h("h4", { style: headStyle }, "Theme"),
+        h("div", { style: rowStyle },
+          optBtn("Control", "control", theme, setTheme),
+          optBtn("Geist", "geist", theme, setTheme),
+          optBtn("Bloomberg", "bloomberg", theme, setTheme)
+        ),
+        h("h4", { style: headStyle }, "Density"),
+        h("div", { style: rowStyle },
+          optBtn("Compact", "compact", density, setDensity),
+          optBtn("Default", "default", density, setDensity),
+          optBtn("Roomy", "roomy", density, setDensity)
+        )
+      )
+    );
+  }
+
+  // Self-bootstrap: wait for React + ReactDOM (loaded via the UMD <script>
+  // tags in the SPA templates) and mount TweaksFab into its own root so it
+  // doesn't depend on dashboard_spa / ops_spa wiring it into their tree.
+  // Idempotent: bails if the root <div> already exists.
+  function bootTweaksFab() {
+    if (!global.React || !global.ReactDOM || !global.ReactDOM.createRoot) return;
+    if (document.getElementById("quanta-tweaks-fab-root")) return;
+    var host = document.createElement("div");
+    host.id = "quanta-tweaks-fab-root";
+    document.body.appendChild(host);
+    global.ReactDOM.createRoot(host).render(global.React.createElement(TweaksFab));
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", bootTweaksFab);
+  } else {
+    bootTweaksFab();
+  }
+
+  // ──────────────────────────────────────────────────────────────────
   // Public surface
   // ──────────────────────────────────────────────────────────────────
   global.QC = {
@@ -507,5 +666,6 @@
     sparkline, regimeRibbon, liveTicker,
     holdToConfirm, flashChange,
     NumberRoll, killHoldProto, TimeSince,
+    TweaksFab,
   };
 })(window);
