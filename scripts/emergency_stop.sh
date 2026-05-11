@@ -21,6 +21,44 @@ LOG="${ROOT_DIR}/user_data/logs/emergency_stop.log"
 
 mkdir -p "$(dirname "$LOG")" "$SNAPSHOT_DIR"
 
+# P0-T: resolve a URL-encoded DSN from POSTGRES_* / DATABASE_URL in .env
+# rather than hardcoding port 5433 + the default password. Mirrors the
+# _resolve_dsn() pattern in scripts/auto_rollback.py and the dashboard.
+# Loads .env values if present so cron / manual invocations both work.
+if [[ -f "${ROOT_DIR}/.env" ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "${ROOT_DIR}/.env"
+    set +a
+fi
+export ROOT_DIR SNAPSHOT_DIR  # used by the heredoc python blocks below
+# Compose the DSN here so the heredoc python doesn't reach for $POSTGRES_*
+# directly (avoids subtle quoting issues with passwords containing @ : /).
+DATABASE_URL_RESOLVED="$(POSTGRES_USER="${POSTGRES_USER:-tradebot}" \
+    POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-}" \
+    POSTGRES_HOST="${POSTGRES_HOST:-localhost}" \
+    POSTGRES_PORT="${POSTGRES_PORT:-5434}" \
+    POSTGRES_DB="${POSTGRES_DB:-tradebot}" \
+    DATABASE_URL="${DATABASE_URL:-}" \
+    python3 -c '
+import os, sys
+from urllib.parse import quote_plus
+explicit = os.environ.get("DATABASE_URL", "").strip()
+if explicit:
+    sys.stdout.write(explicit)
+    sys.exit(0)
+u = os.environ.get("POSTGRES_USER", "tradebot")
+p = os.environ.get("POSTGRES_PASSWORD", "")
+h = os.environ.get("POSTGRES_HOST", "localhost")
+port = os.environ.get("POSTGRES_PORT", "5434")
+db = os.environ.get("POSTGRES_DB", "tradebot")
+if not p:
+    # No password configured — leave DSN empty so the heredoc skips export
+    sys.exit(0)
+sys.stdout.write(f"postgresql://{quote_plus(u)}:{quote_plus(p)}@{h}:{port}/{db}")
+' 2>/dev/null || echo "")"
+export DATABASE_URL_RESOLVED
+
 log() {
     echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') [emergency_stop] $*" | tee -a "$LOG"
 }
@@ -47,9 +85,12 @@ PY
 #    order tracking — freqtrade will see the cancellations on its next poll
 #    and reconcile the trade rows.
 log "step 2/4: cancelling all open Coinbase orders"
-python3 - <<'PY' >> "$LOG" 2>&1 || log "step 2 FAILED — order cancellation error (likely SDK or auth)"
+python3 - <<PY >> "$LOG" 2>&1 || log "step 2 FAILED — order cancellation error (likely SDK or auth)"
 import os, sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "user_data"))
+# P0-U: heredocs run via ``python3 -`` have __file__ undefined; build the
+# user_data path from \$ROOT_DIR (set in the bash parent) instead.
+ROOT_DIR = "${ROOT_DIR}"
+sys.path.insert(0, os.path.join(ROOT_DIR, "user_data"))
 def main():
     try:
         from coinbase.rest import RESTClient
@@ -96,11 +137,15 @@ PY
 log "step 3/4: writing state snapshot to ${SNAPSHOT_DIR}"
 {
     cp -f "$CONFIG" "${SNAPSHOT_DIR}/config.json" 2>/dev/null || true
-    python3 - "${SNAPSHOT_DIR}/journal.csv" <<'PY' || true
+    DATABASE_URL="${DATABASE_URL_RESOLVED}" python3 - "${SNAPSHOT_DIR}/journal.csv" <<'PY' || true
 import csv, os, sys
 out = sys.argv[1]
-dsn = os.environ.get("DATABASE_URL",
-    "postgresql://tradebot:tradebot-change-me@localhost:5433/tradebot")
+# P0-T: read the DSN from the env var the bash parent built via
+# _resolve_dsn semantics; no more hardcoded port 5433 + default password.
+dsn = os.environ.get("DATABASE_URL", "").strip()
+if not dsn:
+    print("[snap] DATABASE_URL not configured — skipping journal export")
+    sys.exit(0)
 try:
     import psycopg
     from psycopg.rows import dict_row
@@ -136,9 +181,12 @@ PY
 
 # 4. Slack alert. Failure here is non-fatal.
 log "step 4/4: posting Slack alert"
-SLACK_REASON="$REASON" python3 - <<'PY' >> "$LOG" 2>&1 || log "step 4 FAILED — slack post error"
+SLACK_REASON="$REASON" SNAPSHOT_DIR="$SNAPSHOT_DIR" python3 - <<PY >> "$LOG" 2>&1 || log "step 4 FAILED — slack post error"
 import os, sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "user_data"))
+# P0-U: \$ROOT_DIR is interpolated from the bash parent because heredoc
+# Python has no __file__. Same fix as step 2.
+ROOT_DIR = "${ROOT_DIR}"
+sys.path.insert(0, os.path.join(ROOT_DIR, "user_data"))
 def main():
     try:
         from modules.slack_alerts import SlackAlerter

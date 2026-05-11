@@ -1,14 +1,18 @@
 services:
   postgres:
-    image: timescale/timescaledb:latest-pg16
+    # P0-X: pin TimescaleDB to the exact tag we tested with
+    # (latest-pg16 resolved to 2.26.4-pg16 on 2026-04-28). Bump
+    # deliberately and re-run the schema migration tests.
+    image: timescale/timescaledb:2.26.4-pg16
     container_name: tradebot-postgres
     restart: unless-stopped
     mem_limit: 2g
     memswap_limit: 2g
     shm_size: 256m
     # Port 5434 to avoid conflicting with ModelForge's mf-postgres on 5433.
+    # P0-V: bind to loopback only — nothing on the LAN should reach Postgres.
     ports:
-      - "5434:5432"
+      - "127.0.0.1:5434:5432"
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-tradebot}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-tradebot-change-me}
@@ -48,8 +52,9 @@ services:
       # Drop your Coinbase JSON key here (e.g. ./secrets/coinbase.json).
       # Read-only so the container cannot rewrite it.
       - ./secrets:/run/secrets/trading-bot:ro
+    # P0-V: freqtrade REST API + websocket on loopback only.
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -132,8 +137,9 @@ services:
     image: influxdb:2.7
     container_name: influxdb
     restart: unless-stopped
+    # P0-V: InfluxDB exposed only to other docker services + the host loopback.
     ports:
-      - "8086:8086"
+      - "127.0.0.1:8086:8086"
     volumes:
       - influxdb_data:/var/lib/influxdb2
       - influxdb_config:/etc/influxdb2
@@ -163,8 +169,10 @@ services:
         condition: service_healthy
       freqtrade:
         condition: service_started
+    # P0-V: dashboard reachable only on the operator host. Use an SSH tunnel
+    # or reverse proxy with auth if you need remote access.
     ports:
-      - "8081:8081"
+      - "127.0.0.1:8081:8081"
     extra_hosts:
       # Lets the Ops tab probe host services (ollama 11434, hermes-mcp 8089,
       # hermes-dashboard 9119) from inside the container.
@@ -225,13 +233,17 @@ services:
       start_period: 30s
 
   grafana:
-    image: grafana/grafana:latest
+    # P0-X: pin Grafana to the exact version we last validated against
+    # (was :latest, which silently shipped 13.0.1 on 2026-04-17). Bump
+    # deliberately when migrating dashboards.
+    image: grafana/grafana:13.0.1
     container_name: grafana
     restart: unless-stopped
     depends_on:
       - influxdb
+    # P0-V: Grafana on loopback only; tunnel for remote access.
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     volumes:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
