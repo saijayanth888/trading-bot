@@ -1847,6 +1847,14 @@
           ),
           // HERO
           h(HeroLive, { data, killState }),
+          // TRAINING ROW — crypto FreqAI + stocks Shark TFT side-by-side.
+          // Operator wants both pipelines visible in one glance near the top
+          // of the page (not buried at row 17). Wired data-num 17 (crypto)
+          // and 13 (stocks) cards to a single training band.
+          h("div", { id: "training", className: "grid g-12 anchor", style: { gap: "var(--gap-grid)" } },
+            h("div", { style: { gridColumn: "span 6" } }, h(TrainingCardLive, { data })),
+            h("div", { style: { gridColumn: "span 6" } }, h(StocksMLLive, { data }))
+          ),
           // AGENT TIMELINE + RESEARCH FEED
           h("div", { id: "agent", className: "grid g-12 anchor", style: { gap: "var(--gap-grid)" } },
             h("div", { style: { gridColumn: "span 7" } }, h(AgentTimeline)),
@@ -1867,8 +1875,7 @@
             h("div", { style: { gridColumn: "span 4" } }, h(ServicesLive, { data })),
             h("div", { style: { gridColumn: "span 8" } }, h(PositionsLive, { data }))
           ),
-          // STOCKS ML banner (big when training)
-          h(StocksMLLive, { data }),
+          // STOCKS ML banner moved to top training row.
           // STOCKS + MCP
           h("div", { className: "grid g-12", style: { gap: "var(--gap-grid)" } },
             h("div", { style: { gridColumn: "span 7" } }, h(StocksLive, { data })),
@@ -1884,10 +1891,11 @@
             h("div", { style: { gridColumn: "span 6" } }, h(CircuitBreakersLive, { data })),
             h("div", { style: { gridColumn: "span 6" } }, h(QuickActions, { killState, setKillState }))
           ),
-          // Agent C · 5 new cards (data-num 17..21)
-          h("div", { id: "training", className: "grid g-12 anchor", style: { gap: "var(--gap-grid)" } },
-            h("div", { style: { gridColumn: "span 7" } }, h(TrainingCardLive, { data })),
-            h("div", { style: { gridColumn: "span 5" } }, h(ReadinessCardLive, { data }))
+          // Agent C · 5 new cards (data-num 17..21). TrainingCard moved
+          // to top training row alongside StocksML; ReadinessCard keeps
+          // its place here next to the regime config + Slack preview row.
+          h("div", { id: "readiness", className: "grid g-12 anchor", style: { gap: "var(--gap-grid)" } },
+            h("div", { style: { gridColumn: "span 12" } }, h(ReadinessCardLive, { data }))
           ),
           h("div", { id: "regime-config", className: "grid g-12 anchor", style: { gap: "var(--gap-grid)" } },
             h("div", { style: { gridColumn: "span 7" } }, h(RegimeConfigEditor, { data })),

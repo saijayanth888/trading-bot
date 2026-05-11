@@ -709,6 +709,10 @@
       tabs.forEach((t) => {
         t.setAttribute("aria-selected", t.dataset.venue === venue ? "true" : "false");
       });
+      // Stamp the venue on <body> so CSS can hide subcharts that don't
+      // apply to stocks (RSI/MACD aren't fed for stocks venue yet — the
+      // empty TradingView watermarks looked broken in the morning sweep).
+      document.body.dataset.venue = venue;
     }
 
     // Restore venue: ?venue= URL > URL pair > localStorage > active selection

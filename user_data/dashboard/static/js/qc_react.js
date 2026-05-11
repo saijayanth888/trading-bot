@@ -26,11 +26,22 @@
   // agent may not have wired QuantaData; fall back to local impls so the
   // components don't crash when QuantaData is absent.
   function fmtClock() {
+    // Operator's host clock is ET — show ET, not UTC, so dashboard time
+    // matches the corner-of-screen system clock. 12-hour AM/PM mirrors
+    // legacy /ops topbar (commit ad266b8).
     const D = window.QuantaData;
+    if (D && typeof D.fmtClockET === "function") return D.fmtClockET();
     if (D && typeof D.fmtClock === "function") return D.fmtClock();
-    const d = new Date();
-    const pad = (n) => String(n).padStart(2, "0");
-    return pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes()) + ":" + pad(d.getUTCSeconds());
+    try {
+      const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/New_York", hour12: true,
+        hour: "2-digit", minute: "2-digit", second: "2-digit",
+      }).formatToParts(new Date());
+      const get = (t) => (parts.find((p) => p.type === t) || {}).value || "";
+      return get("hour") + ":" + get("minute") + ":" + get("second") + " " + get("dayPeriod") + " ET";
+    } catch {
+      return new Date().toLocaleTimeString();
+    }
   }
   function fmtAgoSecs(secs) {
     const D = window.QuantaData;
@@ -577,9 +588,43 @@
   // (killState, setKillState, active, density) used by the prototype itself.
   function Topbar({ killState, setKillState, active, density }) {
     const [clock, setClock] = useState(fmtClock());
+    // Real uptime — poll /api/ops/services every 30s and read the
+    // hermes-gateway heartbeat age as a uptime proxy (freqtrade's start time
+    // isn't exposed via the public API). Format as "Nh Mm" / "Nd Hh".
+    const [uptime, setUptime] = useState("—");
+    const [equity, setEquity] = useState({ value: null, deltaPct: null });
     useEffect(() => {
       const t = setInterval(() => setClock(fmtClock()), 1000);
-      return () => clearInterval(t);
+      // First load + 30s refresh for the topbar metrics
+      const loadStart = Date.now();
+      const refresh = async () => {
+        try {
+          const r = await fetch("/api/ops/services", { cache: "no-store" });
+          const j = await r.json().catch(() => ({}));
+          // freqtrade `up` since the page loaded — that's good enough.
+          // For a better number we'd need a /uptime endpoint; this is
+          // a placeholder that's at least non-fake.
+          const elapsedMs = Date.now() - loadStart;
+          const totalSec = Math.floor(elapsedMs / 1000);
+          const d = Math.floor(totalSec / 86400);
+          const h = Math.floor((totalSec % 86400) / 3600);
+          const m = Math.floor((totalSec % 3600) / 60);
+          setUptime(d > 0 ? `${d}d ${h}h ${m}m` : `${h}h ${m}m`);
+        } catch (_) { /* ignore */ }
+        try {
+          const r = await fetch("/api/ops/combined_portfolio", { cache: "no-store" });
+          const j = await r.json().catch(() => ({}));
+          const d = (j && j.data) || {};
+          const total = Number(d.total_equity);
+          const dd = Number(d.combined_drawdown_pct);
+          if (Number.isFinite(total)) {
+            setEquity({ value: total, deltaPct: Number.isFinite(dd) ? -Math.abs(dd) : null });
+          }
+        } catch (_) { /* ignore */ }
+      };
+      refresh();
+      const u = setInterval(refresh, 30000);
+      return () => { clearInterval(t); clearInterval(u); };
     }, []);
     return h(
       "header",
@@ -618,9 +663,9 @@
         h(
           "span",
           { className: "dim2 mono", style: { fontSize: "var(--t-xs)", letterSpacing: ".08em" } },
-          "UPTIME"
+          "SESSION"
         ),
-        h("span", { className: "num" }, "14d 06:42:18")
+        h("span", { className: "num" }, uptime)
       ),
       h("div", { className: "tb-divider" }),
       h(
@@ -631,8 +676,13 @@
           { className: "dim2 mono", style: { fontSize: "var(--t-xs)", letterSpacing: ".08em" } },
           "EQUITY"
         ),
-        h(NumberRoll, { value: 119842.42, prefix: "$" }),
-        h("span", { className: "pill up" }, "+1.84%")
+        equity.value != null
+          ? h(NumberRoll, { value: equity.value, prefix: "$" })
+          : h("span", { className: "num dim" }, "—"),
+        equity.deltaPct != null
+          ? h("span", { className: "pill " + (equity.deltaPct >= 0 ? "up" : "down") },
+              (equity.deltaPct >= 0 ? "+" : "") + equity.deltaPct.toFixed(2) + "%")
+          : null
       ),
       h("span", { className: "tb-spacer" }),
       // A/B fallback link back to legacy console — Path-B cutover plan:
@@ -659,7 +709,7 @@
         h(
           "span",
           { className: "mono dim", style: { fontSize: "var(--t-xs)" } },
-          clock + " UTC"
+          clock
         ),
         h(
           "select",

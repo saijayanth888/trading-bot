@@ -1190,6 +1190,13 @@ table.t td.num { font-family: var(--mono); }
   background: var(--bg-card);
 }
 .layout .charts .chart.subchart { height: 140px; }
+/* On stocks venue, RSI + MACD subcharts have no data wired yet — collapse
+   the cards entirely instead of showing the empty TradingView watermarks
+   that made the panel look broken in the 8:24 AM screenshot. */
+body[data-venue="stocks"] .charts .sub-card:has(#chart-rsi),
+body[data-venue="stocks"] .charts .sub-card:has(#chart-macd) {
+  display: none;
+}
 .layout .charts .legend {
   display: flex;
   flex-wrap: wrap;
