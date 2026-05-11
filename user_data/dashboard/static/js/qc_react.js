@@ -692,6 +692,7 @@
       setHolding(p * 100);
       if (p >= 1) {
         cancelAnimationFrame(raf.current);
+        raf.current = null;
         if (onKill) onKill();
         setHolding(0);
       } else {
@@ -704,9 +705,17 @@
       raf.current = requestAnimationFrame(tick);
     };
     const up = () => {
-      cancelAnimationFrame(raf.current);
+      if (raf.current) cancelAnimationFrame(raf.current);
+      raf.current = null;
       setHolding(0);
     };
+
+    useEffect(() => {
+      return () => {
+        if (raf.current) cancelAnimationFrame(raf.current);
+        raf.current = null;
+      };
+    }, []);
 
     if (state === "killed") {
       return h(
