@@ -30,5 +30,37 @@
     "champion_id": "stock_tft_v1",
     "runner_up_id": null,
     "notes": "scaffold v0.1 \u2014 real EPT loop deferred to phase 2"
+  },
+  {
+    "generation": 3,
+    "week_ending": "2026-05-11",
+    "members": [
+      {
+        "member_id": "stock_tft_v1",
+        "agent_type": "tft",
+        "val_acc": 0.3765,
+        "paper_sharpe": 0.0,
+        "trained_at_utc": 1778535202.1048734
+      }
+    ],
+    "champion_id": "stock_tft_v1",
+    "runner_up_id": null,
+    "notes": "scaffold v0.1 \u2014 real EPT loop deferred to phase 2"
+  },
+  {
+    "generation": 4,
+    "week_ending": "2026-05-11",
+    "members": [
+      {
+        "member_id": "stock_tft_v1",
+        "agent_type": "tft",
+        "val_acc": 0.3829,
+        "paper_sharpe": 0.0,
+        "trained_at_utc": 1778535311.6387067
+      }
+    ],
+    "champion_id": "stock_tft_v1",
+    "runner_up_id": null,
+    "notes": "scaffold v0.1 \u2014 real EPT loop deferred to phase 2"
   }
 ]
