@@ -25,9 +25,9 @@ from shark.config import get_settings
 logger = logging.getLogger(__name__)
 
 try:
-    import anthropic as _anthropic_lib
+    from shark.llm.client import chat_json as _chat_json
 except ImportError:
-    _anthropic_lib = None
+    _chat_json = None
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _LESSONS_FILE = _PROJECT_ROOT / "memory" / "LESSONS-LEARNED.md"
@@ -118,37 +118,35 @@ def _generate_reflection(
     trade: dict[str, Any],
     returns: dict[str, Any],
 ) -> str:
-    """Generate an LLM reflection on the trade outcome. Falls back to template."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key or _anthropic_lib is None:
+    """Generate an LLM reflection on the trade outcome via shark.llm.client
+    (Ollama-first with Anthropic failover, honors SHARK_LLM_PROVIDER routing).
+    Falls back to a deterministic template if both backends are unavailable.
+    """
+    if _chat_json is None:
         return _template_reflection(trade, returns)
 
+    raw_ret = returns["raw_return_pct"]
+    alpha = returns["alpha_vs_spy_pct"]
+    prompt = (
+        f"Symbol: {trade.get('symbol', '???')}\n"
+        f"Entry: ${trade.get('entry_price', 0):.2f} on {trade.get('entry_date', '?')}\n"
+        f"Exit: ${trade.get('exit_price', 0):.2f} on {trade.get('exit_date', '?')}\n"
+        f"Exit reason: {trade.get('exit_reason', 'unknown')}\n"
+        f"Raw return: {raw_ret:+.1f}%\n"
+        f"Alpha vs SPY: {alpha:+.1f}%\n"
+        f"Catalyst: {trade.get('catalyst', 'N/A')}\n"
+        f"Thesis: {trade.get('thesis_summary', 'N/A')}\n"
+    )
     try:
-        client = _anthropic_lib.Anthropic(api_key=api_key)
-        raw_ret = returns["raw_return_pct"]
-        alpha = returns["alpha_vs_spy_pct"]
-
-        prompt = (
-            f"Symbol: {trade.get('symbol', '???')}\n"
-            f"Entry: ${trade.get('entry_price', 0):.2f} on {trade.get('entry_date', '?')}\n"
-            f"Exit: ${trade.get('exit_price', 0):.2f} on {trade.get('exit_date', '?')}\n"
-            f"Exit reason: {trade.get('exit_reason', 'unknown')}\n"
-            f"Raw return: {raw_ret:+.1f}%\n"
-            f"Alpha vs SPY: {alpha:+.1f}%\n"
-            f"Catalyst: {trade.get('catalyst', 'N/A')}\n"
-            f"Thesis: {trade.get('thesis_summary', 'N/A')}\n"
-        )
-
-        cfg = get_settings()
-        response = client.messages.create(
-            model=cfg.claude_model,
+        raw_text, _usage, _model = _chat_json(
+            system_prompt=_REFLECTION_SYSTEM,
+            user_message=prompt,
             max_tokens=300,
             temperature=0.3,
-            system=[{"type": "text", "text": _REFLECTION_SYSTEM}],
-            messages=[{"role": "user", "content": prompt}],
+            tier="fast",
+            agent="outcome_resolver",
         )
-        return response.content[0].text.strip()
-
+        return (raw_text or "").strip() or _template_reflection(trade, returns)
     except Exception as exc:
         logger.warning("LLM reflection failed: %s — using template", exc)
         return _template_reflection(trade, returns)

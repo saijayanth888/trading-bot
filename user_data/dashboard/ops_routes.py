@@ -2097,15 +2097,13 @@ async def gates():
     breaker_active = False
     try:
         async with httpx.AsyncClient(timeout=ENDPOINT_TIMEOUT_S) as client:
-            tok = await _ensure_jwt(client)
-            if tok:
-                r = await client.get(f"{FREQTRADE_API_URL}/api/v1/status", headers={"Authorization": f"Bearer {tok}"})
-                if r.status_code == 200:
-                    open_count = len(r.json() or [])
-                r2 = await client.get(f"{FREQTRADE_API_URL}/api/v1/show_config", headers={"Authorization": f"Bearer {tok}"})
-                if r2.status_code == 200:
-                    cfg = r2.json() or {}
-                    max_open = int(cfg.get("max_open_trades") or 6)
+            r = await ft_authed_get(client, "/api/v1/status", timeout=ENDPOINT_TIMEOUT_S)
+            if r is not None and r.status_code == 200:
+                open_count = len(r.json() or [])
+            r2 = await ft_authed_get(client, "/api/v1/show_config", timeout=ENDPOINT_TIMEOUT_S)
+            if r2 is not None and r2.status_code == 200:
+                cfg = r2.json() or {}
+                max_open = int(cfg.get("max_open_trades") or 6)
     except Exception as exc:
         logger.warning("gates: account-level fetch failed: %s", exc)
 
@@ -2524,27 +2522,22 @@ async def live_trades():
     # ── Crypto open trades from freqtrade ────────────────────────────
     try:
         async with httpx.AsyncClient(timeout=ENDPOINT_TIMEOUT_S) as client:
-            token = await _ensure_jwt(client)
-            if token:
-                r = await client.get(
-                    f"{FREQTRADE_API_URL}/api/v1/status",
-                    headers={"Authorization": f"Bearer {token}"},
-                )
-                if r.status_code == 200:
-                    for t in (r.json() or []):
-                        out.append({
-                            "kind": "crypto",
-                            "subkind": "long" if not t.get("is_short") else "short",
-                            "label": t.get("pair") or "?",
-                            "entry": t.get("open_rate"),
-                            "current": t.get("current_rate"),
-                            "qty": t.get("amount"),
-                            "pnl_pct": (t.get("profit_ratio") or 0) * 100,
-                            "pnl_usd": t.get("profit_abs"),
-                            "duration_s": t.get("trade_duration_s"),
-                            "opened_at": t.get("open_date"),
-                            "extra": f"regime@entry={t.get('regime', '—')}",
-                        })
+            r = await ft_authed_get(client, "/api/v1/status", timeout=ENDPOINT_TIMEOUT_S)
+            if r is not None and r.status_code == 200:
+                for t in (r.json() or []):
+                    out.append({
+                        "kind": "crypto",
+                        "subkind": "long" if not t.get("is_short") else "short",
+                        "label": t.get("pair") or "?",
+                        "entry": t.get("open_rate"),
+                        "current": t.get("current_rate"),
+                        "qty": t.get("amount"),
+                        "pnl_pct": (t.get("profit_ratio") or 0) * 100,
+                        "pnl_usd": t.get("profit_abs"),
+                        "duration_s": t.get("trade_duration_s"),
+                        "opened_at": t.get("open_date"),
+                        "extra": f"regime@entry={t.get('regime', '—')}",
+                    })
     except Exception as exc:
         logger.warning("live_trades: freqtrade fetch failed: %s", exc)
 
