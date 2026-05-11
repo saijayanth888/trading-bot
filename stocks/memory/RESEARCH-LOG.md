@@ -101,3 +101,12 @@ Sections: date, watchlist scanned, top candidates, rejected with reasons.
 |--------|--------|-------|
 | NVDA | RESEARCH_CANDIDATE | 4 |
 
+## 2026-05-11 — NVDA
+**Sentiment:** 0.7
+**Thesis:** IREN partnership announcement for 5 GW AI infrastructure deployment; Nemotron 3 Nano Omni product launch; Q1 FY2026 earnings report scheduled May 20, 2026
+**Entry:** 0.0 | **Stop:** 0.0 | **Target:** 0.0
+
+| Symbol | Status | Score |
+|--------|--------|-------|
+| NVDA | RESEARCH_CANDIDATE | 5 |
+
