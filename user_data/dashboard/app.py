@@ -91,35 +91,6 @@ app.include_router(ops_routes.router)
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse(
-        request,
-        "index.html",
-        {
-            "pairs": [p.strip() for p in DEFAULT_PAIRS if p.strip()],
-            "stock_symbols": DEFAULT_STOCK_SYMBOLS,
-            "default_timeframe": DEFAULT_TIMEFRAME,
-            "ws_push_interval": int(WS_PUSH_INTERVAL),
-            "effects_enabled": EFFECTS_ENABLED,
-            "shark_llm_provider": SHARK_LLM_PROVIDER,
-        },
-    )
-
-
-# ---------------------------------------------------------------------------
-# A/B SPA shells — thin React 18 templates served alongside legacy /ops and /
-# Operators visit these to compare the SPA against the live pages without
-# breaking what's running. See user_data/dashboard/static/js/{ops,dashboard}_spa.js
-# for the React.createElement port of /tmp/qtb-handoff/quanta-trading-bot/project.
-# ---------------------------------------------------------------------------
-
-
-@app.get("/ops_spa", response_class=HTMLResponse, name="ops_spa_page")
-async def ops_spa_page(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse(request, "ops_spa.html", {})
-
-
-@app.get("/dashboard_spa", response_class=HTMLResponse, name="dashboard_spa_page")
-async def dashboard_spa_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "dashboard_spa.html", {})
 
 
