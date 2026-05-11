@@ -287,6 +287,10 @@ def set_circuit_breaker_triggered(triggered: bool) -> None:
     """
     Write circuit_breaker_triggered: true/false to PROJECT-CONTEXT.md.
 
+    Also stamps `circuit_breaker_triggered_at` with the current ISO timestamp
+    on activation (and clears it on reset), enabling time-bounded auto-reset
+    via maybe_auto_reset_circuit_breaker().
+
     Args:
         triggered: True to activate the circuit breaker, False to reset it.
     """
@@ -308,8 +312,111 @@ def set_circuit_breaker_triggered(triggered: bool) -> None:
         if updated == text:
             updated = text.rstrip() + f"\ncircuit_breaker_triggered: {value}\n"
 
+        # Maintain a paired timestamp so the auto-reset path knows how long
+        # the breaker has been tripped. On reset we clear the timestamp.
+        ts_value = datetime.now().isoformat() if triggered else ""
+        ts_pattern = r"(circuit_breaker_triggered_at\s*[:=]\s*).*"
+        if re.search(ts_pattern, updated, re.IGNORECASE):
+            updated = re.sub(
+                ts_pattern,
+                lambda m: f"{m.group(1)}{ts_value}",
+                updated,
+                flags=re.IGNORECASE,
+            )
+        elif triggered:
+            updated = updated.rstrip() + f"\ncircuit_breaker_triggered_at: {ts_value}\n"
+
         atomic_write_text(_CONTEXT_FILE, updated)
         logger.info("circuit_breaker_triggered set to %s", value)
+
+
+def maybe_auto_reset_circuit_breaker(
+    current_equity: float,
+    peak_equity: float,
+    trigger_threshold: float = 0.85,
+    min_age_hours: float = 24.0,
+    recovery_factor: float = 0.5,
+) -> bool:
+    """
+    Auto-reset the circuit breaker if it has been tripped for long enough AND
+    the drawdown has substantially recovered.
+
+    Conditions for reset (ALL must hold):
+      1. circuit_breaker_triggered is currently True
+      2. circuit_breaker_triggered_at is at least `min_age_hours` old
+      3. current drawdown is below `(1 - trigger_threshold) * recovery_factor`
+         e.g. trigger at 15% DD, recovery_factor=0.5 → reset only when DD < 7.5%
+
+    Args:
+        current_equity: current portfolio value
+        peak_equity: stored peak equity
+        trigger_threshold: ratio that originally triggered the breaker (default 0.85)
+        min_age_hours: minimum time the breaker must have been active (default 24h)
+        recovery_factor: fraction of the trigger drawdown that still allowed (default 0.5)
+
+    Returns:
+        True if the breaker was cleared as a result of this call, False otherwise.
+    """
+    state = get_portfolio_state()
+    if not state.get("circuit_breaker_triggered"):
+        return False
+    if peak_equity <= 0:
+        return False
+
+    # Compute current DD as a fraction (e.g. 0.10 == 10% off peak)
+    current_dd = (peak_equity - current_equity) / peak_equity
+    trigger_dd = 1.0 - trigger_threshold  # e.g. 0.15
+    recovery_dd = trigger_dd * recovery_factor  # e.g. 0.075
+    if current_dd >= recovery_dd:
+        logger.info(
+            "Circuit-breaker auto-reset skipped: DD %.2f%% still >= recovery threshold %.2f%%",
+            current_dd * 100, recovery_dd * 100,
+        )
+        return False
+
+    # Check age of the trigger
+    triggered_at_iso = ""
+    if _CONTEXT_FILE.exists():
+        try:
+            text = _CONTEXT_FILE.read_text(encoding="utf-8")
+            m = re.search(
+                r"circuit_breaker_triggered_at\s*[:=]\s*(\S+)",
+                text,
+                re.IGNORECASE,
+            )
+            if m:
+                triggered_at_iso = m.group(1).strip()
+        except Exception as exc:
+            logger.warning("Could not read circuit_breaker_triggered_at: %s", exc)
+
+    if not triggered_at_iso:
+        # No timestamp on record — we cannot prove it has aged enough. Be
+        # conservative and refuse to auto-reset; the operator can still clear.
+        logger.info(
+            "Circuit-breaker auto-reset skipped: no triggered_at timestamp on file"
+        )
+        return False
+
+    try:
+        triggered_at = datetime.fromisoformat(triggered_at_iso)
+    except ValueError:
+        logger.warning("Bad circuit_breaker_triggered_at format: %r", triggered_at_iso)
+        return False
+
+    age_hours = (datetime.now() - triggered_at).total_seconds() / 3600.0
+    if age_hours < min_age_hours:
+        logger.info(
+            "Circuit-breaker auto-reset skipped: age %.1fh < min %.1fh",
+            age_hours, min_age_hours,
+        )
+        return False
+
+    logger.info(
+        "Circuit-breaker auto-reset CLEARED: age %.1fh >= %.1fh and DD %.2f%% < %.2f%%",
+        age_hours, min_age_hours, current_dd * 100, recovery_dd * 100,
+    )
+    set_circuit_breaker_triggered(False)
+    return True
 
 
 def get_peak_equity() -> float:

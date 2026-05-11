@@ -228,9 +228,14 @@ def run_risk_debate(
             debate_summary (str): Summary of the risk debate
             perspectives (dict): Individual perspective results
     """
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key or _anthropic_lib is None:
-        logger.info("LLM risk review skipped — no API key")
+    # The debate uses shark.llm.client.chat_json, which selects provider via
+    # SHARK_LLM_PROVIDER (default: ollama). We therefore do NOT require
+    # ANTHROPIC_API_KEY — the local Ollama path is sufficient. Only fail-open
+    # if both Anthropic AND Ollama are explicitly broken, which chat_json will
+    # surface via exceptions caught in _run_perspective / _run_risk_judge.
+    provider = os.environ.get("SHARK_LLM_PROVIDER", "ollama").lower()
+    if provider == "anthropic" and (not os.environ.get("ANTHROPIC_API_KEY") or _anthropic_lib is None):
+        logger.info("LLM risk review skipped — anthropic selected but key/library missing")
         return {"approved": True, "adjusted_decision": trade_decision,
                 "confidence_delta": 0.0, "position_size_mult": 1.0,
                 "debate_summary": "Skipped — no API key", "perspectives": {}}

@@ -128,6 +128,22 @@ def run(dry_run: bool = False) -> bool:
     except Exception:
         logger.exception("update_peak_equity failed")
 
+    # ── Circuit-breaker AUTO-RESET (P0-LL) ────────────────────────────────
+    # If a breaker is already active AND has aged >= 24h AND the portfolio has
+    # substantially recovered (DD < 0.5 * trigger), clear it before we re-evaluate
+    # the trigger condition below. Without this, the bot can stay halted for days
+    # after a 15% drawdown has long since recovered.
+    try:
+        portfolio_state_pre = state.get_portfolio_state()
+        if portfolio_state_pre.get("circuit_breaker_triggered") and not dry_run:
+            state.maybe_auto_reset_circuit_breaker(
+                current_equity=current_equity,
+                peak_equity=float(portfolio_state_pre.get("peak_equity", current_equity)),
+                trigger_threshold=CIRCUIT_BREAKER_THRESHOLD,
+            )
+    except Exception:
+        logger.exception("Circuit breaker auto-reset check failed")
+
     circuit_breaker_active = False
     drawdown_note = ""
     try:

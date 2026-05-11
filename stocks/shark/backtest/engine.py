@@ -205,7 +205,8 @@ class BacktestEngine:
 
             for action in actions:
                 if action["action"] == "close_all":
-                    pl = (current_price - trade.entry_price) * trade.remaining_shares
+                    shares_sold = trade.remaining_shares
+                    pl = (current_price - trade.entry_price) * shares_sold
                     trade.realized_pl += pl
                     trade.remaining_shares = 0
                     trade.exit_price = current_price
@@ -219,7 +220,9 @@ class BacktestEngine:
                         "time_decay": TradeStatus.CLOSED_TIME_DECAY,
                     }
                     trade.status = status_map.get(action["reason"], TradeStatus.CLOSED_STOP)
-                    self.cash += trade.exit_price * action["shares"] + pl
+                    # Cash gets the gross proceeds (price * shares); entry cost was already
+                    # deducted on open, so the P&L is implicit in the cash delta.
+                    self.cash += current_price * shares_sold
                     trades_to_remove.append(trade)
 
                     self._log_close(trade, action)
@@ -379,13 +382,15 @@ class BacktestEngine:
                 continue
             idx = min(last_index, len(df) - 1)
             price = float(df.iloc[idx]["close"])
-            pl = (price - trade.entry_price) * trade.remaining_shares
+            shares_sold = trade.remaining_shares
+            pl = (price - trade.entry_price) * shares_sold
             trade.realized_pl += pl
             trade.exit_price = price
             trade.exit_date = str(df.iloc[idx].get("timestamp", ""))[:10]
             trade.status = TradeStatus.CLOSED_TARGET
             trade.remaining_shares = 0
-            self.cash += price * trade.shares  # approximate
+            # Gross proceeds for the remaining shares only — partial exits already credited cash.
+            self.cash += price * shares_sold
             self.closed_trades.append(self._trade_to_dict(trade))
 
         self.open_trades.clear()
