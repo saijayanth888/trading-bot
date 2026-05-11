@@ -1929,13 +1929,23 @@ document.addEventListener("DOMContentLoaded", () => {
   ];
   let _masterTimer = null;
   function _refreshAll() {
+    // Tick the topbar pill immediately so the operator sees the master
+    // interval firing — regardless of whether any individual endpoint
+    // responds (was previously only set when /api/ops/regime returned,
+    // so a slow regime call masked the refresh dropdown as "broken").
+    setRefresh(new Date().toISOString());
     for (const fn of ALL_REFRESHERS) {
       try { Promise.resolve(fn()).catch(() => {}); } catch (_) { /* noop */ }
     }
   }
   function _setRefreshInterval(ms) {
     if (_masterTimer) { clearInterval(_masterTimer); _masterTimer = null; }
-    if (ms > 0) _masterTimer = setInterval(_refreshAll, ms);
+    if (ms > 0) {
+      _masterTimer = setInterval(_refreshAll, ms);
+      // Fire one immediate tick so the flash is visible the moment the
+      // dropdown changes (instead of waiting up to `ms` seconds).
+      _refreshAll();
+    }
   }
   // Wire the dropdown + force-refresh button
   const refreshSel = document.getElementById("refresh-interval-select");
