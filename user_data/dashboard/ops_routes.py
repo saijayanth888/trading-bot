@@ -2051,13 +2051,24 @@ async def gates():
     META_MIN = float(_rg_live.get("meta_min_confidence", 0.40))
     HIGH_VOL_MIN = float(_rg_live.get("high_vol_min_confidence", 0.75))
     BASE_ENTRY = 0.62
+    # Read entry_delta from live config (was hardcoded — caused the gates
+    # UI to show stale thresholds while regime_config edits silently updated
+    # the actual strategy behavior. Operator saw "blocked at 0.57" while the
+    # strategy was using -0.15 → 0.47 threshold).
+    _entry_delta_cfg = _rg_live.get("entry_delta") or {}
     REGIME_DELTA = {
-        "trending_up":      -0.05,
-        "trending_down":    None,   # None = hard block
-        "mean_reverting":   +0.10,
-        "high_volatility":  +0.05,
-        "unknown":          0.0,
+        "trending_up":     _entry_delta_cfg.get("trending_up", -0.05),
+        "trending_down":   None if _entry_delta_cfg.get("trending_down") is None else _entry_delta_cfg.get("trending_down"),
+        "mean_reverting":  _entry_delta_cfg.get("mean_reverting", +0.10),
+        "high_volatility": _entry_delta_cfg.get("high_volatility", +0.05),
+        "unknown":         _entry_delta_cfg.get("unknown", 0.0),
     }
+    # trending_down: if the config has a numeric value, treat it as the
+    # confidence-floor relax threshold (P0 commit 5293e62). If absent or
+    # None, fall back to hard-block.
+    if "trending_down" in _entry_delta_cfg:
+        _td = _entry_delta_cfg["trending_down"]
+        REGIME_DELTA["trending_down"] = float(_td) if _td is not None else None
 
     # FreqAI authoritative model registry — used by the `model_freshness` gate
     # to surface MODEL EXPIRED before the strategy-level do_predict gate.
