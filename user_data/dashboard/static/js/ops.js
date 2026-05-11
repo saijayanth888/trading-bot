@@ -89,6 +89,18 @@ function setRefresh(ts) {
     hour: "numeric", minute: "2-digit", second: "2-digit",
     hour12: true, timeZone: "America/New_York",
   }) + " ET";
+  // Brief flash so the operator sees the refresh tick visibly — proves
+  // the dropdown's interval is wired (was perceived as "not working"
+  // because the underlying numbers don't visibly change when nothing
+  // has moved on the bot since the prior fetch).
+  el.style.transition = "border-color 80ms ease, background 80ms ease";
+  el.style.borderColor = "var(--accent-line)";
+  el.style.background  = "var(--accent-bg)";
+  clearTimeout(el.__flashT);
+  el.__flashT = setTimeout(() => {
+    el.style.borderColor = "";
+    el.style.background  = "";
+  }, 350);
 }
 
 // Swap a card's static age span for a live QC.TimeSince span that ticks every 5s

@@ -8,7 +8,7 @@
   <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='6' fill='%237c5cff'/></svg>" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="/static/css/app.css?v=20260512-4" />
+  <link rel="stylesheet" href="/static/css/app.css?v=20260512-5" />
   <style>
     /* ── Page grid ────────────────────────────────────────────────── */
     .ops-grid {
@@ -925,6 +925,28 @@
 
       <div id="warmup-banner" style="display:none;"></div>
 
+      <!-- ═══ Agent timeline · 24h cron axis (Claude Code Design ports) ═══ -->
+      <section class="ops-card wide-card" id="card-agent-timeline" data-status="ok"
+               style="grid-column: span 12;">
+        <div class="card-head">
+          <h3 data-num="03b">Agent timeline · 24h <span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0;font-size:11px;font-family:var(--mono);">UTC · 22 scheduled jobs</span></h3>
+          <div class="tb-group" style="display:flex;gap:6px;flex-wrap:wrap;">
+            <span class="pill" style="border-color:var(--info-line);color:var(--info);background:var(--info-bg);">● RESEARCH</span>
+            <span class="pill" style="border-color:var(--accent-line);color:var(--accent);background:var(--accent-bg);">● ML</span>
+            <span class="pill" style="border-color:var(--warn-line);color:var(--warn);background:var(--warn-bg);">● EVO</span>
+            <span class="pill" style="border-color:var(--down-line);color:var(--down);background:var(--down-bg);">● RISK</span>
+            <span class="pill" style="border-color:var(--up-line);color:var(--up);background:var(--up-bg);">● REPORT</span>
+          </div>
+        </div>
+        <div id="agent-timeline-body" style="padding: 14px 18px 16px;">
+          <div id="agent-tl-axis" style="position: relative; height: 96px; margin-top: 2px;"></div>
+          <div id="agent-tl-hours" style="display: flex; justify-content: space-between; margin-top: 8px; font-family: var(--mono); font-size: var(--t-2xs); color: var(--fg-3);"></div>
+          <div style="height:1px;background:var(--line-1);margin:14px 0 10px;"></div>
+          <div style="font-size: var(--t-2xs); color: var(--fg-3); text-transform: uppercase; letter-spacing: .12em; margin-bottom: 8px;">NEXT 3 JOBS</div>
+          <div id="agent-tl-next" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--s-5);"></div>
+        </div>
+      </section>
+
       <!-- ── Services ──────────────────────────────────────────── -->
       <section class="ops-card small-card" id="card-services" data-status="ok">
         <div class="card-head">
@@ -1564,6 +1586,124 @@
     })();
   </script>
 
+  <!-- Agent timeline · 24h cron axis. Live cron list mirrors what Hermes
+       Gateway has registered (see ~/.hermes/cron/jobs.json on the host).
+       Each entry { utc_h, dur_min, name, kind, days, desc }. Times are
+       converted from ET → UTC manually (ET is UTC-5 in EST, UTC-4 in EDT;
+       we hard-code EDT offsets here — close enough since the operator's
+       primary trading day is May = EDT). -->
+  <script>
+  (function () {
+    // ─── Cron schedule (UTC hours) — kept in sync with README §10.1 ───
+    // kind: rsh (research) · ml · evo · risk · rpt (report)
+    const ET_OFFSET = 4;   // EDT — May
+    const et2utc = (h) => ((h + ET_OFFSET) % 24 + 24) % 24;
+    const CRON_JOBS = [
+      // Daily cycle — high-frequency probes
+      { utc_h: 0,        dur_min: 5,  name: "Daily P&L report",     kind: "rpt",  desc: "Slack: net P&L · Sharpe · win-rate" },
+      { utc_h: 1,        dur_min: 4,  name: "Post-mortem (Sun)",    kind: "rpt",  desc: "Cluster last 7d losses → top-3 recs" },
+      { utc_h: et2utc(2),dur_min: 30, name: "EPT training daily",   kind: "evo",  desc: "8-genome evolution cycle (02:00 ET)" },
+      { utc_h: et2utc(6),dur_min: 5,  name: "Sentiment audit",      kind: "rsh",  desc: "Yesterday's signals vs realised P&L" },
+      // NYSE day
+      { utc_h: et2utc(9),     dur_min: 30,name: "Shark pre-market",  kind: "rsh", desc: "Universe scan · earnings · macro" },
+      { utc_h: et2utc(9.583), dur_min: 25,name: "Shark market open", kind: "ml",  desc: "First 30-min momentum analysis" },
+      { utc_h: et2utc(10),    dur_min: 15,name: "Wheel profit-take", kind: "risk",desc: "Close CSPs/CCs at 50%+ premium" },
+      { utc_h: et2utc(11),    dur_min: 10,name: "Wheel sell CCs",    kind: "risk",desc: "Mon — covered calls on assigned shares" },
+      { utc_h: et2utc(13),    dur_min: 20,name: "Shark midday",      kind: "ml",  desc: "Mid-session regime + risk re-check" },
+      { utc_h: et2utc(14),    dur_min: 15,name: "Wheel profit-take", kind: "risk",desc: "Second profit-take sweep" },
+      { utc_h: et2utc(17.5),  dur_min: 10,name: "Shark daily summary",kind: "rpt",desc: "EOD recap — fills · P&L · blockers" },
+      { utc_h: et2utc(21.5),  dur_min: 30,name: "Shark KB update",   kind: "rsh", desc: "Per-symbol knowledge base refresh" },
+      { utc_h: et2utc(23),    dur_min: 25,name: "Stocks ML train",   kind: "ml",  desc: "Sun 23:00 ET — full TFT retrain" },
+    ];
+
+    function renderAxis() {
+      const axis = document.getElementById("agent-tl-axis");
+      const hours = document.getElementById("agent-tl-hours");
+      const nextEl = document.getElementById("agent-tl-next");
+      if (!axis) return;
+
+      const now = new Date();
+      const hourNow = now.getUTCHours() + now.getUTCMinutes() / 60;
+      const colorOf = (k) => ({
+        rsh: "var(--info)", ml: "var(--accent)", evo: "var(--warn)",
+        risk: "var(--down)", rpt: "var(--up)",
+      })[k] || "var(--fg-3)";
+
+      // Clear
+      while (axis.firstChild)  axis.removeChild(axis.firstChild);
+      while (hours.firstChild) hours.removeChild(hours.firstChild);
+      while (nextEl.firstChild) nextEl.removeChild(nextEl.firstChild);
+
+      // 25 vertical hour ticks (0..24)
+      for (let h = 0; h <= 24; h++) {
+        const tick = document.createElement("div");
+        tick.style.cssText = `position:absolute;left:${(h/24)*100}%;top:0;bottom:0;width:1px;background:${h % 6 === 0 ? "var(--line-2)" : "var(--line-1)"};`;
+        axis.appendChild(tick);
+      }
+
+      // Cron tracks — stagger vertically so they don't all overlap
+      CRON_JOBS.forEach((j, i) => {
+        const top = 12 + (i % 6) * 12;
+        const left = (j.utc_h / 24) * 100;
+        const w = (j.dur_min / 60) * (100 / 24);
+        const passed = j.utc_h < hourNow;
+        const bar = document.createElement("div");
+        bar.className = "tt";
+        bar.setAttribute("data-tt", `${String(Math.floor(j.utc_h)).padStart(2,"0")}:${String(Math.floor((j.utc_h%1)*60)).padStart(2,"0")} UTC · ${j.name} · ${j.desc}`);
+        bar.style.cssText = `position:absolute;left:${left}%;top:${top}px;width:max(8px,${Math.max(0.6, w * 6)}%);height:8px;background:${colorOf(j.kind)};opacity:${passed ? 0.45 : 1};border-radius:2px;cursor:default;`;
+        axis.appendChild(bar);
+      });
+
+      // NOW line
+      const nowLine = document.createElement("div");
+      nowLine.style.cssText = `position:absolute;left:${(hourNow/24)*100}%;top:-4px;bottom:-4px;width:2px;background:var(--accent);box-shadow:0 0 12px var(--accent);`;
+      const nowLabel = document.createElement("div");
+      nowLabel.style.cssText = `position:absolute;top:-14px;left:-18px;font-family:var(--mono);font-size:var(--t-2xs);color:var(--accent);letter-spacing:.1em;`;
+      nowLabel.textContent = "NOW";
+      nowLine.appendChild(nowLabel);
+      axis.appendChild(nowLine);
+
+      // Hour labels along bottom
+      ["00", "04", "08", "12", "16", "20", "24"].forEach(h => {
+        const sp = document.createElement("span");
+        sp.textContent = h + ":00";
+        hours.appendChild(sp);
+      });
+
+      // Next 3 jobs
+      const upcoming = CRON_JOBS.filter(j => j.utc_h > hourNow).slice(0, 3);
+      if (upcoming.length < 3) {
+        // wrap into tomorrow
+        const more = CRON_JOBS.slice(0, 3 - upcoming.length).map(j => Object.assign({}, j, { utc_h: j.utc_h + 24 }));
+        upcoming.push(...more);
+      }
+      upcoming.forEach(j => {
+        const card = document.createElement("div");
+        const sourceClr = colorOf(j.kind);
+        const src = document.createElement("div");
+        src.style.cssText = `font-family:var(--mono);font-size:var(--t-2xs);text-transform:uppercase;letter-spacing:.12em;color:${sourceClr};`;
+        const hr = j.utc_h % 24;
+        src.textContent = `NEXT · ${String(Math.floor(hr)).padStart(2,"0")}:${String(Math.floor((hr%1)*60)).padStart(2,"0")} UTC`;
+        const name = document.createElement("div");
+        name.className = "num";
+        name.style.cssText = "margin-top: 4px; font-size: var(--t-md);";
+        name.textContent = j.name;
+        const desc = document.createElement("div");
+        desc.className = "dim";
+        desc.style.cssText = "font-size: var(--t-xs); margin-top: 2px; line-height: 1.4;";
+        desc.textContent = j.desc;
+        card.appendChild(src);
+        card.appendChild(name);
+        card.appendChild(desc);
+        nextEl.appendChild(card);
+      });
+    }
+
+    renderAxis();
+    setInterval(renderAxis, 30000);
+  })();
+  </script>
+
 
   <!-- ═══════════════════ NEW HERO — wire to live data ═══════════════════ -->
   <script>
@@ -1854,10 +1994,10 @@
   })();
   </script>
 
-  {% if effects_enabled %}<script src="/static/js/effects.js?v=20260512-4" defer></script>{% endif %}
-  <script src="/static/js/utils.js?v=20260512-4"></script>
-  <script src="/static/js/components.js?v=20260512-4"></script>
-  <script src="/static/js/ops.js?v=20260512-4" defer></script>
+  {% if effects_enabled %}<script src="/static/js/effects.js?v=20260512-5" defer></script>{% endif %}
+  <script src="/static/js/utils.js?v=20260512-5"></script>
+  <script src="/static/js/components.js?v=20260512-5"></script>
+  <script src="/static/js/ops.js?v=20260512-5" defer></script>
 
   <!-- NumberRoll upgrade for topbar + hero equity (prototype primitive) -->
   <script>
