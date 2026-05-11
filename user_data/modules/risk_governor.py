@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -58,6 +59,27 @@ import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Persistence (P0-G): daily anchor + drawdown-pause flag survive restart.
+#
+# Without this, a process restart mid-loss reset the anchor and re-armed
+# the 3% daily-loss budget — compounding ~5.5% in a single UTC day was
+# possible. The anchor file is a tiny JSON dict written atomically via
+# tempfile + rename.
+#
+# Path can be overridden by RISK_GOVERNOR_ANCHORS_PATH for tests.
+# ---------------------------------------------------------------------------
+
+_DEFAULT_ANCHOR_PATH = (
+    Path(__file__).resolve().parents[1] / "state" / "risk_governor_anchors.json"
+)
+
+
+def _anchor_path() -> Path:
+    override = os.environ.get("RISK_GOVERNOR_ANCHORS_PATH", "").strip()
+    return Path(override) if override else _DEFAULT_ANCHOR_PATH
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +201,11 @@ class RiskGovernor:
         self._cooldown_until: datetime | None = None
         self._paused_for_drawdown: bool = False
 
+        # P0-G: rehydrate daily anchor + drawdown-pause flag from disk.
+        # If the file doesn't exist (first ever boot) we keep the in-memory
+        # defaults and the next update_equity() call will persist them.
+        self._load_anchors()
+
         logger.info(
             "[risk] governor initialised: "
             "max_dd=%.1f%% daily=%.1f%% max_pos=%.1f%% concurrent=%d "
@@ -193,6 +220,100 @@ class RiskGovernor:
             self.config.circuit_breaker_cooldown_hours,
             self.config.kelly_enabled,
         )
+
+    # ------------------------------------------------------------------
+    # Anchor persistence (P0-G)
+    # ------------------------------------------------------------------
+
+    def _load_anchors(self) -> None:
+        """Restore daily anchor + pause flag from the state file, if any."""
+        path = _anchor_path()
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text())
+        except Exception as exc:
+            logger.warning("[risk] could not parse anchors file %s: %s", path, exc)
+            return
+
+        try:
+            anchor_iso = data.get("day_anchor_utc")
+            if anchor_iso:
+                anchor = datetime.fromisoformat(anchor_iso)
+                # Tolerate naive timestamps in legacy files
+                if anchor.tzinfo is None:
+                    anchor = anchor.replace(tzinfo=timezone.utc)
+                self._day_anchor_utc = anchor
+
+            starting = data.get("starting_equity_today")
+            if starting is not None:
+                self._starting_equity_today = float(starting)
+
+            realised = data.get("daily_realized_pnl")
+            if realised is not None:
+                self._daily_realized_pnl = float(realised)
+
+            peak = data.get("peak_equity")
+            if peak is not None:
+                self._peak_equity = float(peak)
+
+            # P0-H: the drawdown-pause flag MUST survive restart. Auto-resume
+            # is gone; only a manual /api/ops/resume call should clear it.
+            if data.get("paused_for_drawdown"):
+                self._paused_for_drawdown = True
+
+            logger.info(
+                "[risk] anchors restored from %s: "
+                "anchor=%s starting=%.2f realised_today=%.2f peak=%.2f paused=%s",
+                path,
+                self._day_anchor_utc.isoformat() if self._day_anchor_utc else None,
+                self._starting_equity_today or 0.0,
+                self._daily_realized_pnl, self._peak_equity,
+                self._paused_for_drawdown,
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning("[risk] malformed anchors file %s: %s", path, exc)
+
+    def _persist_anchors(self) -> None:
+        """Atomic write of the anchor state (tempfile + rename)."""
+        path = _anchor_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.warning("[risk] could not create state dir %s: %s", path.parent, exc)
+            return
+
+        payload = {
+            "day_anchor_utc": (
+                self._day_anchor_utc.isoformat() if self._day_anchor_utc else None
+            ),
+            "starting_equity_today": self._starting_equity_today,
+            "daily_realized_pnl": self._daily_realized_pnl,
+            "peak_equity": self._peak_equity,
+            "paused_for_drawdown": self._paused_for_drawdown,
+            "updated_at": self._now().isoformat(),
+        }
+        try:
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps(payload, indent=2))
+            tmp.replace(path)
+        except OSError as exc:
+            logger.warning("[risk] anchors persist failed: %s", exc)
+
+    def resume_after_manual_review(self, reason: str = "manual_resume") -> bool:
+        """Operator-facing hook: clear the drawdown-pause flag (P0-H).
+
+        Auto-resume on equity recovery was removed because it silently
+        re-enabled trading without any operator visibility. Use this from
+        /api/ops/resume (or an MCP tool) after a human has reviewed the
+        drawdown event.
+        """
+        if not self._paused_for_drawdown:
+            return False
+        self._paused_for_drawdown = False
+        self._persist_anchors()
+        logger.warning("[risk] MANUAL RESUME — drawdown pause cleared (reason=%s)", reason)
+        return True
 
     # ------------------------------------------------------------------
     # Construction helpers
@@ -211,12 +332,18 @@ class RiskGovernor:
     # ------------------------------------------------------------------
 
     def update_equity(self, equity: float) -> None:
-        """Update running equity + peak. Triggers drawdown auto-pause / resume."""
+        """Update running equity + peak; trip drawdown pause on threshold.
+
+        P0-G: persist daily anchor + pause flag every call so a restart
+        in the middle of a 3% loss can't re-arm the budget.
+        P0-H: auto-resume removed. Once paused, only ``resume_after_manual_review``
+        (called by /api/ops/resume) clears the flag.
+        """
         self._current_equity = float(equity)
         if equity > self._peak_equity:
             self._peak_equity = float(equity)
 
-        # Daily anchor
+        # Daily anchor — roll over on UTC date change.
         now = self._now()
         if self._day_anchor_utc is None or now.date() > self._day_anchor_utc.date():
             self._day_anchor_utc = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -227,9 +354,7 @@ class RiskGovernor:
                 self._day_anchor_utc.date().isoformat(), equity,
             )
 
-        # Drawdown auto-pause toggle. We auto-resume only when equity climbs
-        # back above (peak * (1 - threshold)) — i.e. the trigger lifts on
-        # recovery, but the operator should still inspect why we tripped.
+        # Drawdown pause — trip-only. No auto-resume; operator inspects + resumes.
         dd_trigger = self.config.max_portfolio_drawdown_pct
         if self._peak_equity > 0:
             dd = max(0.0, 1.0 - self._current_equity / self._peak_equity)
@@ -237,17 +362,13 @@ class RiskGovernor:
                 self._paused_for_drawdown = True
                 logger.warning(
                     "[risk] PAUSE — drawdown %.2f%% ≥ limit %.2f%% "
-                    "(peak %.2f, now %.2f)",
+                    "(peak %.2f, now %.2f). Manual /api/ops/resume required.",
                     dd * 100, dd_trigger * 100, self._peak_equity, self._current_equity,
                 )
-            elif dd < dd_trigger * 0.5 and self._paused_for_drawdown:
-                # Hysteresis: only resume once we've climbed back to within
-                # half the limit, to avoid flapping on / off.
-                self._paused_for_drawdown = False
-                logger.info(
-                    "[risk] RESUME — drawdown recovered to %.2f%% (peak %.2f, now %.2f)",
-                    dd * 100, self._peak_equity, self._current_equity,
-                )
+
+        # Persist after every update — cheap (<1 KB write) and the only way to
+        # survive a mid-day restart without losing the anchor.
+        self._persist_anchors()
 
     def record_trade_close(
         self, pair: str, pnl_quote: float, pnl_pct: float,
@@ -281,6 +402,10 @@ class RiskGovernor:
                 logger.info("[risk] loss streak broken at %d", self._consecutive_losses)
             self._consecutive_losses = 0
 
+        # Persist updated daily realised PnL so the daily-loss check survives
+        # a restart between trade close and the next entry attempt.
+        self._persist_anchors()
+
     # ------------------------------------------------------------------
     # Approval — the main entry point
     # ------------------------------------------------------------------
@@ -294,6 +419,7 @@ class RiskGovernor:
         model_confidence: float | None = None,
         open_positions: Iterable[tuple[str, float]] | None = None,
         pair_returns: Mapping[str, "pd.Series"] | None = None,
+        open_unrealised_pnl: float = 0.0,
     ) -> RiskDecision:
         """
         Decide whether to allow a new long entry on `pair`.
@@ -308,12 +434,17 @@ class RiskGovernor:
             pair_returns: dict mapping pair → return series; the candidate pair must
                           be present along with each open-position pair, otherwise
                           the correlation gate is skipped (and logged).
+            open_unrealised_pnl: signed mark-to-market P&L of currently open
+                                 positions in quote currency. P0-I: included
+                                 in the daily-loss check so the bot can't keep
+                                 opening trades while sitting on a big paper
+                                 loss that the realised-only number misses.
         """
         self.update_equity(equity)
         now = self._now()
         open_positions = list(open_positions or [])
 
-        # 1. Drawdown auto-pause -----------------------------------------
+        # 1. Drawdown pause (manual-resume only after P0-H) --------------
         if self._paused_for_drawdown:
             return self._block(
                 "max_drawdown_paused",
@@ -322,23 +453,33 @@ class RiskGovernor:
             )
 
         # 2. Daily loss limit --------------------------------------------
+        # P0-I: include unrealised P&L so a bot underwater on opens can't
+        # keep stacking new trades while the realised number sits near 0.
         starting = (
             self.config.starting_equity_for_pct_limits
             if self.config.starting_equity_for_pct_limits is not None
             else self._starting_equity_today
         )
         if starting and starting > 0:
-            daily_loss_pct = -self._daily_realized_pnl / starting
+            combined_daily_pnl = self._daily_realized_pnl + float(open_unrealised_pnl)
+            daily_loss_pct = -combined_daily_pnl / starting
             if daily_loss_pct >= self.config.daily_loss_limit_pct:
                 # Block until the next UTC midnight.
                 next_midnight = (now.replace(hour=0, minute=0, second=0, microsecond=0)
                                  + timedelta(days=1))
                 return self._block(
                     "daily_loss_limit",
-                    f"realised loss {daily_loss_pct:.2%} ≥ "
-                    f"{self.config.daily_loss_limit_pct:.2%}; blocked until {next_midnight.isoformat()}",
+                    f"daily loss {daily_loss_pct:.2%} "
+                    f"(realised={self._daily_realized_pnl:.2f}, "
+                    f"unrealised={float(open_unrealised_pnl):.2f}) ≥ "
+                    f"{self.config.daily_loss_limit_pct:.2%}; "
+                    f"blocked until {next_midnight.isoformat()}",
                     base_stake, 0.0,
-                    extra={"unblocks_at": next_midnight.isoformat()},
+                    extra={
+                        "unblocks_at": next_midnight.isoformat(),
+                        "daily_realised_pnl": self._daily_realized_pnl,
+                        "open_unrealised_pnl": float(open_unrealised_pnl),
+                    },
                 )
 
         # 3. Concurrent positions ----------------------------------------

@@ -721,6 +721,40 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         except Exception:
             return []
 
+    def _open_unrealised_pnl(self) -> float:
+        """Sum signed mark-to-market P&L of every open trade (quote ccy).
+
+        P0-I: feeds the risk governor's daily-loss check. Falls back to 0.0
+        when the trade proxy isn't available (e.g. unit tests, dry-run boot
+        before any candle has populated current_rate).
+        """
+        try:
+            from freqtrade.persistence import Trade
+            total = 0.0
+            for t in Trade.get_trades_proxy(is_open=True):
+                # Try the rich current_profit_abs accessor first (freqtrade
+                # exposes it via the strategy proxy). Fall back to a manual
+                # (current_rate - open_rate) * amount calc when the accessor
+                # is missing or returns None.
+                p = getattr(t, "calc_profit", None)
+                value = None
+                if callable(p):
+                    try:
+                        value = float(p() or 0.0)
+                    except Exception:
+                        value = None
+                if value is None:
+                    cr = getattr(t, "current_rate", None) or getattr(t, "close_rate", None)
+                    orate = getattr(t, "open_rate", None)
+                    amt = getattr(t, "amount", None)
+                    if cr is None or orate is None or amt is None:
+                        continue
+                    value = (float(cr) - float(orate)) * float(amt)
+                total += value
+            return float(total)
+        except Exception:
+            return 0.0
+
     def _pair_returns_for_correlation(self, pairs: list[str]) -> dict[str, "pd.Series"]:
         """
         Build a {pair: returns Series} dict for the governor's correlation gate.
@@ -769,6 +803,7 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         open_positions = self._open_positions_snapshot()
         peer_pairs = [p for p, _ in open_positions if p != pair]
         pair_returns = self._pair_returns_for_correlation([pair, *peer_pairs])
+        open_unrealised = self._open_unrealised_pnl()
 
         decision = gov.approve_entry(
             pair=pair,
@@ -778,6 +813,7 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
             model_confidence=meta_conf,
             open_positions=open_positions,
             pair_returns=pair_returns,
+            open_unrealised_pnl=open_unrealised,
         )
         if not decision.approved:
             logger.warning(
@@ -1241,6 +1277,7 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
                     model_confidence=meta_conf,
                     open_positions=self._open_positions_snapshot(),
                     pair_returns=None,    # correlation re-checked in confirm_trade_entry
+                    open_unrealised_pnl=self._open_unrealised_pnl(),
                 )
                 if decision.approved and decision.suggested_stake > 0:
                     stake = float(decision.suggested_stake)

@@ -786,7 +786,35 @@ async def resume(request: Request):
     if err or code >= 400:
         raise HTTPException(status_code=code if code >= 400 else 502,
                             detail=err or f"freqtrade {code}: {payload}")
-    return _envelope("ok", data={"freqtrade_response": payload, "reason": body.get("reason", "ops-tab manual resume")})
+
+    # P0-H: clear the risk-governor drawdown-pause flag in the persisted
+    # anchor file so the strategy picks up the manual resume next tick. The
+    # in-memory flag in the freqtrade container will reset to the persisted
+    # value via _load_anchors on the next governor restart; for a hot resume
+    # we patch the on-disk state directly here.
+    anchor_cleared = False
+    try:
+        anchor_path = Path(os.environ.get(
+            "RISK_GOVERNOR_ANCHORS_PATH",
+            str(USER_DATA_ROOT_FOR_BACKUPS / "state" / "risk_governor_anchors.json"),
+        ))
+        if anchor_path.exists():
+            data = json.loads(anchor_path.read_text())
+            if data.get("paused_for_drawdown"):
+                data["paused_for_drawdown"] = False
+                data["manual_resume_at"] = datetime.now(timezone.utc).isoformat()
+                tmp = anchor_path.with_suffix(anchor_path.suffix + ".tmp")
+                tmp.write_text(json.dumps(data, indent=2))
+                tmp.replace(anchor_path)
+                anchor_cleared = True
+    except Exception as exc:
+        logger.warning("resume: could not clear risk_governor anchor: %s", exc)
+
+    return _envelope("ok", data={
+        "freqtrade_response": payload,
+        "reason": body.get("reason", "ops-tab manual resume"),
+        "drawdown_pause_cleared": anchor_cleared,
+    })
 
 
 # --------------------------------------------------------------------------
