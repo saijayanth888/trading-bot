@@ -1533,7 +1533,9 @@ async def slack_preview():
 
     n = int(today.get("trades") or 0)
     pnl_usd = float(today.get("pnl_usd") or 0)
-    pnl_pct = float(today.get("pnl_pct") or 0)
+    # trade_journal.pnl_pct is fractional (-0.0123 = -1.23%); the Slack-styled
+    # card renders this verbatim as a percent, so multiply once here.
+    pnl_pct = float(today.get("pnl_pct") or 0) * 100
     wins = int(today.get("wins") or 0)
     losses = int(today.get("losses") or 0)
     win_rate = (wins / n * 100) if n else 0.0
