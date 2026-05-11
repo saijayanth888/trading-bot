@@ -93,7 +93,7 @@ _DASHBOARD_MCP_KEY = os.environ.get("HERMES_MCP_KEY", "").strip()
 
 
 def require_mcp_key(
-    request: Request | None = None,
+    request: Request,
     authorization: str | None = Header(default=None),
 ) -> None:
     """FastAPI dependency: gate mutating endpoints behind the shared MCP key.
@@ -106,17 +106,16 @@ def require_mcp_key(
     Raises 503 if the key isn't configured (refuse-by-default), 401 if the
     caller's Bearer token doesn't match. Returns None on success.
     """
-    if request is not None:
-        origin = request.headers.get("origin") or request.headers.get("referer") or ""
-        host_header = request.headers.get("host") or ""
-        if host_header and origin:
-            try:
-                from urllib.parse import urlsplit
-                origin_host = urlsplit(origin).netloc or origin
-                if origin_host == host_header:
-                    return
-            except Exception:
-                pass
+    origin = request.headers.get("origin") or request.headers.get("referer") or ""
+    host_header = request.headers.get("host") or ""
+    if host_header and origin:
+        try:
+            from urllib.parse import urlsplit
+            origin_host = urlsplit(origin).netloc or origin
+            if origin_host == host_header:
+                return
+        except Exception:
+            pass
 
     if not _DASHBOARD_MCP_KEY:
         raise HTTPException(
@@ -1280,7 +1279,7 @@ async def mcp_call(
     tool_meta = mcp_local.TOOLS.get(tool_name)
     if tool_meta and tool_meta.get("mutating"):
         # Reuse the dependency body — raises 401/503 on missing/invalid key.
-        require_mcp_key(authorization=authorization)
+        require_mcp_key(request=request, authorization=authorization)
     try:
         result = await asyncio.wait_for(
             mcp_local.dispatch(tool_name, body or {}),
