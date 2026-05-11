@@ -37,19 +37,19 @@ _ACCOUNT_SNAPSHOT_FILE = _STATE_DIR / "account_snapshot.json"
 
 def cmd_sell_csps(args: argparse.Namespace) -> int:
     summary = runner.sell_csps()
-    print(json.dumps(summary, indent=2))
+    print(json.dumps(summary, indent=2, default=str))
     return 0 if not summary.get("errors") else 1
 
 
 def cmd_profit_take(args: argparse.Namespace) -> int:
     summary = runner.profit_take_check()
-    print(json.dumps(summary, indent=2))
+    print(json.dumps(summary, indent=2, default=str))
     return 0 if not summary.get("errors") else 1
 
 
 def cmd_sell_covered_calls(args: argparse.Namespace) -> int:
     summary = runner.sell_covered_calls()
-    print(json.dumps(summary, indent=2))
+    print(json.dumps(summary, indent=2, default=str))
     return 0 if not summary.get("errors") else 1
 
 
