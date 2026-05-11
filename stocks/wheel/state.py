@@ -165,6 +165,30 @@ def cumulative_pnl(since: Optional[date] = None) -> float:
     return total
 
 
+def cumulative_pnl_for(underlying: str, since: Optional[date] = None) -> float:
+    """Per-ticker cumulative realized P&L since `since` (date).
+
+    Used by the wheel runner's kill_loss_per_cycle gate (P1-S5) to walk
+    away from a ticker that's bled too much in the current pilot window.
+    """
+    if not _TRADES_FILE.exists():
+        return 0.0
+    total = 0.0
+    cutoff = since.isoformat() if since else None
+    with _TRADES_FILE.open() as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("underlying") != underlying:
+                continue
+            if cutoff and rec.get("timestamp", "") < cutoff:
+                continue
+            total += float(rec.get("pnl", 0.0))
+    return total
+
+
 # ── Per-ticker kill flags ──────────────────────────────────────────────────
 
 

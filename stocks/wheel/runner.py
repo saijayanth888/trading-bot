@@ -22,8 +22,9 @@ Reusable safety:
 
 from __future__ import annotations
 
+import json
 import logging
-from datetime import date
+from datetime import date, timedelta
 from typing import List, Optional
 
 # Path so `python -m wheel.runner` works regardless of cwd
@@ -40,7 +41,7 @@ from .broker import from_env
 from .config import load_config
 from .state import (
     Position, TradeRecord,
-    add_position, append_trade, find_open_csp, find_open_cc,
+    add_position, append_trade, cumulative_pnl_for, find_open_csp, find_open_cc,
     is_killed, kill_ticker, load_positions, now_iso, remove_position,
     shares_held, update_position,
 )
@@ -48,9 +49,54 @@ from .strategy import (
     OptionContract,
     filter_calls,
     filter_puts,
+    is_earnings_blackout,
     profit_take_threshold,
     select_best,
 )
+
+# Per-symbol next-earnings dates so the earnings blackout gate (P1-S5) can
+# consult an authoritative source without reaching into Perplexity from a
+# tight broker loop. Operator writes this file via the analyst pipeline
+# (or by hand for the pilot symbol). Missing file → no blackout enforced.
+_EARNINGS_FILE = Path(__file__).resolve().parent / "state" / "earnings.json"
+
+
+def _next_earnings_for(symbol: str) -> Optional[date]:
+    """Return the next-earnings date for `symbol`, or None if unknown.
+
+    Reads from `state/earnings.json` formatted as `{ "SOFI": "2026-05-15", ... }`.
+    """
+    try:
+        if not _EARNINGS_FILE.exists():
+            return None
+        raw = json.loads(_EARNINGS_FILE.read_text() or "{}")
+        iso = (raw.get(symbol) or "").strip()
+        if not iso:
+            return None
+        return date.fromisoformat(iso)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        logger.warning("wheel: failed to read earnings.json for %s: %s", symbol, exc)
+        return None
+
+
+def _open_csp_collateral_total(positions: List[Position]) -> float:
+    """Sum of strike × 100 × qty for every open short_put in the journal.
+
+    Used by the WHEEL_MAX_TOTAL_COLLATERAL cap (P1-S4): the runner refuses
+    to sell another CSP when adding the new collateral would push the
+    pilot above the configured ceiling.
+    """
+    total = 0.0
+    for p in positions:
+        if p.kind != "short_put":
+            continue
+        if (p.status or "") == "assigned":
+            # Assigned: collateral has already converted into shares; the
+            # share leg is tracked separately and no longer counts toward
+            # the CSP cap.
+            continue
+        total += float(p.strike) * 100.0 * max(1, int(p.qty))
+    return total
 
 
 logger = logging.getLogger(__name__)
@@ -128,16 +174,39 @@ def sell_csps(symbols_override: Optional[List[str]] = None) -> dict:
     )
 
     symbols = symbols_override or list(cfg.symbols)
+
+    # Snapshot existing positions ONCE so per-symbol gates (P1-S4 collateral
+    # cap) operate on a consistent view of the journal across the cycle.
+    positions_snapshot: List[Position] = load_positions()
+    open_collateral = _open_csp_collateral_total(positions_snapshot)
+    summary["open_collateral_usd_pre"] = round(open_collateral, 2)
+    summary["max_total_collateral_usd"] = float(cfg.max_total_collateral_usd)
+
     for sym in symbols:
         try:
-            _try_sell_csp(broker, sym, cfg, acct, summary)
+            _try_sell_csp(
+                broker, sym, cfg, acct, summary,
+                open_collateral_running=open_collateral,
+            )
+            # Refresh after each (potential) entry so subsequent symbols see
+            # the updated collateral total.
+            open_collateral = _open_csp_collateral_total(load_positions())
         except Exception as exc:
             logger.exception("sell_csp(%s) crashed", sym)
             summary["errors"].append(f"{sym}: {exc!s}")
+
+    summary["open_collateral_usd_post"] = round(open_collateral, 2)
     return summary
 
 
-def _try_sell_csp(broker, sym: str, cfg, acct, summary: dict) -> None:
+def _try_sell_csp(
+    broker,
+    sym: str,
+    cfg,
+    acct,
+    summary: dict,
+    open_collateral_running: float = 0.0,
+) -> None:
     if is_killed(sym):
         summary["skipped"].append(f"{sym}: per-ticker kill flag active")
         return
@@ -148,6 +217,30 @@ def _try_sell_csp(broker, sym: str, cfg, acct, summary: dict) -> None:
 
     if shares_held(sym) > 0:
         summary["skipped"].append(f"{sym}: holding shares — covered-call leg, not CSP")
+        return
+
+    # P1-S5a: earnings blackout — refuse new CSP if next earnings is within
+    # cfg.earnings_blackout_days. Source of truth is state/earnings.json
+    # (operator-written); missing entry = no blackout enforced for that sym.
+    next_earn = _next_earnings_for(sym)
+    if is_earnings_blackout(next_earn, blackout_days=cfg.earnings_blackout_days):
+        summary["skipped"].append(
+            f"{sym}: earnings blackout — next earnings {next_earn.isoformat()} within {cfg.earnings_blackout_days}d"
+        )
+        return
+
+    # P1-S5b: per-cycle kill — walk away from this ticker for 90 days if its
+    # realized P&L over the last 30 days is below -kill_loss_per_cycle_usd.
+    # Defined "cycle" as a 30-day rolling window so the gate isn't gameable
+    # by a single bad week early in the pilot.
+    cycle_window_days = 30
+    cycle_pnl = cumulative_pnl_for(sym, since=date.today() - timedelta(days=cycle_window_days))
+    if cycle_pnl <= -abs(cfg.kill_loss_per_cycle_usd):
+        kill_ticker(sym, days=90)
+        summary["skipped"].append(
+            f"{sym}: cycle P&L ${cycle_pnl:.2f} ≤ -${cfg.kill_loss_per_cycle_usd:.2f} — "
+            f"per-ticker kill flag set for 90 days"
+        )
         return
 
     contracts = broker.list_put_contracts(
@@ -175,6 +268,14 @@ def _try_sell_csp(broker, sym: str, cfg, acct, summary: dict) -> None:
     if collateral > acct.buying_power:
         summary["skipped"].append(
             f"{sym}: collateral ${collateral:.0f} > buying_power ${acct.buying_power:.0f}"
+        )
+        return
+    # P1-S4: pilot-wide total-collateral ceiling.
+    if open_collateral_running + collateral > cfg.max_total_collateral_usd:
+        summary["skipped"].append(
+            f"{sym}: total collateral ${open_collateral_running + collateral:.0f} would exceed "
+            f"max_total_collateral ${cfg.max_total_collateral_usd:.0f} "
+            f"(${open_collateral_running:.0f} already open)"
         )
         return
 
