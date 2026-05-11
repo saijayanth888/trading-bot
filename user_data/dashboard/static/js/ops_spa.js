@@ -205,6 +205,53 @@
     return { state, refetchFast, refetchSlow };
   }
 
+  // ─────────────── TODAY SCOREBOARD — single-card at-a-glance summary ─────
+  // Operator's stated need (2026-05-11): "top right corner, daily P&L,
+  // capital, trades done, all the things". This card distills 6 numbers
+  // that answer "where are we right now" without scrolling.
+  function TodayScoreboard({ data }) {
+    const cpSlot = slotState(data, "combined_portfolio");
+    const cp = envelopeData(cpSlot.env) || {};
+    const tr = envelopeData(data.trades_risk) || {};
+    const stocks = envelopeData(data.stocks) || {};
+    const wheelOpen = ((stocks.wheel || {}).open_positions || []).length;
+
+    const equity = Number(cp.total_equity ?? 0);
+    const peak = Number(cp.combined_peak_equity ?? equity);
+    const dd = Math.abs(Number(cp.combined_drawdown_pct ?? 0));
+    const dayPnlUsd = Number(cp.day_pnl_usd ?? 0);
+    const dayPnlPct = Number(cp.day_pnl_pct ?? 0);
+    const closedToday = Number(tr.closed_today ?? 0);
+    const openCrypto = Number(tr.open_count ?? 0);
+    const totalOpen = openCrypto + wheelOpen;
+    const dayCls = dayPnlUsd >= 0 ? "up" : "down";
+    const ddCls = dd >= 8 ? "down" : dd >= 5 ? "warn" : "up";
+
+    const stat = (lbl, val, cls) => h("div", { style: { display: "flex", flexDirection: "column", gap: 2, minWidth: 110 } },
+      h("div", { className: "dim2 mono", style: { fontSize: "var(--t-2xs)", letterSpacing: ".08em", textTransform: "uppercase" } }, lbl),
+      h("div", { className: "num " + (cls || ""), style: { fontSize: "var(--t-lg)", fontFamily: "var(--mono)", fontWeight: 500, fontVariantNumeric: "tabular-nums" } }, val)
+    );
+
+    return h(Card, {
+      num: "00", title: "Today · scoreboard",
+      sub: "capital · day P&L · trades · positions · drawdown",
+      right: cardRight(cpSlot.fetchedAt,
+        h("span", { className: "pill " + dayCls, style: { height: 18 } },
+          h("span", { className: "dot " + dayCls + (dayPnlUsd === 0 ? "" : " pulse") }),
+          " ", (dayPnlPct >= 0 ? "+" : "") + dayPnlPct.toFixed(2) + "% day"))
+    },
+      h("div", { style: { display: "flex", flexWrap: "wrap", gap: "var(--s-5)", alignItems: "baseline" } },
+        stat("Capital", "$" + fmtUSD(equity)),
+        stat("Day P&L", (dayPnlUsd >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(dayPnlUsd)), dayCls),
+        stat("Day %", (dayPnlPct >= 0 ? "+" : "") + dayPnlPct.toFixed(2) + "%", dayCls),
+        stat("Drawdown", dd.toFixed(2) + "%", ddCls),
+        stat("Peak", "$" + fmtUSD(peak)),
+        stat("Open", totalOpen + " (" + openCrypto + "C + " + wheelOpen + "S)"),
+        stat("Closed today", closedToday)
+      )
+    );
+  }
+
   // ─────────────── HERO — combined equity + 3-cell status ───────────────
   function HeroLive({ data, killState }) {
     const slot = slotState(data, "combined_portfolio");
@@ -2384,6 +2431,10 @@
             h("span", { className: "tb-spacer", style: { flex: 1 } }),
             h("span", { className: "mono dim", style: { fontSize: "var(--t-xs)" } }, "scroll · sections snap to view")
           ),
+          // TODAY SCOREBOARD — operator's at-a-glance: capital, day P&L,
+          // trades done, open positions, drawdown. Mounted ABOVE the hero
+          // so it's the first thing the eye lands on (top of the page).
+          h(TodayScoreboard, { data }),
           // HERO
           h(HeroLive, { data, killState }),
           // TRAINING ROW — crypto FreqAI + stocks Shark TFT side-by-side.
