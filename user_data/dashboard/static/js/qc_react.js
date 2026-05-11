@@ -332,30 +332,31 @@
     const [hover, setHover] = useState(null);
     const viewRef = useRef({ start: 0, end: (candles || []).length });
     const dragRef = useRef(null);
+    const drawRef = useRef(null);
+    const candlesRef = useRef(candles);
     const [, force] = useState(0);
     const rerender = () => force((n) => n + 1);
 
     useEffect(() => {
       viewRef.current = { start: 0, end: (candles || []).length };
+      candlesRef.current = candles;
       rerender();
     }, [candles]);
 
+    // Redraw effect — recomputes layout/scales/renders whenever any of
+    // {candles, markers, showVolume, overlays} change. Also installs the
+    // latest draw closure into drawRef so the listener effect (attach-once)
+    // can invoke it without re-attaching.
     useEffect(() => {
       const cv = ref.current, wrap = wrapRef.current;
-      if (!cv || !candles || !candles.length) return;
+      if (!cv || !wrap || !candles || !candles.length) return;
+      candlesRef.current = candles;
       const dpr = window.devicePixelRatio || 1;
       const cs = getComputedStyle(document.documentElement);
       const cUp = cs.getPropertyValue("--up").trim();
       const cDn = cs.getPropertyValue("--down").trim();
       const cFg4 = cs.getPropertyValue("--fg-3").trim() || "#9a9aa6";
       const cAccent = cs.getPropertyValue("--accent").trim();
-
-      const resize = () => {
-        const w = wrap.clientWidth, hH = wrap.clientHeight;
-        cv.width = w * dpr; cv.height = hH * dpr;
-        cv.style.width = w + "px"; cv.style.height = hH + "px";
-        draw();
-      };
 
       const draw = (hi) => {
         if (hi === undefined) hi = null;
@@ -521,7 +522,36 @@
         }
       };
 
-      resize();
+      const sizeAndDraw = () => {
+        const w = wrap.clientWidth, hH = wrap.clientHeight;
+        cv.width = w * dpr; cv.height = hH * dpr;
+        cv.style.width = w + "px"; cv.style.height = hH + "px";
+        draw();
+      };
+      drawRef.current = draw;
+      sizeAndDraw();
+      return () => { drawRef.current = null; };
+    }, [candles, markers, showVolume, overlays]);
+
+    // Listener-attach effect — attaches mousemove / mouseleave / wheel /
+    // mousedown / mouseup / dblclick / ResizeObserver ONCE on mount, cleans
+    // up on unmount. Handlers read the latest candles via candlesRef and
+    // invoke the latest draw via drawRef so listeners never need to be
+    // re-attached when parent re-renders. Before this split, the listeners
+    // re-attached on every render because `markers` was in deps and
+    // dashboard_spa.js rebuilds the markers array each fetch tick.
+    useEffect(() => {
+      const cv = ref.current, wrap = wrapRef.current;
+      if (!cv || !wrap) return;
+      const dpr = window.devicePixelRatio || 1;
+
+      const callDraw = (hi) => { if (drawRef.current) drawRef.current(hi); };
+      const resize = () => {
+        const w = wrap.clientWidth, hH = wrap.clientHeight;
+        cv.width = w * dpr; cv.height = hH * dpr;
+        cv.style.width = w + "px"; cv.style.height = hH + "px";
+        callDraw();
+      };
       const ro = new ResizeObserver(resize); ro.observe(wrap);
 
       const xToSliceIdx = (clientX) => {
@@ -537,6 +567,7 @@
       };
 
       const onMove = (e) => {
+        const candlesNow = candlesRef.current || [];
         if (dragRef.current) {
           const dx = e.clientX - dragRef.current.startX;
           const r = cv.getBoundingClientRect();
@@ -546,41 +577,45 @@
           const shift = -(dx / w) * range;
           let s = view0.start + shift, en = view0.end + shift;
           if (s < 0) { en -= s; s = 0; }
-          if (en > candles.length) { s -= (en - candles.length); en = candles.length; }
-          viewRef.current = { start: Math.max(0, s), end: Math.min(candles.length, en) };
-          draw();
+          if (en > candlesNow.length) { s -= (en - candlesNow.length); en = candlesNow.length; }
+          viewRef.current = { start: Math.max(0, s), end: Math.min(candlesNow.length, en) };
+          callDraw();
           return;
         }
         const r = xToSliceIdx(e.clientX);
         const view = viewRef.current;
         const globalIdx = Math.floor(view.start) + r.li;
-        setHover({ i: globalIdx, c: candles[globalIdx], li: r.li });
-        draw(r.li);
+        setHover({ i: globalIdx, c: candlesNow[globalIdx], li: r.li });
+        callDraw(r.li);
       };
-      const onLeave = () => { setHover(null); draw(); };
+      const onLeave = () => { setHover(null); callDraw(); };
       const onWheel = (e) => {
         e.preventDefault();
+        const candlesNow = candlesRef.current || [];
         const r = xToSliceIdx(e.clientX);
         const view = viewRef.current;
         const range = view.end - view.start;
         const factor = e.deltaY > 0 ? 1.18 : 1 / 1.18;
-        let newRange = Math.max(8, Math.min(candles.length, range * factor));
-        // zoom around the cursor position
+        let newRange = Math.max(8, Math.min(candlesNow.length, range * factor));
         const anchor = view.start + r.li;
         const leftFrac = r.li / Math.max(1, range);
         let s = anchor - newRange * leftFrac;
         let en = s + newRange;
         if (s < 0) { en -= s; s = 0; }
-        if (en > candles.length) { s -= (en - candles.length); en = candles.length; }
-        viewRef.current = { start: Math.max(0, s), end: Math.min(candles.length, en) };
-        draw();
+        if (en > candlesNow.length) { s -= (en - candlesNow.length); en = candlesNow.length; }
+        viewRef.current = { start: Math.max(0, s), end: Math.min(candlesNow.length, en) };
+        callDraw();
       };
       const onDown = (e) => {
         dragRef.current = { startX: e.clientX, view0: Object.assign({}, viewRef.current) };
         cv.style.cursor = "grabbing";
       };
       const onUp = () => { dragRef.current = null; cv.style.cursor = "crosshair"; };
-      const onDbl = () => { viewRef.current = { start: 0, end: candles.length }; draw(); };
+      const onDbl = () => {
+        const candlesNow = candlesRef.current || [];
+        viewRef.current = { start: 0, end: candlesNow.length };
+        callDraw();
+      };
 
       cv.style.cursor = "crosshair";
       cv.addEventListener("mousemove", onMove);
@@ -598,7 +633,7 @@
         window.removeEventListener("mouseup", onUp);
         cv.removeEventListener("dblclick", onDbl);
       };
-    }, [candles, markers, showVolume]);
+    }, []);
 
     const view = viewRef.current;
     const visible = Math.round(view.end - view.start);
@@ -692,6 +727,7 @@
       setHolding(p * 100);
       if (p >= 1) {
         cancelAnimationFrame(raf.current);
+        raf.current = null;
         if (onKill) onKill();
         setHolding(0);
       } else {
@@ -704,16 +740,43 @@
       raf.current = requestAnimationFrame(tick);
     };
     const up = () => {
-      cancelAnimationFrame(raf.current);
+      if (raf.current) cancelAnimationFrame(raf.current);
+      raf.current = null;
       setHolding(0);
     };
+
+    useEffect(() => {
+      return () => {
+        if (raf.current) cancelAnimationFrame(raf.current);
+        raf.current = null;
+      };
+    }, []);
+
+    const liveStyle = { position: "absolute", left: "-9999px", width: 1, height: 1, overflow: "hidden" };
+    const liveMsg = state === "killed" ? "Bot paused" : (state === "armed" ? "Bot armed" : "");
+    const liveRegion = h("div", {
+      "aria-live": "assertive",
+      role: "status",
+      className: "sr-only",
+      style: liveStyle,
+    }, liveMsg);
 
     if (state === "killed") {
       return h(
         "div",
         { className: "kill-wrap" },
         h("span", { className: "kill-label", style: { color: "var(--down)" } }, "● KILLED"),
-        h("button", { className: "kill-btn", onClick: onResume }, "RESUME")
+        h(
+          "button",
+          {
+            className: "kill-btn",
+            onClick: onResume,
+            "aria-pressed": true,
+            "aria-label": "Resume trading",
+          },
+          "RESUME"
+        ),
+        liveRegion
       );
     }
     if (state === "armed") {
@@ -730,18 +793,39 @@
             onMouseLeave: up,
             onTouchStart: down,
             onTouchEnd: up,
+            "aria-pressed": true,
+            "aria-label": "Pause trading (hold to confirm)",
           },
           h("span", { className: "kill-hold-fill", style: { width: holding + "%" } }),
           h("span", { className: "kill-hold-text" }, "HOLD 1.5s TO CONFIRM")
         ),
-        h("button", { className: "kill-btn", onClick: onResume }, "CANCEL")
+        h(
+          "button",
+          {
+            className: "kill-btn",
+            onClick: onResume,
+            "aria-label": "Cancel arming",
+          },
+          "CANCEL"
+        ),
+        liveRegion
       );
     }
     return h(
       "div",
       { className: "kill-wrap" },
       h("span", { className: "kill-label" }, "KILL"),
-      h("button", { className: "kill-btn", onClick: onArm }, "ARM")
+      h(
+        "button",
+        {
+          className: "kill-btn",
+          onClick: onArm,
+          "aria-pressed": false,
+          "aria-label": "Arm pause (then hold to confirm)",
+        },
+        "ARM"
+      ),
+      liveRegion
     );
   }
 
@@ -775,7 +859,7 @@
   // ─────────────── Topbar ───────────────
   // Note: tweaks (theme/density/accent) are NOT ported; only the props
   // (killState, setKillState, active, density) used by the prototype itself.
-  function Topbar({ killState, setKillState, active, density }) {
+  function Topbar({ killState, setKillState, active, density, onRefreshIntervalChange, onRefreshNow }) {
     const [clock, setClock] = useState(fmtClock());
     // Real uptime — poll /api/ops/uptime every 30s for freqtrade's actual
     // start time. Earlier this was page-load time, which made the pill
@@ -930,15 +1014,33 @@
         ),
         h(
           "select",
-          { className: "select" },
-          h("option", null, "5s"),
-          h("option", null, "10s"),
-          h("option", null, "30s"),
-          h("option", null, "1m"),
-          h("option", null, "Off")
+          {
+            className: "select",
+            "aria-label": "Refresh interval",
+            defaultValue: "5",
+            onChange: (e) => {
+              if (typeof onRefreshIntervalChange !== "function") return;
+              const raw = e.target.value;
+              const ms = raw === "off" ? 0 : parseInt(raw, 10) * 1000;
+              onRefreshIntervalChange(ms);
+            },
+          },
+          h("option", { value: "5" }, "5s"),
+          h("option", { value: "10" }, "10s"),
+          h("option", { value: "30" }, "30s"),
+          h("option", { value: "60" }, "1m"),
+          h("option", { value: "off" }, "Off")
         ),
-        h("button", { className: "icon-btn", title: "Force refresh" }, "↻"),
-        h("button", { className: "icon-btn", title: "Cmd palette" }, "⌘K")
+        h(
+          "button",
+          {
+            className: "icon-btn",
+            title: "Force refresh",
+            "aria-label": "Refresh now",
+            onClick: () => { if (typeof onRefreshNow === "function") onRefreshNow(); },
+          },
+          "↻"
+        )
       ),
       h("div", { className: "tb-divider" }),
       h(KillSwitch, {
@@ -970,6 +1072,25 @@
       { id: "llm", label: "LLM providers", key: "7", href: "/ops_spa#llm" },
       { id: "config", label: "Config", key: "8", href: "/ops_spa#config" },
     ];
+    useEffect(() => {
+      const navItems = items.filter((it) => !it.sect);
+      const onKey = (e) => {
+        const tag = e.target && e.target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+        if (e.target && e.target.isContentEditable) return;
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
+        const n = parseInt(e.key, 10);
+        if (n >= 1 && n <= navItems.length) {
+          const item = navItems[n - 1];
+          if (item && item.href) {
+            e.preventDefault();
+            window.location.assign(item.href);
+          }
+        }
+      };
+      document.addEventListener("keydown", onKey);
+      return () => document.removeEventListener("keydown", onKey);
+    }, []);
     return h(
       "nav",
       { className: "sidebar" },
@@ -1060,7 +1181,7 @@
           const sideClass = t.side === "BUY" || t.side === "CSP" ? "up" : "down";
           return h(
             "span",
-            { key: i, className: "tick" },
+            { key: t.pair + ":" + t.side + ":" + i, className: "tick" },
             h("span", { className: "dot " + sideClass }),
             h("span", { className: "tick-sym" }, t.pair),
             h("span", { className: "dim" }, t.side),
