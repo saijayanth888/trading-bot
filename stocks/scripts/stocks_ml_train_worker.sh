@@ -88,7 +88,12 @@ PY
 trap cleanup EXIT
 
 echo "── stocks ML train WORKER started $(date -u +%Y-%m-%dT%H:%M:%SZ) pid=$$ ──" >>"$LOG"
-python -m shark.ml.cli train_tft --epochs 25 2>&1 | tee -a "$LOG"
+# STOCKS_ML_TRAIN_ARGS lets the caller force --no-early-stop / longer epochs
+# for diagnostic runs. Defaults to a normal production training cycle.
+EXTRA_ARGS="${STOCKS_ML_TRAIN_ARGS:-}"
+echo "── extra args: ${EXTRA_ARGS:-(none)} ──" >>"$LOG"
+# shellcheck disable=SC2086
+python -m shark.ml.cli train_tft --epochs 25 ${EXTRA_ARGS} 2>&1 | tee -a "$LOG"
 
 # Optional: record an EPT generation off the freshly-trained weights.
 # Best-effort — failure here doesn't fail the training run.

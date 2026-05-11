@@ -60,6 +60,12 @@ class TFTStockConfig:
     weight_decay: float = 1e-5
     epochs: int = 25
     early_stop_patience: int = 4
+    # When False, the trainer ignores `early_stop_patience` and always
+    # runs every epoch in [0, epochs). Useful for diagnostic full-curve
+    # runs (does the model actually plateau, overfit catastrophically,
+    # or oscillate?). Default keeps early stopping ON for production
+    # GPU efficiency.
+    enable_early_stopping: bool = True
     gpu_memory_fraction: float = 0.20
     target_horizon_days: int = 5
 
@@ -227,10 +233,17 @@ def train(
             }, weights_path)
         else:
             patience += 1
-            if patience >= cfg.early_stop_patience:
+            if cfg.enable_early_stopping and patience >= cfg.early_stop_patience:
                 logger.info("early stop at epoch %d (no val improvement for %d epochs)",
                             epoch + 1, patience)
                 break
+            elif not cfg.enable_early_stopping:
+                # Diagnostic mode — log that we'd have stopped but are continuing.
+                logger.info(
+                    "no val improvement for %d epoch(s) [would early-stop at %d, "
+                    "but enable_early_stopping=False — continuing]",
+                    patience, cfg.early_stop_patience,
+                )
 
     summary = {
         "weights_path": str(weights_path),

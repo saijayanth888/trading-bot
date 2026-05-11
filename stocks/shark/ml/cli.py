@@ -34,6 +34,12 @@ def main(argv: list[str] | None = None) -> int:
                          help="cap on training samples (for quick iteration)")
     p_train.add_argument("--tickers", default=None,
                          help="comma-separated ticker subset (default: all)")
+    p_train.add_argument("--no-early-stop", action="store_true",
+                         help="Run every epoch in [0, --epochs) regardless of val_acc plateau. "
+                              "Use for diagnostic full-curve runs. Default: early stopping ON.")
+    p_train.add_argument("--patience", type=int, default=4,
+                         help="Epochs without val_acc improvement before early stop "
+                              "(ignored when --no-early-stop). Default: 4.")
 
     p_infer = sub.add_parser("infer", help="Run inference for a single symbol")
     p_infer.add_argument("symbol")
@@ -64,7 +70,11 @@ def _cmd_train_tft(args) -> int:
     from shark.ml.tft_stock import train, TFTStockConfig
     here = Path(__file__).resolve()
     kb_dir = here.parents[2] / "kb" / "historical_bars"
-    cfg = TFTStockConfig(epochs=int(args.epochs))
+    cfg = TFTStockConfig(
+        epochs=int(args.epochs),
+        early_stop_patience=int(args.patience),
+        enable_early_stopping=not args.no_early_stop,
+    )
     tickers = (
         [t.strip() for t in args.tickers.split(",") if t.strip()]
         if args.tickers else None
