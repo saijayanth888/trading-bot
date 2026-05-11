@@ -187,6 +187,10 @@
     const [state, setState] = useState(null);
     const [candles, setCandles] = useState([]);
     const [markers, setMarkers] = useState([]);
+    // Indicators for the RSI/MACD subcharts under the main candle chart.
+    // Pulled from /api/candles/{base}/{quote} → {indicators: {...}}.
+    // Stocks venue doesn't currently expose these (different pipeline).
+    const [indicators, setIndicators] = useState({});
     const [combined, setCombined] = useState(null);
     const [mode, setMode] = useState(null);
     const [services, setServices] = useState(null);
@@ -269,6 +273,7 @@
         const rawCandles = j.candles || [];
         const cs = toCandles(rawCandles, tf);
         setCandles(cs);
+        setIndicators(j.indicators || {});
         setMeta(m => Object.assign({}, m, { candles_fetched_at: new Date().toISOString(), pair_state: j.pair_state, last_close: j.last_close, source: j.source }));
         // Pull trade markers after candles so we can align them.
         const turl = "/api/trades/" + encodeURIComponent(base) + "/" + encodeURIComponent(quote);
@@ -372,7 +377,7 @@
             ),
 
             // CHART
-            h("div", { style: { gridColumn: "span 8" } },
+            h("div", { style: { gridColumn: "span 8", display: "flex", flexDirection: "column", gap: "var(--gap-grid)" } },
               h(Card, {
                 num: "01", title: pair + " · " + tf, sub: "entries + exits annotated · scroll = zoom",
                 right: h("div", { style: { display: "flex", gap: 6 } },
@@ -383,7 +388,36 @@
                 candles.length > 0
                   ? h(CandleChart, { candles, markers, height: 420 })
                   : h("div", { className: "dim", style: { padding: "var(--s-4)", fontSize: "var(--t-xs)" } }, "loading candles…")
-              )
+              ),
+              // RSI subchart — closes the path-A gap (legacy /charts has this).
+              // Crypto venue only; stocks pipeline doesn't compute these yet.
+              (venue === "crypto" && indicators && indicators.rsi && indicators.rsi.length > 0)
+                ? h(Card, { num: "01a", title: "RSI · 14", sub: "" },
+                    h(IndicatorSubchart, {
+                      data: indicators.rsi,
+                      refLines: [
+                        { value: 70, color: "rgba(239,68,68,0.5)" },
+                        { value: 30, color: "rgba(34,197,94,0.5)" },
+                        { value: 50, color: "rgba(255,255,255,0.15)" },
+                      ],
+                      label: "RSI · 14",
+                      color: "var(--accent)",
+                    })
+                  )
+                : null,
+              // MACD subchart — line + signal + histogram
+              (venue === "crypto" && indicators && indicators.macd && indicators.macd.length > 0)
+                ? h(Card, { num: "01b", title: "MACD · 12/26/9", sub: "" },
+                    h(IndicatorSubchart, {
+                      data: indicators.macd,
+                      signal: indicators.macd_signal,
+                      hist: indicators.macd_hist,
+                      refLines: [{ value: 0, color: "rgba(255,255,255,0.15)" }],
+                      label: "MACD",
+                      color: "rgba(124,92,255,0.95)",
+                    })
+                  )
+                : null
             ),
 
             // INTELLIGENCE RAIL

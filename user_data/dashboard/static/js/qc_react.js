@@ -166,6 +166,152 @@
     return h("canvas", { ref: ref, className: "spark", style: { height: height } });
   }
 
+  // ─────────────── IndicatorSubchart ───────────────
+  // Compact line chart for RSI / MACD / similar indicators. Takes
+  // `data` as [{time, value}, ...]. Optionally renders a second series
+  // (for MACD signal) and a histogram (for MACD hist). Horizontal
+  // reference lines via `refLines` ([{value, color}]).
+  //
+  // Designed to sit BELOW the main CandleChart and share its time axis
+  // (caller provides the same data range). Height is fixed at 110px.
+  function IndicatorSubchart({ data, signal, hist, refLines, label, color = "var(--accent)", height = 110 }) {
+    const ref = useRef(null);
+    const wrapRef = useRef(null);
+    useEffect(() => {
+      const cv = ref.current, wrap = wrapRef.current;
+      if (!cv || !wrap) return;
+      const dpr = window.devicePixelRatio || 1;
+      const cs = getComputedStyle(document.documentElement);
+      const _resolve = (c) => {
+        if (typeof c !== "string") return c;
+        if (!c.startsWith("var(")) return c;
+        const v = c.slice(4, -1).trim();
+        return (cs.getPropertyValue(v) || c).trim();
+      };
+      const cLine = _resolve(color) || "#7c5cff";
+      const cFg4 = (cs.getPropertyValue("--fg-3").trim() || "#9a9aa6");
+      const cUp = (cs.getPropertyValue("--up").trim() || "#22c55e");
+      const cDn = (cs.getPropertyValue("--down").trim() || "#ef4444");
+
+      const resize = () => {
+        const w = wrap.clientWidth, hH = wrap.clientHeight;
+        cv.width = w * dpr; cv.height = hH * dpr;
+        cv.style.width = w + "px"; cv.style.height = hH + "px";
+        draw();
+      };
+      const draw = () => {
+        const ctx = cv.getContext("2d");
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.scale(dpr, dpr);
+        const w = wrap.clientWidth, hH = wrap.clientHeight;
+        ctx.clearRect(0, 0, w, hH);
+        if (!data || !data.length) {
+          ctx.fillStyle = cFg4 + "88";
+          ctx.font = "10px Geist Mono, monospace";
+          ctx.fillText("(no data)", 8, hH / 2);
+          return;
+        }
+        const padR = 70, padL = 8, padT = 14, padB = 6;
+        const chartW = w - padR - padL, chartH = hH - padT - padB;
+        // Compute domain across data + signal + hist
+        let mn = Infinity, mx = -Infinity;
+        const consider = (arr) => arr && arr.forEach(p => {
+          const v = (p && typeof p.value === "number") ? p.value : null;
+          if (v == null) return;
+          if (v < mn) mn = v;
+          if (v > mx) mx = v;
+        });
+        consider(data); consider(signal); consider(hist);
+        if (refLines) refLines.forEach(r => {
+          if (r.value < mn) mn = r.value;
+          if (r.value > mx) mx = r.value;
+        });
+        if (mn === Infinity) return;
+        if (mn === mx) { mn -= 1; mx += 1; }
+        const rng = mx - mn;
+        const N = data.length;
+        const px = (i) => padL + (i + 0.5) / N * chartW;
+        const py = (v) => padT + (1 - (v - mn) / rng) * chartH;
+
+        // Reference lines
+        ctx.strokeStyle = "rgba(255,255,255,.07)"; ctx.lineWidth = 1; ctx.setLineDash([2, 3]);
+        (refLines || []).forEach(r => {
+          ctx.strokeStyle = r.color || "rgba(255,255,255,.12)";
+          ctx.beginPath();
+          ctx.moveTo(padL, py(r.value));
+          ctx.lineTo(padL + chartW, py(r.value));
+          ctx.stroke();
+          ctx.fillStyle = (r.color || cFg4) + "cc";
+          ctx.font = "9px Geist Mono";
+          ctx.textAlign = "left";
+          ctx.fillText(String(r.value), padL + chartW + 4, py(r.value) + 3);
+        });
+        ctx.setLineDash([]);
+
+        // Histogram (MACD)
+        if (hist && hist.length) {
+          const barW = Math.max(1, (chartW / N) * 0.7);
+          const zeroY = py(0);
+          hist.forEach((p, i) => {
+            if (p == null || typeof p.value !== "number") return;
+            const x = px(i);
+            const y = py(p.value);
+            ctx.fillStyle = p.value >= 0 ? cUp + "88" : cDn + "88";
+            ctx.fillRect(x - barW / 2, Math.min(y, zeroY), barW, Math.abs(y - zeroY));
+          });
+        }
+        // Main line
+        ctx.strokeStyle = cLine; ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        let started = false;
+        data.forEach((p, i) => {
+          if (p == null || typeof p.value !== "number") return;
+          const x = px(i), y = py(p.value);
+          if (!started) { ctx.moveTo(x, y); started = true; }
+          else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+        // Signal line (MACD signal)
+        if (signal && signal.length) {
+          ctx.strokeStyle = "rgba(245,158,11,0.9)"; ctx.lineWidth = 1;
+          ctx.beginPath();
+          let s = false;
+          signal.forEach((p, i) => {
+            if (p == null || typeof p.value !== "number") return;
+            const x = px(i), y = py(p.value);
+            if (!s) { ctx.moveTo(x, y); s = true; }
+            else ctx.lineTo(x, y);
+          });
+          ctx.stroke();
+        }
+        // Right-side last-value label
+        const last = data[data.length - 1];
+        if (last && typeof last.value === "number") {
+          const lblY = py(last.value);
+          ctx.fillStyle = cLine;
+          ctx.fillRect(padL + chartW, lblY - 8, padR - 8, 16);
+          ctx.fillStyle = "#0a0a0a";
+          ctx.font = "10px Geist Mono";
+          ctx.textAlign = "left";
+          ctx.fillText(last.value.toFixed(2), padL + chartW + 6, lblY + 3);
+        }
+        // Top-left label
+        if (label) {
+          ctx.fillStyle = cFg4;
+          ctx.font = "10px Geist Mono";
+          ctx.textAlign = "left";
+          ctx.fillText(label, padL + 4, padT - 2);
+        }
+      };
+      resize();
+      const ro = new ResizeObserver(resize); ro.observe(wrap);
+      return () => ro.disconnect();
+    }, [data, signal, hist, refLines, label, color]);
+    return h("div", { ref: wrapRef, style: { position: "relative", width: "100%", height: height } },
+      h("canvas", { ref: ref, style: { display: "block", width: "100%", height: "100%" } })
+    );
+  }
+
   // ─────────────── CandleChart ───────────────
   // Pixel-exact port:
   //   wheel-zoom around cursor (anchor = view.start + li, leftFrac = li/range)
@@ -906,7 +1052,7 @@
 
   // ─────────────── exports ───────────────
   Object.assign(window, {
-    NumberRoll, Sparkline, CandleChart, RegimeRibbon, StatusRow,
+    NumberRoll, Sparkline, CandleChart, IndicatorSubchart, RegimeRibbon, StatusRow,
     GateBadge, KillSwitch, Topbar, Sidebar, Card, LiveTicker,
     ProgressBar, TimeSince,
   });
