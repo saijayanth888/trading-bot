@@ -1437,7 +1437,7 @@
         .catch(e => setToastMsg({ msg: "POST error · " + e.message, level: "warn" }));
     };
 
-    const numCell = (val, range, onChange) => h("input", {
+    const numCell = (val, range, onChange, ariaLabel) => h("input", {
       type: "number",
       value: val != null ? val : 0,
       step: 0.01,
@@ -1445,6 +1445,7 @@
       max: range ? range[1] : undefined,
       onChange: e => onChange(Number(e.target.value)),
       className: "select",
+      "aria-label": ariaLabel,
       style: { width: 86, fontFamily: "var(--mono)", fontSize: "var(--t-xs)", textAlign: "right" },
     });
 
@@ -1455,25 +1456,25 @@
     },
       h("div", { className: "metric-label" }, "ENTRY DELTA · per regime"),
       h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, marginTop: 4 } },
-        regimes.map(r => h("div", { key: r, style: { display: "flex", flexDirection: "column", gap: 4 } },
+        regimes.map(r => h("label", { key: r, style: { display: "flex", flexDirection: "column", gap: 4 } },
           h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, r),
-          numCell(form.entry_delta[r], schema.delta_range, (v) => setDelta("entry_delta", r, v))
+          numCell(form.entry_delta[r], schema.delta_range, (v) => setDelta("entry_delta", r, v), `entry delta for ${r}`)
         ))
       ),
       h("div", { className: "hr" }),
       h("div", { className: "metric-label" }, "EXIT DELTA · per regime"),
       h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, marginTop: 4 } },
-        regimes.map(r => h("div", { key: r, style: { display: "flex", flexDirection: "column", gap: 4 } },
+        regimes.map(r => h("label", { key: r, style: { display: "flex", flexDirection: "column", gap: 4 } },
           h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, r),
-          numCell(form.exit_delta[r], schema.delta_range, (v) => setDelta("exit_delta", r, v))
+          numCell(form.exit_delta[r], schema.delta_range, (v) => setDelta("exit_delta", r, v), `exit delta for ${r}`)
         ))
       ),
       h("div", { className: "hr" }),
       h("div", { className: "metric-label" }, "SCALAR PARAMS"),
       h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginTop: 4 } },
-        scalars.map(k => h("div", { key: k, style: { display: "grid", gridTemplateColumns: "1fr auto", gap: 6, alignItems: "center" } },
+        scalars.map(k => h("label", { key: k, style: { display: "grid", gridTemplateColumns: "1fr auto", gap: 6, alignItems: "center" } },
           h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, k),
-          numCell(form[k], (schema.scalar_ranges || {})[k], (v) => setScalar(k, v))
+          numCell(form[k], (schema.scalar_ranges || {})[k], (v) => setScalar(k, v), k)
         ))
       ),
       h("div", { className: "hr" }),
