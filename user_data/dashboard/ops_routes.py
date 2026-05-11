@@ -103,12 +103,19 @@ def require_mcp_key(
     same-origin == local operator clicking the UI — allowed without bearer.
     External Hermes callers (different origin) must still send Authorization.
 
+    Defense-in-depth: also require the TCP peer to be loopback. P0-V binds
+    the dashboard to 127.0.0.1, so today the peer is always loopback when
+    bypassing — but if anyone ever adds a reverse proxy (nginx/caddy for
+    HTTPS), every proxied request would otherwise appear same-origin and
+    silently re-open the gate. See docs/HERMES_GATEWAY_RUNBOOK.md.
+
     Raises 503 if the key isn't configured (refuse-by-default), 401 if the
     caller's Bearer token doesn't match. Returns None on success.
     """
+    client_host = request.client.host if request.client else ""
     origin = request.headers.get("origin") or request.headers.get("referer") or ""
     host_header = request.headers.get("host") or ""
-    if host_header and origin:
+    if host_header and origin and client_host in ("127.0.0.1", "::1"):
         try:
             from urllib.parse import urlsplit
             origin_host = urlsplit(origin).netloc or origin

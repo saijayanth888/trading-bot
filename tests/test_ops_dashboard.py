@@ -207,3 +207,75 @@ async def test_resume_refuses_active_breaker(monkeypatch):
         await ops_routes.resume(FakeReq())
     assert exc.value.status_code == 409
     assert "breaker" in str(exc.value.detail).lower()
+
+
+# --------------------------------------------------------------------------
+# Auth — require_mcp_key same-origin exemption + defense-in-depth (B-17)
+# --------------------------------------------------------------------------
+
+
+class _FakeClient:
+    def __init__(self, host: str):
+        self.host = host
+
+
+class _FakeAuthReq:
+    """Minimal stand-in for fastapi.Request matching what require_mcp_key reads."""
+
+    def __init__(self, headers: dict, client_host: str = "127.0.0.1"):
+        # FastAPI normalises header lookup to lowercase; mirror that.
+        self.headers = {k.lower(): v for k, v in headers.items()}
+        self.client = _FakeClient(client_host)
+
+
+def test_pause_requires_auth_from_foreign_origin(monkeypatch):
+    """A request whose Origin doesn't match Host must NOT bypass auth even
+    if the peer is loopback (e.g. a reverse proxy injecting a spoofed
+    Origin). With no Bearer header, this must 401."""
+    from fastapi import HTTPException
+    monkeypatch.setattr(ops_routes, "_DASHBOARD_MCP_KEY", "test-key-for-b17")
+    req = _FakeAuthReq(
+        headers={"Origin": "http://evil.example.com", "Host": "localhost:8081"},
+        client_host="127.0.0.1",
+    )
+    with pytest.raises(HTTPException) as exc:
+        ops_routes.require_mcp_key(request=req, authorization=None)
+    assert exc.value.status_code == 401
+
+
+def test_pause_allows_same_origin_from_localhost(monkeypatch):
+    """Same Origin + Host AND loopback peer → bypass returns None (allowed)."""
+    monkeypatch.setattr(ops_routes, "_DASHBOARD_MCP_KEY", "test-key-for-b17")
+    req = _FakeAuthReq(
+        headers={"Origin": "http://localhost:8081", "Host": "localhost:8081"},
+        client_host="127.0.0.1",
+    )
+    assert ops_routes.require_mcp_key(request=req, authorization=None) is None
+
+
+def test_same_origin_from_non_loopback_peer_requires_auth(monkeypatch):
+    """Reverse-proxy scenario: Origin and Host match (proxy rewrites them)
+    but the peer is non-loopback (e.g. 10.0.0.5). Defense-in-depth must
+    refuse to bypass — bearer becomes required again."""
+    from fastapi import HTTPException
+    monkeypatch.setattr(ops_routes, "_DASHBOARD_MCP_KEY", "test-key-for-b17")
+    req = _FakeAuthReq(
+        headers={"Origin": "http://localhost:8081", "Host": "localhost:8081"},
+        client_host="10.0.0.5",
+    )
+    with pytest.raises(HTTPException) as exc:
+        ops_routes.require_mcp_key(request=req, authorization=None)
+    assert exc.value.status_code == 401
+
+
+def test_bearer_token_still_works_from_any_peer(monkeypatch):
+    """Cron jobs / MCP tools authenticate via Authorization: Bearer header
+    even from non-loopback peers. That path must remain unbroken."""
+    monkeypatch.setattr(ops_routes, "_DASHBOARD_MCP_KEY", "test-key-for-b17")
+    req = _FakeAuthReq(
+        headers={"Host": "localhost:8081"},  # no Origin -- bypass path skipped
+        client_host="10.0.0.5",
+    )
+    assert ops_routes.require_mcp_key(
+        request=req, authorization="Bearer test-key-for-b17"
+    ) is None
