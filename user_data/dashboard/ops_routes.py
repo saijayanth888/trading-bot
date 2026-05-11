@@ -33,7 +33,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from . import mcp_local, ops_db, ops_probes
-from .data_sources import _ensure_jwt, fetch_freqtrade_candles
+from .data_sources import _ensure_jwt, _invalidate_jwt, fetch_freqtrade_candles, ft_authed_get
 # NOTE: removed `from .stocks_sentiment import StocksSentimentFetcher` —
 # the placeholder pipeline was redundant. Per-symbol sentiment is already
 # produced by Shark's analyst_bull/analyst_bear/debate_orchestrator using
@@ -424,11 +424,12 @@ async def trades_risk():
 
         async def _ft():
             async with httpx.AsyncClient(timeout=ENDPOINT_TIMEOUT_S) as client:
-                token = await _ensure_jwt(client)
-                if token is None:
+                # ft_authed_get handles 401 → re-login → retry-once so a
+                # freqtrade restart no longer floods the dashboard with 401s
+                # until the cached JWT's 9-min TTL expires.
+                r = await ft_authed_get(client, "/api/v1/status", timeout=ENDPOINT_TIMEOUT_S)
+                if r is None:
                     return {"status": None, "open_trades": [], "error": "freqtrade auth failed"}
-                headers = {"Authorization": f"Bearer {token}"}
-                r = await client.get(f"{FREQTRADE_API_URL}/api/v1/status", headers=headers)
                 return {"status": r.status_code, "open_trades": r.json() if r.status_code == 200 else []}
 
         ft_data, db_data = await asyncio.wait_for(
@@ -473,12 +474,27 @@ async def trades_risk():
 
 
 async def _freqtrade_post(endpoint: str) -> tuple[int, dict | None, str | None]:
+    """POST to a freqtrade endpoint with auto re-auth on 401.
+
+    Pause/resume calls used to spend the rest of a 9-min TTL returning 401s
+    after a freqtrade restart — now we invalidate-and-retry-once exactly like
+    ft_authed_get does for the read side.
+    """
     async with httpx.AsyncClient(timeout=ENDPOINT_TIMEOUT_S) as client:
         token = await _ensure_jwt(client)
         if token is None:
             return 401, None, "freqtrade auth failed"
+        url = f"{FREQTRADE_API_URL}{endpoint}"
         headers = {"Authorization": f"Bearer {token}"}
-        r = await client.post(f"{FREQTRADE_API_URL}{endpoint}", headers=headers)
+        r = await client.post(url, headers=headers)
+        if r.status_code == 401:
+            logger.info("freqtrade POST %s 401 with cached JWT — refreshing token", endpoint)
+            _invalidate_jwt()
+            token = await _ensure_jwt(client, force_refresh=True)
+            if token is None:
+                return 401, None, "freqtrade auth failed (post-refresh)"
+            headers = {"Authorization": f"Bearer {token}"}
+            r = await client.post(url, headers=headers)
         try:
             return r.status_code, r.json(), None
         except ValueError:
@@ -2500,6 +2516,24 @@ async def combined_portfolio():
     except Exception as exc:
         logger.exception("combined_portfolio: %s", exc)
         return _envelope("down", error=str(exc))
+
+    # Enrich with day-P&L (closed trades today, UTC) so the hero card has a
+    # real day number instead of "combined_peak − today" (which is drawdown).
+    # daily_pnl_usd / daily_pnl_pct come from trade_journal via ops_db; pct
+    # is fractional (e.g. -0.0123 = -1.23%).
+    try:
+        risk = await asyncio.wait_for(
+            loop.run_in_executor(None, ops_db.trades_risk_summary),
+            timeout=ENDPOINT_TIMEOUT_S,
+        )
+        day_pnl_usd = risk.get("daily_pnl_usd")
+        day_pnl_pct_frac = risk.get("daily_pnl_pct")  # fractional
+        status["day_pnl_usd"] = float(day_pnl_usd) if day_pnl_usd is not None else 0.0
+        status["day_pnl_pct"] = float(day_pnl_pct_frac) * 100 if day_pnl_pct_frac is not None else 0.0
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("combined_portfolio: day P&L enrichment failed: %s", exc)
+        status.setdefault("day_pnl_usd", 0.0)
+        status.setdefault("day_pnl_pct", 0.0)
 
     # Promote the breaker flag to the envelope status
     return _envelope(

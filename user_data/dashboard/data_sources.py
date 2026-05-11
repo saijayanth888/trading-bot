@@ -83,10 +83,19 @@ _jwt_token: str | None = None
 _jwt_expires_at: datetime | None = None
 
 
-async def _ensure_jwt(client: httpx.AsyncClient) -> str | None:
-    """Login once, cache the JWT until ~9 minutes have passed."""
+async def _ensure_jwt(client: httpx.AsyncClient, force_refresh: bool = False) -> str | None:
+    """Login once, cache the JWT until ~9 minutes have passed.
+
+    When ``force_refresh`` is True we drop the cached token and re-login —
+    used by ``ft_authed_get`` to recover from server-side 401s (freqtrade
+    rotates its signing key on restart, invalidating our cached JWT before
+    the 9-minute TTL expires).
+    """
     global _jwt_token, _jwt_expires_at
     async with _jwt_lock:
+        if force_refresh:
+            _jwt_token = None
+            _jwt_expires_at = None
         if _jwt_token and _jwt_expires_at and datetime.now(timezone.utc) < _jwt_expires_at:
             return _jwt_token
         if not FREQTRADE_PASS:
@@ -108,6 +117,57 @@ async def _ensure_jwt(client: httpx.AsyncClient) -> str | None:
             return None
 
 
+def _invalidate_jwt() -> None:
+    """Drop the cached JWT so the next caller re-logs in.
+
+    Used by ``ft_authed_get`` after a 401 — fixes the "78 401s in 30 min"
+    cascade where freqtrade rotated keys (restart, reload_config) but our
+    cache kept the stale token until the 9-min TTL expired. Synchronous so
+    it can be called from inside the request flow without re-acquiring the
+    asyncio lock.
+    """
+    global _jwt_token, _jwt_expires_at
+    _jwt_token = None
+    _jwt_expires_at = None
+
+
+async def ft_authed_get(
+    client: httpx.AsyncClient,
+    path: str,
+    *,
+    params: dict | None = None,
+    timeout: float = 5.0,
+) -> httpx.Response | None:
+    """GET <freqtrade>/path with the cached JWT; retry once on 401.
+
+    Pattern:
+      1. Attach the cached/freshly-issued token via _ensure_jwt().
+      2. Issue the GET.
+      3. If response is 401, invalidate the cache, force-refresh, retry ONCE.
+      4. Returns the (possibly-second-attempt) Response; None if no token at all.
+
+    This is the single hot path that previously produced the 78 401s/30 min
+    flood in the dashboard logs whenever freqtrade restarted — we now
+    transparently re-auth on first failure instead of 401-spinning for 9 min.
+    """
+    token = await _ensure_jwt(client)
+    if token is None:
+        return None
+    url = f"{FREQTRADE_API}{path}"
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = await client.get(url, params=params, headers=headers, timeout=timeout)
+    if resp.status_code != 401:
+        return resp
+    # 401 → drop the cache, force a re-login, retry once.
+    logger.info("freqtrade %s returned 401 with cached JWT — refreshing token", path)
+    _invalidate_jwt()
+    token = await _ensure_jwt(client, force_refresh=True)
+    if token is None:
+        return resp  # caller sees the 401 since we couldn't re-auth.
+    headers = {"Authorization": f"Bearer {token}"}
+    return await client.get(url, params=params, headers=headers, timeout=timeout)
+
+
 async def fetch_freqtrade_candles(
     pair: str, timeframe: str = "5m", limit: int = 500,
 ) -> pd.DataFrame | None:
@@ -122,9 +182,9 @@ async def fetch_freqtrade_candles(
     for telemetry rather than 0 rows.
     """
     async with httpx.AsyncClient() as client:
-        token = await _ensure_jwt(client)
-        if token is None:
-            return None
+        # Use ft_authed_get so a 401 (e.g. freqtrade restart rotated its
+        # signing key) triggers exactly one transparent re-login instead of
+        # silently returning None for the next ~9 minutes.
 
         # Try the requested limit first, then progressively smaller windows
         # that strip away the int64-tainted older rows.
@@ -136,12 +196,14 @@ async def fetch_freqtrade_candles(
         payload: dict[str, Any] | None = None
         for try_limit in ladder:
             try:
-                resp = await client.get(
-                    f"{FREQTRADE_API}/api/v1/pair_candles",
+                resp = await ft_authed_get(
+                    client,
+                    "/api/v1/pair_candles",
                     params={"pair": pair, "timeframe": timeframe, "limit": try_limit},
-                    headers={"Authorization": f"Bearer {token}"},
                     timeout=10.0,
                 )
+                if resp is None:
+                    return None
                 if resp.status_code == 200:
                     payload = resp.json()
                     if try_limit != limit:
@@ -178,21 +240,12 @@ async def fetch_freqtrade_status() -> dict[str, Any]:
     """Open-trade summary + balance from freqtrade."""
     out: dict[str, Any] = {"open_trades": [], "balance": None}
     async with httpx.AsyncClient() as client:
-        token = await _ensure_jwt(client)
-        if token is None:
-            return out
         try:
-            r1 = await client.get(
-                f"{FREQTRADE_API}/api/v1/status",
-                headers={"Authorization": f"Bearer {token}"}, timeout=5.0,
-            )
-            if r1.status_code == 200:
+            r1 = await ft_authed_get(client, "/api/v1/status", timeout=5.0)
+            if r1 is not None and r1.status_code == 200:
                 out["open_trades"] = r1.json() or []
-            r2 = await client.get(
-                f"{FREQTRADE_API}/api/v1/balance",
-                headers={"Authorization": f"Bearer {token}"}, timeout=5.0,
-            )
-            if r2.status_code == 200:
+            r2 = await ft_authed_get(client, "/api/v1/balance", timeout=5.0)
+            if r2 is not None and r2.status_code == 200:
                 out["balance"] = r2.json()
         except Exception as exc:
             logger.debug("freqtrade status fetch failed: %s", exc)

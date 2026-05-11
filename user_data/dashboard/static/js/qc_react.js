@@ -782,6 +782,11 @@
     // read "0h 0m" every refresh — not useful.
     const [uptime, setUptime] = useState("—");
     const [equity, setEquity] = useState({ value: null, deltaPct: null });
+    // Live pill state — previously these were hardcoded "PAPER · DRY-RUN" and
+    // "FREQTRADE OK" strings that lied through any incident. mode comes from
+    // /api/mode, ftUp from /api/ops/services.
+    const [mode, setMode] = useState({ label: "—", dry: true, healthy: false });
+    const [ftUp, setFtUp] = useState(null);   // null = unknown, true/false otherwise
     useEffect(() => {
       const t = setInterval(() => setClock(fmtClock()), 1000);
       const refresh = async () => {
@@ -809,6 +814,26 @@
             setEquity({ value: total, deltaPct: Number.isFinite(dd) ? -Math.abs(dd) : null });
           }
         } catch (_) { /* ignore */ }
+        // /api/mode — { mode: "paper"|"live", dry_run: bool, state: "running"|"paused"|... }
+        try {
+          const r = await fetch("/api/mode", { cache: "no-store" });
+          const j = await r.json().catch(() => ({}));
+          const m = String(j && j.mode || "").toLowerCase();
+          const dry = !!(j && j.dry_run);
+          const st = String(j && j.state || "").toLowerCase();
+          const healthy = ["running", "reload_config", "starting", "init"].includes(st);
+          const label = (m === "paper" || dry)
+            ? (dry ? "PAPER · DRY-RUN" : "PAPER")
+            : "LIVE";
+          setMode({ label, dry, healthy });
+        } catch (_) { /* ignore */ }
+        // /api/ops/services — { data: { freqtrade: { up: bool, ... }, ... } }
+        try {
+          const r = await fetch("/api/ops/services", { cache: "no-store" });
+          const j = await r.json().catch(() => ({}));
+          const ftSvc = (j && j.data && j.data.freqtrade) || {};
+          setFtUp(typeof ftSvc.up === "boolean" ? ftSvc.up : null);
+        } catch (_) { /* ignore */ }
       };
       refresh();
       const u = setInterval(refresh, 30000);
@@ -831,17 +856,21 @@
       h(
         "div",
         { className: "tb-group" },
+        // Mode pill — live data from /api/mode. PAPER → warn, LIVE → down
+        // (intentionally loud: live trading is the high-risk state).
         h(
           "span",
-          { className: "pill warn" },
-          h("span", { className: "dot warn pulse" }),
-          " PAPER · DRY-RUN"
+          { className: "pill " + (mode.dry ? "warn" : "down") },
+          h("span", { className: "dot " + (mode.dry ? "warn" : "down") + " pulse" }),
+          " " + mode.label
         ),
+        // freqtrade up/down — from /api/ops/services. null = unknown (don't
+        // claim health while we still haven't heard back).
         h(
           "span",
-          { className: "pill" },
-          h("span", { className: "dot up pulse" }),
-          " FREQTRADE OK"
+          { className: "pill " + (ftUp === true ? "up" : ftUp === false ? "down" : "") },
+          h("span", { className: "dot " + (ftUp === true ? "up pulse" : ftUp === false ? "down" : "dim") }),
+          " FREQTRADE " + (ftUp === true ? "OK" : ftUp === false ? "DOWN" : "—")
         )
       ),
       h("div", { className: "tb-divider" }),
@@ -923,18 +952,23 @@
 
   // ─────────────── Sidebar ───────────────
   function Sidebar({ active }) {
+    // Routes (see user_data/dashboard/app.py): /ops_spa and /dashboard_spa.
+    // The hand-off template carried over Vite-style `index.html`/`dashboard.html`
+    // hrefs that produce 404s under FastAPI's URL space — replaced with the
+    // server's actual routes here. Section sub-items still anchor under
+    // /ops_spa#<id> until the inline-section routes land.
     const items = [
       { sect: "MONITOR" },
-      { id: "ops", label: "Ops console", key: "1", href: "index.html" },
-      { id: "dashboard", label: "Pair dashboard", key: "2", href: "dashboard.html" },
+      { id: "ops", label: "Ops console", key: "1", href: "/ops_spa" },
+      { id: "dashboard", label: "Pair dashboard", key: "2", href: "/dashboard_spa" },
       { sect: "ANALYSIS" },
-      { id: "agent", label: "Agent timeline", key: "3", href: "index.html#agent" },
-      { id: "risk", label: "Risk & gates", key: "4", href: "index.html#risk" },
-      { id: "research", label: "Research feed", key: "5", href: "index.html#research" },
+      { id: "agent", label: "Agent timeline", key: "3", href: "/ops_spa#agent" },
+      { id: "risk", label: "Risk & gates", key: "4", href: "/ops_spa#risk" },
+      { id: "research", label: "Research feed", key: "5", href: "/ops_spa#research" },
       { sect: "SYSTEM" },
-      { id: "evolution", label: "Evolution", key: "6", href: "index.html#evolution" },
-      { id: "llm", label: "LLM providers", key: "7", href: "index.html#llm" },
-      { id: "config", label: "Config", key: "8", href: "index.html#config" },
+      { id: "evolution", label: "Evolution", key: "6", href: "/ops_spa#evolution" },
+      { id: "llm", label: "LLM providers", key: "7", href: "/ops_spa#llm" },
+      { id: "config", label: "Config", key: "8", href: "/ops_spa#config" },
     ];
     return h(
       "nav",

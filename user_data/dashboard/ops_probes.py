@@ -404,13 +404,34 @@ def _parse_mcp_log_line(line: str) -> dict[str, Any]:
     """Best-effort parse of a server.py audit-log line.
 
     Format produced by `_audit(tool, args, result)` is something like:
-       2026-05-08 14:12:00 INFO hermes_mcp tool=get_risk_status args=... result=...
+       2026-05-08T14:12:00Z INFO hermes_mcp tool=get_risk_status args=... result=...
+
+    The hermes-mcp logger emits timestamps in UTC (its `Formatter.converter`
+    is `time.gmtime`). We normalise to RFC-3339 with explicit `Z` so the
+    browser-side `new Date(ts)` treats the value as UTC. Without the Z,
+    Date() parses it as local time, producing the "-14400s ago" drift
+    operators were seeing.
     """
     import re
-    ts_m = re.search(r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})", line)
+    # Accept ISO 8601 with optional 'Z' or '+HH:MM' suffix from the log line.
+    ts_m = re.search(
+        r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)",
+        line,
+    )
     tool_m = re.search(r"tool=([\w_]+)", line)
+    ts: str | None = None
+    if ts_m:
+        raw_ts = ts_m.group(1)
+        # Normalise space → 'T' (RFC 3339 / ISO 8601 form).
+        if " " in raw_ts:
+            raw_ts = raw_ts.replace(" ", "T", 1)
+        # If no explicit timezone designator, the timestamp is UTC (hermes-mcp
+        # writes UTC times) — append 'Z' so JS Date() parses correctly.
+        if not (raw_ts.endswith("Z") or "+" in raw_ts[10:] or raw_ts.count("-") > 2):
+            raw_ts = raw_ts + "Z"
+        ts = raw_ts
     return {
-        "ts": ts_m.group(1) if ts_m else None,
+        "ts": ts,
         "tool": tool_m.group(1) if tool_m else None,
         "raw": line[-200:],
     }

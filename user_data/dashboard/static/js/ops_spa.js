@@ -213,15 +213,20 @@
     const stocksAlpaca = stocksEnv.alpaca || {};
     // The combined_portfolio envelope is flat: `crypto_equity`, `stocks_equity`,
     // `total_equity`, `combined_peak_equity`, `combined_drawdown_pct`,
-    // `circuit_breaker_active`, … No per-leg day_pnl available; day delta is
-    // therefore total_equity − combined_peak_equity (spec from operator).
+    // `circuit_breaker_active`, plus the newly-added `day_pnl_usd` and
+    // `day_pnl_pct` (closed-trade day P&L from trade_journal).
     const cryptoEq = Number(cp.crypto_equity || 0);
     const stocksEq = Number(cp.stocks_equity || stocksAlpaca.portfolio_value || 0);
     const equity = cp.total_equity != null ? Number(cp.total_equity) : (cryptoEq + stocksEq);
     const peak = cp.combined_peak_equity != null ? Number(cp.combined_peak_equity) : equity;
-    // Day P&L = total_equity − combined_peak_equity (#4)
-    const dayPnl = equity - peak;
-    const dayPct = peak > 0 ? (dayPnl / peak) * 100 : 0;
+    // Day P&L — prefer the backend-supplied figure (closed trades today, UTC).
+    // The legacy fallback (total_equity − combined_peak_equity) is the
+    // *drawdown*, never positive on bad days, never accurate on good ones.
+    // We keep it only when the backend omits day_pnl_usd entirely.
+    const dayPnl = cp.day_pnl_usd != null ? Number(cp.day_pnl_usd) : (equity - peak);
+    const dayPct = cp.day_pnl_pct != null
+      ? Number(cp.day_pnl_pct)
+      : (peak > 0 ? (dayPnl / peak) * 100 : 0);
     // Per-leg day P&L (kept for the Mini strip).
     const cryptoStart = Number((cp.sources && cp.sources.crypto_starting_equity) || cp.crypto_peak_equity || cryptoEq || 1);
     const cryptoDayPnl = cryptoEq - Number(cp.crypto_peak_equity || cryptoStart);
@@ -1163,9 +1168,18 @@
       .then(r => r.ok ? toast("PAUSED · dry_run=true", "ok") : toast("PAUSE failed · HTTP " + r.status, "warn"))
       .catch(e => toast("PAUSE error · " + e.message, "warn"));
 
-    const doResume = () => postJSON("/api/ops/resume", { reason: "operator manual resume via spa", confirm: true })
-      .then(r => r.ok ? toast("RESUMED · dry_run=false", "ok") : r.json().then(j => toast("RESUME refused · " + (j.detail || ("HTTP " + r.status)), "warn")))
-      .catch(e => toast("RESUME error · " + e.message, "warn"));
+    // RESUME re-enables order placement; it's irreversible-on-fill, so we
+    // require an explicit operator confirmation. Pause is one-click by design
+    // (always safe to pause), but resume is two-step.
+    const doResume = () => {
+      if (!window.confirm("Resume trading? This re-enables order placement on the live freqtrade instance.")) {
+        toast("RESUME cancelled", "info");
+        return;
+      }
+      return postJSON("/api/ops/resume", { reason: "operator manual resume via spa", confirm: true })
+        .then(r => r.ok ? toast("RESUMED · dry_run=false", "ok") : r.json().then(j => toast("RESUME refused · " + (j.detail || ("HTTP " + r.status)), "warn")))
+        .catch(e => toast("RESUME error · " + e.message, "warn"));
+    };
 
     const doReload = () => postJSON("/api/v1/reload_config", {})
       .then(r => {
@@ -1224,13 +1238,21 @@
         h(KillSwitch, {
           state: killState,
           onArm: () => setKillState("armed"),
+          // The wrapper around setKillState (OpsApp.setKillState) already
+          // POSTs /api/ops/pause when next === "killed" and /api/ops/resume
+          // when next === "normal" after "killed". This handler used to
+          // *also* POST /api/ops/pause directly, producing two simultaneous
+          // pause requests per kill press. Toasts now mirror the wrapper's
+          // single call: read window state via setTimeout(0) to give the
+          // wrapper time to fire, then surface result.
           onKill: () => {
             setKillState("killed");
-            postJSON("/api/ops/pause", { reason: "operator kill switch via spa" })
-              .then(r => r.ok ? toast("KILL · trading halted (dry_run=true)", "ok") : toast("KILL failed · HTTP " + r.status, "warn"))
-              .catch(e => toast("KILL error · " + e.message, "warn"));
+            toast("KILL · trading halt requested (dry_run=true)", "ok");
           },
-          onResume: () => setKillState("normal")
+          onResume: () => {
+            setKillState("normal");
+            toast("RESUMED · trading resume requested", "ok");
+          }
         }),
         h("span", { className: "dim", style: { fontSize: "var(--t-xs)", flex: 1, textAlign: "right" } },
           "ARM, then hold 1.5s to flatten all positions, cancel orders, halt strategy.")
@@ -1887,13 +1909,30 @@
     // Wrap setKillState so any "killed" transition (Topbar OR Quick Actions card)
     // fires POST /api/ops/pause with the operator-kill reason. The KillSwitch
     // component handles its own 1500ms hold-to-confirm + pointermove-cancel.
+    //
+    // RESUME path was missing — once the operator hit the kill switch, the
+    // visual chip flipped back to "normal" but no /api/ops/resume call was
+    // ever made, so trading stayed paused. Mirror the pause call here so the
+    // "normal" transition actually unpauses freqtrade.
+    const killStateRef = useRef("normal");
     const setKillState = useCallback((next) => {
+      const prev = killStateRef.current;
+      killStateRef.current = next;
       setKillStateRaw(next);
-      if (next === "killed") {
+      if (next === "killed" && prev !== "killed") {
         fetch("/api/ops/pause", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ reason: "operator kill switch via spa" }),
+        }).catch(() => { /* surfaced via Quick Actions toast if used there */ });
+      } else if (next === "normal" && prev === "killed") {
+        fetch("/api/ops/resume", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            reason: "operator kill switch resume via spa",
+            confirm: true,
+          }),
         }).catch(() => { /* surfaced via Quick Actions toast if used there */ });
       }
     }, []);

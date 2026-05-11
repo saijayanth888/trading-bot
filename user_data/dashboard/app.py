@@ -138,17 +138,10 @@ async def api_mode() -> dict[str, Any]:
     """Return the freqtrade run mode (paper / live / paused) for the topbar badge."""
     out = {"mode": "unknown", "state": "unknown", "dry_run": None}
     async with httpx.AsyncClient() as client:
-        from .data_sources import _ensure_jwt
-        token = await _ensure_jwt(client)
-        if token is None:
-            return out
+        from .data_sources import ft_authed_get
         try:
-            r = await client.get(
-                f"{os.environ.get('FREQTRADE_API_URL', 'http://freqtrade:8080')}/api/v1/show_config",
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=3.0,
-            )
-            if r.status_code == 200:
+            r = await ft_authed_get(client, "/api/v1/show_config", timeout=3.0)
+            if r is not None and r.status_code == 200:
                 cfg = r.json()
                 state = str(cfg.get("state", "unknown")).lower()
                 dry = bool(cfg.get("dry_run", True))
