@@ -1274,11 +1274,45 @@
         h("div", { className: "num" }, alpaca.age_seconds != null ? Math.floor(alpaca.age_seconds / 60) + "m" : "—")
       ),
       h("div", { className: "hr" }),
-      h("div", { className: "metric-label" }, "WHEEL · " + (wheel.open_positions || []).length + " open"),
-      h("div", { style: { fontSize: "var(--t-xs)", marginTop: 4 } },
-        "cumulative P&L: ", h("span", { className: "num " + ((wheel.cumulative_pnl_usd || 0) >= 0 ? "up" : "down") },
-          "$", fmtUSD(wheel.cumulative_pnl_usd || 0))
-      ),
+      (() => {
+        const positions = wheel.open_positions || [];
+        const totalPremium = positions.reduce((s, p) => s + Number(p.entry_credit || 0) * Number(p.qty || 1), 0);
+        const totalCollateral = positions
+          .filter(p => p.kind === "short_put")
+          .reduce((s, p) => s + Number(p.strike || 0) * Number(p.qty || 1) * 100, 0);
+        return h(F, null,
+          h("div", { style: { display: "flex", alignItems: "baseline", gap: "var(--s-3)" } },
+            h("div", { className: "metric-label" }, "WHEEL · " + positions.length + " open"),
+            h("span", { className: "tb-spacer", style: { flex: 1 } }),
+            h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } },
+              "premium $", fmtUSD(totalPremium), " · collateral $", fmtUSD(totalCollateral))
+          ),
+          positions.length > 0 && h("table", { className: "t", style: { marginTop: "var(--s-2)", fontSize: "var(--t-xs)" } },
+            h("thead", null, h("tr", null,
+              h("th", null, "Sym"),
+              h("th", null, "Type"),
+              h("th", null, "Qty"),
+              h("th", { style: { textAlign: "right" } }, "Strike"),
+              h("th", null, "Expiry"),
+              h("th", { style: { textAlign: "right" } }, "Premium")
+            )),
+            h("tbody", null, positions.map((p, i) => h("tr", { key: i },
+              h("td", null, h("strong", null, p.underlying)),
+              h("td", null, h("span", { className: "pill " + (p.kind === "short_put" ? "warn" : p.kind === "short_call" ? "warn" : "up"), style: { height: 16, fontSize: "var(--t-2xs)" } },
+                p.kind === "short_put" ? "SHORT PUT" : p.kind === "short_call" ? "SHORT CALL" : p.kind === "long_shares" ? "LONG" : (p.kind || "—"))),
+              h("td", null, p.qty),
+              h("td", { className: "mono", style: { textAlign: "right" } }, "$" + Number(p.strike || 0).toFixed(2)),
+              h("td", { className: "mono dim", style: { fontSize: "var(--t-2xs)" } }, (p.expiry || "—").slice(0, 10)),
+              h("td", { className: "num up", style: { textAlign: "right" } },
+                "$" + fmtUSD(Number(p.entry_credit || 0) * Number(p.qty || 1)))
+            )))
+          ),
+          h("div", { style: { fontSize: "var(--t-xs)", marginTop: 4 } },
+            "cumulative P&L: ", h("span", { className: "num " + ((wheel.cumulative_pnl_usd || 0) >= 0 ? "up" : "down") },
+              "$", fmtUSD(wheel.cumulative_pnl_usd || 0))
+          )
+        );
+      })(),
       h("div", { className: "hr" }),
       h("div", { className: "metric-label" }, "SHARK"),
       h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, fontSize: "var(--t-xs)", marginTop: 4 } },
