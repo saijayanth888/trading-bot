@@ -113,6 +113,49 @@
       hour: "numeric", minute: "2-digit", hour12: true,
     });
   }
+  // Stocks-aware tick formatter. NYSE candles span weekends + Fri-close
+  // gaps — a bare "3:40 PM" tick is ambiguous (operator confused Fri close
+  // for "current" on 2026-05-11). When venue=stocks AND visible range
+  // exceeds 24h, prepend "M/D " so each tick anchors to a date. Crypto
+  // (24/7 markets) keeps the plain HH:MM AM/PM. The Lightweight Charts v4
+  // tickMarkFormatter signature is (time, tickMarkType, locale); we read
+  // tickMarkType to print "Mon 5/11" on day-boundary ticks and "5/11 3:40 PM"
+  // on intra-day ticks so the date appears at least once per visible day.
+  // Refs:  https://tradingview.github.io/lightweight-charts/docs/api#tickmarkformatter
+  function _fmtStocksDated(ts, tickMarkType) {
+    const d = new Date(ts * 1000);
+    // TickMarkType: 0=Year, 1=Month, 2=DayOfMonth, 3=Time, 4=TimeWithSeconds.
+    // For Year / Month / DayOfMonth ticks render "Mon 5/11" (no time).
+    if (tickMarkType === 0 || tickMarkType === 1 || tickMarkType === 2) {
+      return d.toLocaleDateString("en-US", {
+        weekday: "short", month: "numeric", day: "numeric",
+      });
+    }
+    // Intra-day ticks: prepend M/D so a 3:40 PM Fri tick is unambiguous.
+    const date = d.toLocaleDateString("en-US", { month: "numeric", day: "numeric" });
+    const time = d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+    return `${date} ${time}`;
+  }
+  // Crosshair tooltip — always include date + time for stocks so hovering
+  // a candle confirms which session (Mon close vs current open) it belongs to.
+  function _fmtStocksTooltip(ts) {
+    const d = new Date(ts * 1000);
+    return d.toLocaleString("en-US", {
+      weekday: "short", month: "numeric", day: "numeric",
+      hour: "numeric", minute: "2-digit", hour12: true,
+    });
+  }
+  function isStocksVenue() {
+    return document.body && document.body.dataset && document.body.dataset.venue === "stocks";
+  }
+  function tickFormatter(ts, tickMarkType, locale) {
+    if (isStocksVenue()) return _fmtStocksDated(ts, tickMarkType);
+    return _fmt12h(ts);
+  }
+  function timeFormatter(ts) {
+    if (isStocksVenue()) return _fmtStocksTooltip(ts);
+    return _fmt12h(ts);
+  }
   const baseChartOpts = {
     layout: { background: { type: "solid", color: "transparent" }, textColor: "#a8b1cb" },
     grid:   { vertLines: { color: "rgba(138,147,179,0.08)" }, horzLines: { color: "rgba(138,147,179,0.08)" } },
@@ -121,11 +164,11 @@
       borderColor: "rgba(138,147,179,0.2)",
       timeVisible: true,
       secondsVisible: false,
-      tickMarkFormatter: (ts) => _fmt12h(ts),
+      tickMarkFormatter: tickFormatter,
     },
     localization: {
       locale: "en-US",
-      timeFormatter: _fmt12h,
+      timeFormatter: timeFormatter,
     },
     crosshair: { mode: 1 },
   };
@@ -713,6 +756,15 @@
       // apply to stocks (RSI/MACD aren't fed for stocks venue yet — the
       // empty TradingView watermarks looked broken in the morning sweep).
       document.body.dataset.venue = venue;
+      // Force the time-axis to recompute tick labels — our tickMarkFormatter
+      // closure reads document.body.dataset.venue at format time, but
+      // Lightweight Charts caches rendered axis labels until layout dirties.
+      // Re-applying timeScale options is the documented way to invalidate.
+      try {
+        [mainChart, rsiChart, macdChart].forEach((c) => {
+          c.applyOptions({ timeScale: { tickMarkFormatter: tickFormatter } });
+        });
+      } catch (_) { /* charts not built yet, no-op */ }
     }
 
     // Restore venue: ?venue= URL > URL pair > localStorage > active selection

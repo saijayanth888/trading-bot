@@ -34,6 +34,7 @@ from fastapi.templating import Jinja2Templates
 
 from . import mcp_local, ops_db, ops_probes
 from .data_sources import _ensure_jwt, fetch_freqtrade_candles
+from .stocks_sentiment import StocksSentimentFetcher
 
 logger = logging.getLogger(__name__)
 
@@ -323,6 +324,52 @@ async def sentiment():
         },
         error="sentiment row > 30 min old" if stale else None,
     )
+
+
+# --------------------------------------------------------------------------
+# /api/ops/stocks_sentiment
+# --------------------------------------------------------------------------
+#
+# Per-symbol news sentiment from Perplexity, mirroring the crypto /sentiment
+# pattern. Scaffold ships with placeholder data so the dashboard card can
+# render its final layout; the real Perplexity wiring is gated on
+# PERPLEXITY_API_KEY being provisioned (see stocks_sentiment.py for the TODO).
+#
+# Symbols come from WHEEL_SYMBOLS / DASHBOARD_STOCK_SYMBOLS — same list the
+# chart-page dropdown uses, so the card stays in sync with what the operator
+# can chart.
+
+_STOCKS_SENTIMENT_FETCHER: StocksSentimentFetcher | None = None
+
+
+def _stocks_sentiment_fetcher() -> StocksSentimentFetcher:
+    global _STOCKS_SENTIMENT_FETCHER
+    if _STOCKS_SENTIMENT_FETCHER is None:
+        raw = os.environ.get(
+            "DASHBOARD_STOCK_SYMBOLS",
+            os.environ.get("WHEEL_SYMBOLS", "SOFI,PLTR,NVDA,AMD,SPY"),
+        )
+        symbols = [s.strip().upper() for s in raw.split(",") if s.strip()]
+        _STOCKS_SENTIMENT_FETCHER = StocksSentimentFetcher(symbols)
+    return _STOCKS_SENTIMENT_FETCHER
+
+
+@router.get("/stocks_sentiment")
+async def stocks_sentiment():
+    fetcher = _stocks_sentiment_fetcher()
+    try:
+        envelope = await asyncio.wait_for(fetcher.snapshot(), timeout=ENDPOINT_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        return _envelope("down", error="stocks_sentiment snapshot timed out")
+    except Exception as exc:
+        logger.exception("stocks_sentiment snapshot failed")
+        return _envelope("down", error=str(exc))
+
+    # Until the Perplexity key is wired, mark the envelope "degraded" so the
+    # card can show a "PLACEHOLDER" pill without claiming live data.
+    status = "ok" if fetcher.is_live else "degraded"
+    err = None if fetcher.is_live else "Perplexity not wired — placeholder data"
+    return _envelope(status, data=envelope, error=err)
 
 
 # --------------------------------------------------------------------------
