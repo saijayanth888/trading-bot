@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-10T11:57:08.727801",
+  "generated_at": "2026-05-11T17:30:35.493116",
   "state": {
     "peak_equity": 100000.0,
     "circuit_breaker_triggered": false,
@@ -71,6 +71,12 @@
       "equity": 100000.0,
       "cash": 100000.0,
       "day_pnl": 0.0
+    },
+    {
+      "date": "2026-05-11",
+      "equity": 99939.96,
+      "cash": 100629.96,
+      "day_pnl": -60.04
     }
   ],
   "daily_snapshots": [
@@ -153,6 +159,37 @@
       "positions": [],
       "trades_today": 0,
       "trades_this_week": 0
+    },
+    {
+      "date": "2026-05-11",
+      "equity": 99939.96,
+      "cash": 100629.96,
+      "day_pnl_dollars": -60.0399999999936,
+      "day_pnl_pct": -0.0600399999999936,
+      "positions": [
+        {
+          "symbol": "NVDA260522P00215000",
+          "qty": -1.0,
+          "avg_entry_price": 5.95,
+          "current_price": 6.6,
+          "unrealized_pl": -65.0,
+          "unrealized_plpc": -0.10924,
+          "market_value": -660.0,
+          "side": "short"
+        },
+        {
+          "symbol": "SOFI260522P00015500",
+          "qty": -1.0,
+          "avg_entry_price": 0.35,
+          "current_price": 0.3,
+          "unrealized_pl": 5.0,
+          "unrealized_plpc": 0.14286,
+          "market_value": -30.0,
+          "side": "short"
+        }
+      ],
+      "trades_today": 0,
+      "trades_this_week": 0
     }
   ],
   "open_trades": {},
@@ -166,10 +203,10 @@
     "best_trade": 0.0,
     "worst_trade": 0.0,
     "avg_r_multiple": 0.0,
-    "max_drawdown_pct": 0.0,
-    "current_drawdown_pct": 0.0
+    "max_drawdown_pct": 0.06,
+    "current_drawdown_pct": 0.06
   },
   "handoff": {
-    "raw": "# Daily Handoff \u2014 2026-05-08\n\n## pre-market | 10:03 EDT\nconfirmed: NVDA\nskipped: GOOGL, CCJ, AMD, ORCL, CVX\nmarket: bullish=10 bearish=3 of 30\nregime: BEAR_VOLATILE\nmacro: NORMAL\nlessons: none\n\n## pre-execute | 13:45 EDT\nvalidated: NVDA\nrejected: none\n\n## market-open | 13:46 EDT\ntraded: none\ncount: 0\nregime: BEAR_VOLATILE\nmacro: No major macro events nearby\n\n## daily-summary | 11:54 EDT\nequity: $100,000.00\ncash: $100,000.00\nday_pnl: +0.00%\nopen_positions: 0\ncircuit_breaker: OK\n\n## daily-summary | 11:57 EDT\nequity: $100,000.00\ncash: $100,000.00\nday_pnl: +0.00%\nopen_positions: 0\ncircuit_breaker: OK\n"
+    "raw": "# Daily Handoff \u2014 2026-05-11\n\n## pre-market | 09:14 EDT\nconfirmed: NVDA\nskipped: GOOGL, AMD, CCJ, CRDO, XOM\nmarket: bullish=9 bearish=1 of 30\nregime: BEAR_VOLATILE\nmacro: ELEVATED\nlessons: none\n\n## daily-summary | 17:30 EDT\nequity: $99,939.96\ncash: $100,629.96\nday_pnl: -0.06%\nopen_positions: 2\ncircuit_breaker: OK\n"
   }
 }

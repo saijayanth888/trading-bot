@@ -65,3 +65,7 @@ _None — paper trading mode initialized 2026-04-25_
 ### 2026-05-10 — EOD Snapshot
 **Portfolio:** $100000.00 | **Cash:** $100000.00 | **Day P&L:** +0.00 | **Open Positions:** N/A
 
+
+### 2026-05-11 — EOD Snapshot
+**Portfolio:** $99939.96 | **Cash:** $100629.96 | **Day P&L:** -60.04 | **Open Positions:** 2
+
