@@ -980,22 +980,32 @@
 
   // ─────────────── STOCKS ML — Shark TFT status (live training banner) ───────────────
   function StocksMLLive({ data }) {
-    const env = envelopeData(data.stocks_ml) || {};
+    const slot = slotState(data, "stocks_ml");
+    const env = envelopeData(slot.env) || {};
     const live = env.training_state === "running";
     const cur = env.current_epoch;
     const tot = env.epochs_target;
     const progress = (cur && tot) ? (cur / tot) * 100 : 0;
+
+    if (slot.phase === "down") {
+      return h(Card, {
+        num: "09", title: "Stocks · Shark TFT",
+        sub: "endpoint unavailable",
+        right: cardRight(slot.fetchedAt)
+      },
+        h(EmptyState, { reason: slot.reason, fetchedAt: slot.fetchedAt, period: 10 })
+      );
+    }
+
     return h(Card, {
       num: "09", title: "Stocks · Shark TFT",
       sub: env.weights_present ? "weights present" : "no model yet (Sun 11 PM ET)",
-      right: h(F, null,
-        h(TimeSince, { ts: data.stocks_ml_fetched_at, className: "mono dim", style: { fontSize: "var(--t-2xs)", marginRight: 8 } }),
+      right: cardRight(slot.fetchedAt,
         live
           ? h("span", { className: "pill accent" }, h("span", { className: "dot accent pulse" }), " LIVE TRAINING")
           : env.ml_enabled
             ? h("span", { className: "pill up" }, "ML ENABLED")
-            : h("span", { className: "pill" }, "ML ALPHA")
-      )
+            : h("span", { className: "pill" }, "ML ALPHA"))
     },
       live && h("div", null,
         h("div", { className: "metric-label" }, "EPOCH " + cur + " / " + tot + " · loss " + (env.current_loss || "—") + " · val_acc " + (env.current_val_acc || "—")),
@@ -1029,14 +1039,26 @@
 
   // ─────────────── STOCKS — wheel + shark Alpaca state ───────────────
   function StocksLive({ data }) {
-    const env = envelopeData(data.stocks) || {};
+    const slot = slotState(data, "stocks");
+    const env = envelopeData(slot.env) || {};
     const alpaca = env.alpaca || {};
     const wheel = env.wheel || {};
     const shark = env.shark || {};
+
+    if (slot.phase === "down") {
+      return h(Card, {
+        num: "10", title: "Stocks · Wheel + Shark",
+        sub: "endpoint unavailable",
+        right: cardRight(slot.fetchedAt)
+      },
+        h(EmptyState, { reason: slot.reason, fetchedAt: slot.fetchedAt, period: 10 })
+      );
+    }
+
     return h(Card, {
       num: "10", title: "Stocks · Wheel + Shark",
       sub: alpaca.paper ? "Alpaca · paper" : "Alpaca · live",
-      right: h(TimeSince, { ts: data.stocks_fetched_at, className: "mono dim", style: { fontSize: "var(--t-2xs)" } })
+      right: cardRight(slot.fetchedAt)
     },
       h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, fontSize: "var(--t-xs)" } },
         h("div", { className: "dim mono" }, "PORTFOLIO"),
@@ -1067,17 +1089,27 @@
 
   // ─────────────── MCP — wire status ───────────────
   function MCPCardLive({ data }) {
-    const env = envelopeData(data.mcp) || {};
+    const slot = slotState(data, "mcp");
+    const env = envelopeData(slot.env) || {};
     const probe = env.probe || {};
     const reachable = !!probe.ok_for_streamable_http;
     const lastCall = env.last_call || {};
+
+    if (slot.phase === "down") {
+      return h(Card, {
+        num: "11", title: "MCP · wire status",
+        sub: "endpoint unavailable",
+        right: cardRight(slot.fetchedAt)
+      },
+        h(EmptyState, { reason: slot.reason, fetchedAt: slot.fetchedAt, period: 10 })
+      );
+    }
+
     return h(Card, {
       num: "11", title: "MCP · wire status",
       sub: reachable ? "Hermes MCP reachable" : "MCP unreachable",
-      right: h(F, null,
-        h(TimeSince, { ts: data.mcp_fetched_at, className: "mono dim", style: { fontSize: "var(--t-2xs)", marginRight: 8 } }),
-        h("span", { className: "pill " + (reachable ? "up" : "down") }, h("span", { className: "dot " + (reachable ? "up" : "down") + " pulse" }), " ", reachable ? "OK" : "DOWN")
-      )
+      right: cardRight(slot.fetchedAt,
+        h("span", { className: "pill " + (reachable ? "up" : "down") }, h("span", { className: "dot " + (reachable ? "up" : "down") + " pulse" }), " ", reachable ? "OK" : "DOWN"))
     },
       h("div", { style: { display: "grid", gridTemplateColumns: "1fr 2fr", gap: 6, fontSize: "var(--t-xs)" } },
         h("div", { className: "dim mono" }, "URL"),
@@ -1584,16 +1616,26 @@
 
   // ─────────────── SENTIMENT card (compact) ───────────────
   function SentimentLive({ data }) {
-    const env = envelopeData(data.sentiment) || {};
+    const slot = slotState(data, "sentiment");
+    const env = envelopeData(slot.env) || {};
     const score = env.score;
     const klass = score == null ? "info" : score >= 0 ? "up" : "down";
+
+    if (slot.phase === "down") {
+      return h(Card, {
+        num: "13", title: "Sentiment aggregate",
+        sub: "endpoint unavailable",
+        right: cardRight(slot.fetchedAt)
+      },
+        h(EmptyState, { reason: slot.reason, fetchedAt: slot.fetchedAt, period: 10 })
+      );
+    }
+
     return h(Card, {
       num: "13", title: "Sentiment aggregate",
       sub: score != null ? "net " + (score >= 0 ? "+" : "") + score.toFixed(2) : "—",
-      right: h(F, null,
-        h(TimeSince, { ts: data.sentiment_fetched_at, className: "mono dim", style: { fontSize: "var(--t-2xs)", marginRight: 8 } }),
-        h("span", { className: "pill " + klass }, score == null ? "—" : score >= 0 ? "BULLISH" : "BEARISH")
-      )
+      right: cardRight(slot.fetchedAt,
+        h("span", { className: "pill " + klass }, score == null ? "—" : score >= 0 ? "BULLISH" : "BEARISH"))
     },
       h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, fontSize: "var(--t-xs)" } },
         h("div", { className: "dim mono" }, "DEEP (Claude)"),
@@ -1616,7 +1658,8 @@
 
   // ─────────────── CHAMPION GENOME (slow card, 60s) ───────────────
   function ChampionCardLive({ data }) {
-    const env = envelopeData(data.ept_champion) || {};
+    const slot = slotState(data, "ept_champion");
+    const env = envelopeData(slot.env) || {};
     const id = env.member_id || env.genome_id || env.id || "—";
     const metrics = env.metrics || {};
     const sharpe = metrics.sharpe_ratio != null ? metrics.sharpe_ratio : metrics.sharpe;
@@ -1625,10 +1668,21 @@
     const nTrades = metrics.num_trades != null ? metrics.num_trades : metrics.n_trades;
     const fitness = env.fitness;
     const genome = env.genome || {};
+
+    if (slot.phase === "down") {
+      return h(Card, {
+        num: "14", title: "EPT · champion genome",
+        sub: "endpoint unavailable",
+        right: cardRight(slot.fetchedAt)
+      },
+        h(EmptyState, { reason: slot.reason, fetchedAt: slot.fetchedAt, period: 60 })
+      );
+    }
+
     return h(Card, {
       num: "14", title: "EPT · champion genome",
       sub: "evolution head · refresh 60s",
-      right: h(TimeSince, { ts: data.ept_champion_fetched_at, className: "mono dim", style: { fontSize: "var(--t-2xs)" } })
+      right: cardRight(slot.fetchedAt)
     },
       h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, fontSize: "var(--t-xs)" } },
         h("div", { className: "dim mono" }, "ID"),            h("div", { className: "num accent" }, id),
@@ -1647,7 +1701,8 @@
 
   // ─────────────── TRADES RISK — daily PnL, DD, breaker ───────────────
   function TradesRiskLive({ data }) {
-    const env = envelopeData(data.trades_risk) || {};
+    const slot = slotState(data, "trades_risk");
+    const env = envelopeData(slot.env) || {};
     // daily_pnl_pct, drawdown_pct_30d, live_tape[].pnl_pct are all fractional
     // ratios (e.g. -0.012305 = -1.23%) — multiply by 100 before fmtPct.
     const dayPnl = Number(env.daily_pnl_usd || 0);
@@ -1655,15 +1710,24 @@
     const dd30 = env.drawdown_pct_30d != null ? Number(env.drawdown_pct_30d) * 100 : null;
     const cb = env.circuit_breaker || {};
     const cbActive = cb.active === true;
+
+    if (slot.phase === "down") {
+      return h(Card, {
+        num: "15", title: "Trades & risk · 24h",
+        sub: "endpoint unavailable",
+        right: cardRight(slot.fetchedAt)
+      },
+        h(EmptyState, { reason: slot.reason, fetchedAt: slot.fetchedAt, period: 10 })
+      );
+    }
+
     return h(Card, {
       num: "15", title: "Trades & risk · 24h",
       sub: (env.open_count || 0) + " / " + (env.max_open || 0) + " open · " + (env.closed_today || 0) + " closed today",
-      right: h(F, null,
-        h(TimeSince, { ts: data.trades_risk_fetched_at, className: "mono dim", style: { fontSize: "var(--t-2xs)", marginRight: 8 } }),
+      right: cardRight(slot.fetchedAt,
         cbActive
           ? h("span", { className: "pill down" }, h("span", { className: "dot down pulse" }), " BREAKER")
-          : h("span", { className: "pill up" }, h("span", { className: "dot up" }), " OK")
-      )
+          : h("span", { className: "pill up" }, h("span", { className: "dot up" }), " OK"))
     },
       h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, fontSize: "var(--t-xs)" } },
         h("div", { className: "dim mono" }, "DAY PNL"),
@@ -1697,13 +1761,25 @@
 
   // ─────────────── BREAKERS detail card ───────────────
   function CircuitBreakersLive({ data }) {
-    const env = envelopeData(data.circuit_breakers) || {};
+    const slot = slotState(data, "circuit_breakers");
+    const env = envelopeData(slot.env) || {};
     const breakers = env.breakers || [];
     const summary = env.summary || {};
+
+    if (slot.phase === "down") {
+      return h(Card, {
+        num: "16", title: "Circuit breakers",
+        sub: "endpoint unavailable",
+        right: cardRight(slot.fetchedAt)
+      },
+        h(EmptyState, { reason: slot.reason, fetchedAt: slot.fetchedAt, period: 10 })
+      );
+    }
+
     return h(Card, {
       num: "16", title: "Circuit breakers",
       sub: (summary.open || 0) + " open · " + (summary.half_open || 0) + " half-open · " + (summary.total || 0) + " total",
-      right: h(TimeSince, { ts: data.circuit_breakers_fetched_at, className: "mono dim", style: { fontSize: "var(--t-2xs)" } })
+      right: cardRight(slot.fetchedAt)
     },
       breakers.length === 0
         ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)" } }, "no breakers registered")
