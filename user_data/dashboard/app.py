@@ -102,6 +102,24 @@ async def index(request: Request) -> HTMLResponse:
 
 
 # ---------------------------------------------------------------------------
+# A/B SPA shells — thin React 18 templates served alongside legacy /ops and /
+# Operators visit these to compare the SPA against the live pages without
+# breaking what's running. See user_data/dashboard/static/js/{ops,dashboard}_spa.js
+# for the React.createElement port of /tmp/qtb-handoff/quanta-trading-bot/project.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/ops_spa", response_class=HTMLResponse, name="ops_spa_page")
+async def ops_spa_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request, "ops_spa.html", {})
+
+
+@app.get("/dashboard_spa", response_class=HTMLResponse, name="dashboard_spa_page")
+async def dashboard_spa_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request, "dashboard_spa.html", {})
+
+
+# ---------------------------------------------------------------------------
 # Pairs
 # ---------------------------------------------------------------------------
 
