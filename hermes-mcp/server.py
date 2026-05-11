@@ -50,6 +50,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
@@ -105,10 +106,17 @@ LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 log = logging.getLogger("hermes_mcp")
 if not log.handlers:
     h = RotatingFileHandler(str(LOG_PATH), maxBytes=2_000_000, backupCount=5)
-    h.setFormatter(logging.Formatter(
+    fmt = logging.Formatter(
         "%(asctime)s %(levelname)s %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%SZ",
-    ))
+    )
+    # Emit asctime in UTC. Without this override, %(asctime)s uses
+    # `time.localtime` while we suffix the datefmt with literal 'Z', producing
+    # local-time-stamped strings that *claim* to be UTC. JS Date() then
+    # silently drifts by the host's offset (US/Eastern → -4h: see the
+    # "-14400s ago" report in REVIEW_2026-05-11 §1.5).
+    fmt.converter = time.gmtime
+    h.setFormatter(fmt)
     log.addHandler(h)
     log.setLevel(logging.INFO)
 
@@ -192,9 +200,13 @@ _jwt_expires_at: datetime | None = None
 _jwt_lock = asyncio.Lock()
 
 
-async def _ft_token(client: httpx.AsyncClient) -> str | None:
+async def _ft_token(client: httpx.AsyncClient, force_refresh: bool = False) -> str | None:
+    """Cached JWT login. ``force_refresh`` drops the cache before re-issuing."""
     global _jwt_token, _jwt_expires_at
     async with _jwt_lock:
+        if force_refresh:
+            _jwt_token = None
+            _jwt_expires_at = None
         if _jwt_token and _jwt_expires_at and datetime.now(timezone.utc) < _jwt_expires_at:
             return _jwt_token
         if not FREQTRADE_PASS:
@@ -215,11 +227,26 @@ async def _ft_token(client: httpx.AsyncClient) -> str | None:
 
 
 async def _ft_get(path: str) -> Any:
+    """Authenticated freqtrade GET with one 401 → re-login retry.
+
+    The cached JWT survives the 9-min TTL but is silently invalidated by a
+    freqtrade restart (signing key rotation). Without a 401 retry, the next
+    call onward fails until the TTL expires — see the "78 401s in 30 min"
+    flood that prompted REVIEW_2026-05-11 §2.1.
+    """
     async with httpx.AsyncClient() as client:
         token = await _ft_token(client)
-        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        if not token:
+            return None
+        url = f"{FREQTRADE_API}{path}"
         try:
-            r = await client.get(f"{FREQTRADE_API}{path}", headers=headers, timeout=10.0)
+            r = await client.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=10.0)
+            if r.status_code == 401:
+                log.info("freqtrade %s returned 401 — refreshing JWT", path)
+                token = await _ft_token(client, force_refresh=True)
+                if not token:
+                    return None
+                r = await client.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=10.0)
             if r.status_code != 200:
                 return None
             return r.json()

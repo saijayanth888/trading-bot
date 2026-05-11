@@ -334,8 +334,13 @@ async function refreshTrades() {
   if (!env.data) { body.textContent = env.error || "—"; return; }
   const d = env.data;
 
-  const dailyClass = (d.daily_pnl_pct || 0) > 0 ? "ok" : (d.daily_pnl_pct || 0) < 0 ? "bad" : "muted";
-  const dd30 = d.drawdown_pct_30d ?? 0;
+  // Backend emits daily_pnl_pct and drawdown_pct_30d as fractions (e.g. -0.012305 = -1.23%).
+  // Convert to percent here so fmtPct (which formats a number as %) shows correct value.
+  const dailyPctRaw = Number(d.daily_pnl_pct || 0);
+  const dailyPct = dailyPctRaw * 100;
+  const dailyClass = dailyPctRaw > 0 ? "ok" : dailyPctRaw < 0 ? "bad" : "muted";
+  const dd30Raw = Number(d.drawdown_pct_30d ?? 0);
+  const dd30 = dd30Raw * 100;
   const ddClass = dd30 < -8 ? "bad" : dd30 < -5 ? "warn" : "muted";
   const breakerHtml = d.circuit_breaker && d.circuit_breaker.active
     ? "<span class=\"bad\">ACTIVE</span>"
@@ -346,7 +351,7 @@ async function refreshTrades() {
       `<div><div class="muted" style="font-size:11px;">open</div>` +
       `<div style="font-size:22px;">${esc(d.open_count)}<span class="muted">/${esc(d.max_open)}</span></div></div>` +
       `<div><div class="muted" style="font-size:11px;">daily P&amp;L</div>` +
-      `<div class="${dailyClass}" style="font-size:22px;">${esc(fmtUsd(d.daily_pnl_usd))} <small>${esc(fmtPct(d.daily_pnl_pct))}</small></div></div>` +
+      `<div class="${dailyClass}" style="font-size:22px;">${esc(fmtUsd(d.daily_pnl_usd))} <small>${esc(fmtPct(dailyPct))}</small></div></div>` +
       `<div><div class="muted" style="font-size:11px;">DD 30d</div>` +
       `<div class="${ddClass}" style="font-size:22px;">${esc(fmtPct(dd30))}</div></div>` +
       `<div><div class="muted" style="font-size:11px;">breaker</div>` +
@@ -377,7 +382,9 @@ async function refreshTrades() {
       const t_str = t.exit_time ? new Date(t.exit_time).toLocaleTimeString("en-US", {
         hour: "numeric", minute: "2-digit", hour12: true, timeZone: "America/New_York",
       }) + " ET" : "—";
-      html += `<tr><td>${esc(t.pair)}</td><td>${esc(t.side)}</td><td class="muted">${esc(t.regime_at_entry || "—")}</td><td>${esc(fmtPct(t.pnl_pct))}</td><td class="muted">${esc(t_str)}</td></tr>`;
+      // live_tape pnl_pct is fractional (e.g. -0.0123 = -1.23%) — convert to percent for fmtPct.
+      const tapePct = t.pnl_pct != null ? Number(t.pnl_pct) * 100 : null;
+      html += `<tr><td>${esc(t.pair)}</td><td>${esc(t.side)}</td><td class="muted">${esc(t.regime_at_entry || "—")}</td><td>${esc(fmtPct(tapePct))}</td><td class="muted">${esc(t_str)}</td></tr>`;
     }
     html += `</tbody></table>`;
   }

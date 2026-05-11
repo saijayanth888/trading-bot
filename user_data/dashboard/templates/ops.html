@@ -1506,14 +1506,44 @@
       }
       refreshTopbar();
       setInterval(refreshTopbar, 10000);
-      const t0 = Date.now();
+
+      // UPTIME: real freqtrade process age (not browser-tab age).
+      // Backend exposes a per-service started_at via /api/ops/uptime; we cache
+      // it locally and advance the displayed value with a 1s interval so the
+      // pill stays smooth between polls. Re-syncs every 60s in case freqtrade
+      // restarts.
+      let botStartedAt = null;       // unix seconds (UTC), backend-provided
+      let dashStartedAt = null;
+      async function syncUptime() {
+        try {
+          const r = await fetch("/api/ops/uptime").then(r => r.json());
+          const d = (r && r.data) || {};
+          const ft = d.freqtrade || {};
+          const ds = d.dashboard || {};
+          if (ft.started_at) botStartedAt = Number(ft.started_at);
+          if (ds.started_at) dashStartedAt = Number(ds.started_at);
+        } catch (_) {}
+      }
+      function fmtAge(s) {
+        if (s == null || !Number.isFinite(s) || s < 0) return "—";
+        const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+        return `${h}h ${String(m).padStart(2,"0")}m`;
+      }
       function tickUptime() {
         if (!uptimeEl) return;
-        const s = Math.floor((Date.now() - t0) / 1000);
-        const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
-        uptimeEl.textContent = `${h}h ${String(m).padStart(2,"0")}m`;
+        // Prefer bot uptime; fall back to dashboard uptime if freqtrade
+        // hasn't reported a startup yet (e.g. logs unreadable).
+        const nowS = Math.floor(Date.now() / 1000);
+        let started = botStartedAt || dashStartedAt;
+        if (!started) {
+          uptimeEl.textContent = "—";
+          return;
+        }
+        uptimeEl.textContent = fmtAge(nowS - started);
       }
-      tickUptime(); setInterval(tickUptime, 5000);
+      syncUptime().then(tickUptime);
+      setInterval(syncUptime, 60000);
+      setInterval(tickUptime, 5000);
     })();
   </script>
 
@@ -2093,9 +2123,11 @@
           const se = d.stocks_equity || 0;
           const cd = d.combined_drawdown_pct || 0;          // already in %
           const cr_pnl = (d.sources && d.sources.crypto_realised_pnl) || 0;
-          const startTotal = (d.combined_peak_equity || 119000);
-          const dayPnl = te - startTotal;
-          const dayPct = startTotal ? (dayPnl / startTotal) * 100 : 0;
+          // Use backend-supplied day P&L (closed-trade P&L today, UTC).
+          // Previous code computed (te − combined_peak_equity), which is the
+          // drawdown — never positive on bad days, never accurate on good ones.
+          const dayPnl = Number(d.day_pnl_usd != null ? d.day_pnl_usd : 0);
+          const dayPct = Number(d.day_pnl_pct != null ? d.day_pnl_pct : 0);
 
           // Big equity
           set("hero-equity-value", fmtUsd(te));
@@ -2114,13 +2146,17 @@
             pctEl.style.fontSize = "var(--t-base)";
           }
 
-          // Drawdown line + bar
-          set("hero-dd-line", `DD ${cd.toFixed(2)}% / pause 8% / kill 10%`);
+          // Drawdown line + bar — use the configured combined DD threshold
+          // (from unified_risk.COMBINED_DD_THRESHOLD_PCT, surfaced as
+          // `threshold_pct`). Pause band is 80% of the kill threshold.
+          const killPct  = Number(d.threshold_pct || 10);
+          const pausePct = killPct * 0.8;
+          set("hero-dd-line", `DD ${cd.toFixed(2)}% / pause ${pausePct.toFixed(0)}% / kill ${killPct.toFixed(0)}%`);
           const fill = document.getElementById("hero-dd-fill");
           if (fill) {
-            const pct = Math.min(100, Math.max(0, (Math.abs(cd) / 10) * 100));
+            const pct = Math.min(100, Math.max(0, (Math.abs(cd) / killPct) * 100));
             fill.style.width = pct + "%";
-            fill.className = "bar-fill " + (Math.abs(cd) >= 8 ? "down" : Math.abs(cd) >= 5 ? "warn" : "up");
+            fill.className = "bar-fill " + (Math.abs(cd) >= pausePct ? "down" : Math.abs(cd) >= pausePct * 0.625 ? "warn" : "up");
           }
 
           // Mini row

@@ -230,14 +230,20 @@
         (open != null && max != null) ? `${open} / ${max}` : "—",
         (open != null && open > 0) ? "is-pos" : null);
 
-      // 30-day drawdown
-      const dd = Number(r.drawdown_pct_30d);
+      // 30-day drawdown — backend emits drawdown_pct_30d as a fraction
+      // (-0.0123 = -1.23%). fmtPct expects already-in-percent units.
+      const ddFrac = Number(r.drawdown_pct_30d);
+      const dd = Number.isFinite(ddFrac) ? ddFrac * 100 : ddFrac;
       setStat("stat-dd",
         Number.isFinite(dd) ? fmtPct(-Math.abs(dd)) : "—",
         Number.isFinite(dd) ? (Math.abs(dd) > 5 ? "is-warn" : null) : null);
 
-      // Active regime
-      const reg = g.regime || g.current_regime || "—";
+      // Active regime — /api/ops/regime returns { data: { current, probability, ... } }.
+      // The legacy keys `regime` / `current_regime` were never emitted by this
+      // endpoint (see ops_routes.py:255-260), so stat-regime always rendered
+      // "—". Read the canonical `current` field; keep the legacy names as
+      // fallbacks in case a future endpoint variant re-introduces them.
+      const reg = g.current || g.regime || g.current_regime || "—";
       const regHuman = String(reg).toLowerCase().replace(/_/g, " ");
       setStat("stat-regime", regHuman.toUpperCase(), null);
 
