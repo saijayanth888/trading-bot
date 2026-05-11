@@ -1064,6 +1064,22 @@
     );
   }
 
+  // /api/ops/market_hours — NYSE session state. Cache 60s; the response only
+  // changes at 09:30 / 16:00 ET so polling more often is wasted work.
+  function useMarketHours() {
+    const [mh, setMh] = useState(null);
+    useEffect(() => {
+      let cancelled = false;
+      const fetchNow = () => safeJsonFetch("/api/ops/market_hours")
+        .then(j => { if (!cancelled) setMh(envelopeData(j) || null); })
+        .catch(() => { /* leave null — pill renders "—" placeholder */ });
+      fetchNow();
+      const iv = setInterval(fetchNow, 60_000);
+      return () => { cancelled = true; clearInterval(iv); };
+    }, []);
+    return mh;
+  }
+
   // ─────────────── STOCKS — wheel + shark Alpaca state ───────────────
   function StocksLive({ data }) {
     const slot = slotState(data, "stocks");
@@ -1071,12 +1087,36 @@
     const alpaca = env.alpaca || {};
     const wheel = env.wheel || {};
     const shark = env.shark || {};
+    const mh = useMarketHours();
+
+    // Market hours pill — formats NYSE session state next to the card title.
+    // Shows OPEN/CLOSED/EXT with a title attribute carrying the next
+    // open/close time so hovering surfaces the schedule without a banner.
+    let marketPill = null;
+    if (mh) {
+      const isOpen = !!mh.is_open;
+      const isExt = !!mh.is_extended;
+      const label = isOpen ? "OPEN" : isExt ? "EXT" : "CLOSED";
+      const cls = isOpen ? "up" : isExt ? "warn" : "down";
+      const fmtEt = (iso) => {
+        if (!iso) return "—";
+        try { return new Date(iso).toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", month: "short", day: "numeric" }); }
+        catch (_) { return iso; }
+      };
+      const titleText = isOpen
+        ? "NYSE open · closes " + fmtEt(mh.next_close_utc) + " ET"
+        : "NYSE closed · opens " + fmtEt(mh.next_open_utc) + " ET";
+      marketPill = h("span", { className: "pill " + cls, title: titleText, style: { height: 18 } },
+        h("span", { className: "dot " + cls }), " NYSE ", label);
+    } else {
+      marketPill = h("span", { className: "pill", title: "loading market hours" }, "NYSE —");
+    }
 
     if (slot.phase === "down") {
       return h(Card, {
         num: "10", title: "Stocks · Wheel + Shark",
         sub: "endpoint unavailable",
-        right: cardRight(slot.fetchedAt)
+        right: cardRight(slot.fetchedAt, marketPill)
       },
         h(EmptyState, { reason: slot.reason, fetchedAt: slot.fetchedAt, period: 10 })
       );
@@ -1085,7 +1125,7 @@
     return h(Card, {
       num: "10", title: "Stocks · Wheel + Shark",
       sub: alpaca.paper ? "Alpaca · paper" : "Alpaca · live",
-      right: cardRight(slot.fetchedAt)
+      right: cardRight(slot.fetchedAt, marketPill)
     },
       h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, fontSize: "var(--t-xs)" } },
         h("div", { className: "dim mono" }, "PORTFOLIO"),
