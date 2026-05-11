@@ -368,8 +368,20 @@
         ),
         h("div", { className: "grid", style: { gridColumn: "span 6", gridTemplateRows: "1fr 1fr", gap: "var(--gap-grid)" } },
           h("div", { className: "grid g-2", style: { gap: "var(--gap-grid)" } },
-            h(RegimeCellLive, { venue: "CRYPTO", sym: "BTC", env: data.regime, fetchedAt: data.regime_fetched_at }),
-            h(RegimeCellLive, { venue: "STOCKS", sym: "SPY", env: data.stock_regime, fetchedAt: data.stock_regime_fetched_at })
+            h(RegimeCellLive, {
+              venue: "CRYPTO", sym: "BTC",
+              env: data.regime, fetchedAt: data.regime_fetched_at,
+              sparksData: envelopeData(data.sparklines),
+              symbols: ["BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD",
+                        "XRP/USD", "DOGE/USD", "AVAX/USD", "LINK/USD"],
+            }),
+            h(RegimeCellLive, {
+              venue: "STOCKS", sym: "SPY",
+              env: data.stock_regime, fetchedAt: data.stock_regime_fetched_at,
+              sparksData: envelopeData(data.stocks_sparklines),
+              symbols: ["SPY", "SOFI", "NVDA", "AMD", "PLTR",
+                        "TSLA", "AAPL", "GOOGL", "MSTR", "COIN"],
+            })
           ),
           h("div", { className: "grid g-2", style: { gap: "var(--gap-grid)" } },
             h(BotStateCellLive, { mode: mode, killState: killState, data: data }),
@@ -388,7 +400,7 @@
     );
   }
 
-  function RegimeCellLive({ venue, sym, env, fetchedAt }) {
+  function RegimeCellLive({ venue, sym, env, fetchedAt, sparksData, symbols }) {
     const d = envelopeData(env) || {};
     const cur = (d.current || "unknown").toLowerCase();
     const conf = Number(d.probability || 0);
@@ -404,6 +416,29 @@
       regimeBucket === "BULL" ? [{kind:"bull",weight:70},{kind:"range",weight:20},{kind:"bear",weight:10}]
       : regimeBucket === "BEAR" ? [{kind:"bear",weight:65},{kind:"range",weight:25},{kind:"bull",weight:10}]
       : [{kind:"range",weight:60},{kind:"bull",weight:25},{kind:"bear",weight:15}];
+
+    // Per-symbol mini-rows — operator (2026-05-11 PM): "we should see ALL
+    // stocks not just SPY". The regime label (BTC/SPY) is still the lead
+    // macro indicator since the HMM trains on the lead instrument only,
+    // but render every symbol's current price + day-% so the operator
+    // sees the actual book under the regime header.
+    const rows = [];
+    if (sparksData && symbols && Array.isArray(symbols)) {
+      const sparkPairs = sparksData.pairs || sparksData.symbols || {};
+      for (const s of symbols) {
+        // crypto key is "BTC/USD"; stocks key is "BTC"
+        const info = sparkPairs[s] || sparkPairs[s.toUpperCase()] || {};
+        const closes = info.closes || [];
+        const cur_px = Number(info.current ?? closes[closes.length - 1] ?? 0);
+        const pct = Number(info.pct_24h ?? info.pct_session ?? 0);
+        if (!cur_px && !closes.length) continue;
+        rows.push({ sym: s.split("/")[0], px: cur_px, pct: pct });
+      }
+    }
+    const pxFmt = (v) => v >= 1000 ? "$" + v.toLocaleString("en-US", { maximumFractionDigits: 0 })
+                       : v >= 1     ? "$" + v.toFixed(2)
+                       :              "$" + v.toFixed(4);
+
     return h("div", { className: "card mountin", style: { padding: "var(--s-3) var(--s-4)", justifyContent: "space-between", minHeight: 132, gap: 6 } },
       h("div", { style: { display: "flex", alignItems: "center", gap: "var(--s-2)" } },
         h("span", { className: "metric-label" }, venue + " · " + sym),
@@ -411,15 +446,35 @@
         h(TimeSince, { ts: fetchedAt, className: "mono dim", style: { fontSize: "var(--t-2xs)", marginRight: 8 } }),
         h("span", { className: "pill " + klass }, h("span", { className: "dot " + klass + " pulse" }), " ", regimeBucket)
       ),
-      h("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", margin: "var(--s-2) 0" } },
-        h("span", { className: "num", style: { fontSize: "var(--t-2xl)", letterSpacing: "-.02em" } },
+      h("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", margin: "var(--s-2) 0 var(--s-1)" } },
+        h("span", { className: "num", style: { fontSize: "var(--t-xl)", letterSpacing: "-.02em" } },
           Math.round(conf * 100),
-          h("span", { style: { fontSize: "var(--t-md)", color: "var(--fg-3)" } }, "%")
+          h("span", { style: { fontSize: "var(--t-sm)", color: "var(--fg-3)" } }, "%")
         ),
-        h("span", { className: "mono dim", style: { fontSize: "var(--t-xs)" } },
+        h("span", { className: "mono dim", style: { fontSize: "var(--t-2xs)" } },
           "conf · " + (dur != null ? durToHM(dur) : "—"))
       ),
-      h(RegimeRibbon, { segments: segments })
+      h(RegimeRibbon, { segments: segments }),
+      // Per-symbol strip — 2-column grid below the regime header
+      rows.length > 0 && h("div", {
+        style: {
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr",
+          gap: "2px 12px",
+          marginTop: "var(--s-2)",
+          fontSize: "var(--t-2xs)",
+          fontFamily: "var(--mono)",
+          lineHeight: 1.4,
+        }
+      },
+        rows.map((r, i) => h("div", { key: i,
+          style: { display: "flex", alignItems: "baseline", gap: 6, whiteSpace: "nowrap" } },
+          h("span", { style: { color: "var(--fg-1)", fontWeight: 500, minWidth: 36 } }, r.sym),
+          h("span", { className: "dim", style: { flex: 1 } }, pxFmt(r.px)),
+          h("span", { className: r.pct >= 0 ? "up" : "down" },
+            (r.pct >= 0 ? "+" : "") + r.pct.toFixed(2) + "%")
+        ))
+      )
     );
   }
 
