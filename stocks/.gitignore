@@ -1,56 +1,10 @@
-# Secrets — never commit
-.env
-*.env
-.env.*
-gcp-oauth.keys.json
+# Trained model weights — reproducible, don't bloat the repo
+kb/models/tft/*.pt
+# Training summary IS tracked (small JSON, useful for diff)
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-dist/
-*.egg-info/
-.eggs/
-*.egg
-venv/
-env/
-ENV/
-.venv/
-pip-log.txt
-pip-delete-this-directory.txt
+# Runtime state for the detached ML trainer
+memory/stocks-ml-status.json
+memory/stocks-ml-train.pid
 
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-*.coveragerc
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
-logs/
-
-# Memory archive (keep recent, ignore deep archive)
-memory/archive/
-
-# Ephemeral context briefing (regenerated each phase, never commit)
-memory/CONTEXT-BRIEFING.md
-
-# Ephemeral market-open handoff (rewritten by every run)
-memory/market-open-analysis.json
-memory/market-open-decisions.json
-
-# Distribution
-dist/
-build/
+# Cron logs — append-only, regrow naturally
+memory/cron-*.log

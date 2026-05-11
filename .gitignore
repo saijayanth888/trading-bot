@@ -113,9 +113,12 @@ user_data/config-private.json.tmp
 .tmp_screens/
 *.screenshot.png
 
-# Hermes-generated cron scripts — regenerated from cron registry and
-# contain absolute paths specific to one machine.
-.hermes/scripts/
+# Hermes-generated cron scripts: most are machine-specific and regenerated
+# from the cron registry, but the hand-written wrappers checked in here
+# are part of the operational design — track them.
+.hermes/scripts/*
+!.hermes/scripts/stocks_ml_train.sh
+!.hermes/scripts/ept_training_daily.sh
 
 # Unified risk peak — runtime state, regenerates on first call
 user_data/data/unified_risk_peak.json

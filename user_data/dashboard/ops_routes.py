@@ -2266,11 +2266,13 @@ async def stocks_ml():
     weights_path = STOCKS_ROOT / "kb" / "models" / "tft" / "stock_tft_v1.pt"
     evolution_path = STOCKS_ROOT / "kb" / "models" / "evolution_log.json"
     log_path = STOCKS_ROOT / "memory" / "cron-stocks-ml-train.log"
+    status_path = STOCKS_ROOT / "memory" / "stocks-ml-status.json"
 
     summary = _read_json(summary_path) or {}
     evolution = _read_json(evolution_path) or []
     if not isinstance(evolution, list):
         evolution = []
+    training_status = _read_json(status_path) or {}
 
     weights_age_seconds = _file_age_seconds(weights_path)
     weights_exists = weights_path.is_file()
@@ -2285,8 +2287,41 @@ async def stocks_ml():
         except OSError:
             pass
 
-    # Build a quick "ML enabled" signal from env (operator-flippable)
-    import os as _os
+    # ── Live training progress ─────────────────────────────────────────
+    # When a worker is mid-flight, parse the latest "epoch N/M loss=… val_acc=…"
+    # line out of the log tail so the dashboard renders a progress card
+    # instead of just "weights present: False".
+    import re, os as _os
+    live_state = "idle"
+    live_pid = training_status.get("pid")
+    if live_pid is not None:
+        try:
+            _os.kill(int(live_pid), 0)
+            live_state = "running"
+        except (OSError, ValueError):
+            # PID stale (worker exited) — fall back to the recorded state
+            live_state = training_status.get("state", "idle")
+    else:
+        live_state = training_status.get("state", "idle")
+
+    current_epoch = None
+    epochs_target = training_status.get("epochs_target")
+    current_loss = None
+    current_val_acc = None
+    if live_state == "running":
+        for line in reversed(log_tail):
+            m = re.search(
+                r"epoch\s+(\d+)/(\d+)\s+loss=([\d.]+).*?val_acc=([\d.]+)",
+                line,
+            )
+            if m:
+                current_epoch = int(m.group(1))
+                if epochs_target is None:
+                    epochs_target = int(m.group(2))
+                current_loss = float(m.group(3))
+                current_val_acc = float(m.group(4))
+                break
+
     ml_enabled = _os.environ.get("STOCKS_ML_ENABLED", "0").strip() in {"1", "true", "True"}
 
     payload = {
@@ -2304,8 +2339,22 @@ async def stocks_ml():
         "evolution": evolution[-5:],
         "log_tail": log_tail,
         "next_train_cron": "0 23 * * 0  (Sun 11 PM ET)",
+        # Live training progress — populated whenever a worker is running.
+        "training_state": live_state,
+        "training_pid": live_pid,
+        "training_started_at": training_status.get("started_at"),
+        "training_finished_at": training_status.get("finished_at"),
+        "training_elapsed_seconds": training_status.get("elapsed_seconds"),
+        "current_epoch": current_epoch,
+        "epochs_target": epochs_target,
+        "current_loss": current_loss,
+        "current_val_acc": current_val_acc,
     }
 
+    if live_state == "running":
+        # Reflect "training in progress" prominently rather than hiding behind
+        # the "no weights yet" degraded state.
+        return _envelope("ok", data=payload)
     if not weights_exists:
         return _envelope(
             "degraded",

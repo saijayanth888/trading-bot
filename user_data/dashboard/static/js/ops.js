@@ -359,16 +359,57 @@ async function refreshStocksML() {
   if (!env.data) { body.textContent = env.error || "—"; return; }
   const d = env.data;
 
-  // Status pill in header
+  const isTraining = d.training_state === "running";
+
+  // Status pill in header — show "TRAINING" prominently when a worker is active.
   if (ageEl) {
-    const enabled = d.ml_enabled ? "🟢 INFLUENCING TRADES" : "⚪ COMPUTE ONLY";
-    const age = d.weights_age_seconds == null
-      ? "no model yet"
-      : d.weights_age_seconds < 86400
-        ? `${Math.floor(d.weights_age_seconds/3600)}h old`
-        : `${Math.floor(d.weights_age_seconds/86400)}d old`;
-    ageEl.textContent = `${enabled} · model ${age}${d.ml_alpha ? " · ALPHA" : ""}`;
-    ageEl.style.color = d.ml_enabled ? "#3fb950" : "var(--text-muted)";
+    if (isTraining) {
+      const ep = d.current_epoch != null
+        ? `epoch ${d.current_epoch}/${d.epochs_target || "?"}`
+        : "starting up";
+      ageEl.textContent = `🟡 TRAINING · ${ep} · pid ${d.training_pid}`;
+      ageEl.style.color = "#f4b942";
+    } else {
+      const enabled = d.ml_enabled ? "🟢 INFLUENCING TRADES" : "⚪ COMPUTE ONLY";
+      const age = d.weights_age_seconds == null
+        ? "no model yet"
+        : d.weights_age_seconds < 86400
+          ? `${Math.floor(d.weights_age_seconds/3600)}h old`
+          : `${Math.floor(d.weights_age_seconds/86400)}d old`;
+      ageEl.textContent = `${enabled} · model ${age}${d.ml_alpha ? " · ALPHA" : ""}`;
+      ageEl.style.color = d.ml_enabled ? "#3fb950" : "var(--text-muted)";
+    }
+  }
+
+  // Live training progress banner — only while a worker is mid-flight.
+  let html = "";
+  if (isTraining) {
+    const ep = d.current_epoch != null ? `${d.current_epoch}/${d.epochs_target || "?"}` : "—";
+    const progressPct = (d.current_epoch && d.epochs_target)
+      ? Math.min(100, Math.round(100 * d.current_epoch / d.epochs_target))
+      : 0;
+    const loss = d.current_loss != null ? d.current_loss.toFixed(4) : "—";
+    const valAcc = d.current_val_acc != null ? (d.current_val_acc * 100).toFixed(1) + "%" : "—";
+    const elapsed = d.training_started_at
+      ? Math.max(0, Math.floor((Date.now() - new Date(d.training_started_at).getTime()) / 1000))
+      : null;
+    const elapsedStr = elapsed != null
+      ? (elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed/60)}m ${elapsed%60}s`)
+      : "—";
+    html += `<div style="margin-bottom:14px;padding:12px;background:rgba(244,185,66,0.08);border:1px solid rgba(244,185,66,0.35);border-radius:6px;">` +
+      `<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;">` +
+      `<span style="font-weight:600;color:#f4b942;">⚙ TRAINING IN PROGRESS</span>` +
+      `<span class="muted" style="font-size:11px;font-family:var(--mono);">elapsed ${elapsedStr}</span>` +
+      `</div>` +
+      `<div style="height:6px;background:var(--bg-inset);border-radius:3px;overflow:hidden;margin-bottom:10px;">` +
+      `<div style="height:100%;width:${progressPct}%;background:#f4b942;transition:width 0.5s ease;"></div>` +
+      `</div>` +
+      `<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;font-family:var(--mono);font-size:12px;">` +
+      `<div><div class="muted" style="font-size:10px;">EPOCH</div><div style="font-size:16px;">${esc(ep)}</div></div>` +
+      `<div><div class="muted" style="font-size:10px;">LOSS</div><div style="font-size:16px;">${esc(loss)}</div></div>` +
+      `<div><div class="muted" style="font-size:10px;">VAL ACC</div><div style="font-size:16px;color:#3fb950;">${esc(valAcc)}</div></div>` +
+      `<div><div class="muted" style="font-size:10px;">PID</div><div style="font-size:16px;">${esc(d.training_pid || "—")}</div></div>` +
+      `</div></div>`;
   }
 
   // 4-up KPI: model present, val acc, training samples, next train
@@ -377,7 +418,7 @@ async function refreshStocksML() {
   const baseline = "33.3%"; // 3-class random baseline
   const valColor = ok && d.best_val_acc > 0.40 ? "#3fb950" : ok && d.best_val_acc > 0.36 ? "#f4b942" : "#f85149";
 
-  let html = `<div class="ks-grid">` +
+  html += `<div class="ks-grid">` +
     `<div><div class="kpi-label">Model</div>` +
     `<div class="kpi-value">${ok ? "stock_tft_v1" : "<span class=\"muted\">not trained yet</span>"}</div>` +
     `<div class="kpi-sub">device: ${esc(d.device || "cpu")} · best ep ${esc(d.best_epoch || "—")}</div></div>` +

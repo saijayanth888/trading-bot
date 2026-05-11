@@ -1,0 +1,18 @@
+[
+  {
+    "generation": 1,
+    "week_ending": "2026-05-11",
+    "members": [
+      {
+        "member_id": "stock_tft_v1",
+        "agent_type": "tft",
+        "val_acc": 0.3861,
+        "paper_sharpe": 0.0,
+        "trained_at_utc": 1778469037.6740682
+      }
+    ],
+    "champion_id": "stock_tft_v1",
+    "runner_up_id": null,
+    "notes": "scaffold v0.1 \u2014 real EPT loop deferred to phase 2"
+  }
+]

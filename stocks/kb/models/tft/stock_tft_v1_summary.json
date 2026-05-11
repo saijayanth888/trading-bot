@@ -1,0 +1,47 @@
+{
+  "weights_path": "/home/saijayanthai/Documents/trading-bot/stocks/kb/models/tft/stock_tft_v1.pt",
+  "best_val_acc": 0.3861,
+  "best_epoch": 2,
+  "n_train": 174402,
+  "n_val": 17544,
+  "n_tickers": 517,
+  "history": [
+    {
+      "epoch": 1,
+      "train_loss": 1.06473,
+      "val_acc": 0.3495,
+      "elapsed_s": 23.5
+    },
+    {
+      "epoch": 2,
+      "train_loss": 0.99911,
+      "val_acc": 0.3861,
+      "elapsed_s": 22.1
+    },
+    {
+      "epoch": 3,
+      "train_loss": 0.96184,
+      "val_acc": 0.3559,
+      "elapsed_s": 23.6
+    },
+    {
+      "epoch": 4,
+      "train_loss": 0.93661,
+      "val_acc": 0.3655,
+      "elapsed_s": 23.5
+    },
+    {
+      "epoch": 5,
+      "train_loss": 0.91515,
+      "val_acc": 0.3617,
+      "elapsed_s": 24.3
+    },
+    {
+      "epoch": 6,
+      "train_loss": 0.89491,
+      "val_acc": 0.3614,
+      "elapsed_s": 23.3
+    }
+  ],
+  "device": "cuda"
+}
