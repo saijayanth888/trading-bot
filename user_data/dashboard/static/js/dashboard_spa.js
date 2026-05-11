@@ -618,9 +618,20 @@
               const closedShort = closedAt ? String(closedAt).replace("T", " ").slice(0, 16) : "—";
               const entryPx = t.entry_price;
               const exitPx = t.exit_price;
+              // freqtrade crypto today is long-only, but state.recent_trades will
+              // carry wheel rows (short_put / short_call / long_shares) once
+              // wheel execution is wired. Prefer the explicit side field when
+              // present; fall back to t.kind; finally to LONG.
+              const side = t.direction || t.side || (
+                t.kind === "short_put"   ? "SHORT PUT"  :
+                t.kind === "short_call"  ? "SHORT CALL" :
+                t.kind === "long_shares" ? "LONG"       :
+                "LONG"
+              );
+              const sideCls = (side === "SHORT PUT" || side === "SHORT CALL") ? "down" : "up";
               return h("tr", { key: i },
                 h("td", null, h("strong", { className: "mono" }, t.pair || "—")),
-                h("td", { className: "mono up" }, "LONG"),
+                h("td", { className: "mono " + sideCls }, side),
                 h("td", { className: "num", style: { textAlign: "right" } }, entryPx != null ? fmtUSD(entryPx, entryPx < 10 ? 4 : 2) : "—"),
                 h("td", { className: "num", style: { textAlign: "right" } }, exitPx != null ? fmtUSD(exitPx, exitPx < 10 ? 4 : 2) : "—"),
                 h("td", { className: "num " + (pnlUp ? "up" : "down"), style: { textAlign: "right" } },
