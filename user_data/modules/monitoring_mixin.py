@@ -281,7 +281,22 @@ class MonitoringMixin:
 
         if self._journal is not None:
             try:
-                jid = self._journal_id_by_trade.pop(str(tid), None)
+                # Correlation key resolution, in priority order:
+                #   1. pair@rate marker stashed by _record_trade_entry — works
+                #      within a single freqtrade lifetime.
+                #   2. find_open_by_pair_and_price — restart-safe DB lookup,
+                #      matches the latest still-open journal row by pair + a
+                #      0.1% entry-price band. This is the path that fires
+                #      after a restart (in-memory dict is empty).
+                #   3. external_id fallback — legacy path; entries currently
+                #      don't set external_id so this rarely matches.
+                jid = self._journal_id_by_trade.pop(
+                    f"{pair}@{float(entry_price):.10g}", None,
+                )
+                if jid is None:
+                    jid = self._journal_id_by_trade.pop(str(tid), None)
+                if jid is None:
+                    jid = self._journal.find_open_by_pair_and_price(pair, entry_price)
                 if jid is None:
                     jid = self._journal.find_open_by_external_id(str(tid))
                 if jid is not None:
@@ -289,6 +304,12 @@ class MonitoringMixin:
                         jid, exit_price=exit_price, pnl=pnl_quote, pnl_pct=pnl_pct,
                         exit_reason=exit_reason, duration_min=duration_min,
                         closed_at=close_date,
+                    )
+                else:
+                    logger.warning(
+                        "[journal] no matching open row for trade %s %s @ %.4f — "
+                        "close-side update skipped",
+                        tid, pair, entry_price,
                     )
             except Exception as exc:
                 logger.debug("journal exit failed: %s", exc)

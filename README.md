@@ -978,27 +978,31 @@ selected pair, render `Marker` objects on the candle series with
 shape=entry-arrow-up / exit-arrow-down. Small JS change in
 `static/js/app.js`; trade-journal query already exists.
 
-### 14.5 trade_journal — close-side hook never fires
+### 14.5 trade_journal — close-side hook ✅ FIXED
 
-**Current state.** The strategy writes a row to `trade_journal`
-(TimescaleDB) when a position **opens** but never updates `closed_at`
-or `pnl` when it **closes**. Closed rows pile up with `closed_at=NULL`,
-which made `_crypto_realised_pnl_usd()` always return 0 — the
-dashboard's combined-portfolio card showed starting equity even after
-realised losses.
+**Root cause.** `monitoring_mixin._record_trade_exit` had two bugs:
+(a) the in-memory `_journal_id_by_trade` correlation map was keyed
+by `pair@rate` on entry but looked up by `str(tid)` on exit — keys
+never matched; (b) even with key fix, the dict was reset on every
+freqtrade restart and the fallback `find_open_by_external_id` didn't
+work because entries didn't set `external_id`. Result: every paper
+trade closed with `closed_at=NULL` and `pnl=NULL` in
+`trade_journal`, breaking the dashboard's realised-P&L card, the
+weekly post-mortem cron, the EPT live scorer, and the explainability
+replay view.
 
-**Tonight's interim fix.** `_crypto_realised_pnl_usd()` now reads
-freqtrade's own `/api/v1/profit` endpoint (symmetric with how
-unrealised PnL reads `/api/v1/status`). Dashboard is now correct.
+**Fix.** Added `TradeJournal.find_open_by_pair_and_price()` —
+restart-safe DB-direct lookup matching the latest still-open journal
+row by `pair` plus entry-price proximity (0.1% tolerance to absorb
+decimal rounding). Updated `_record_trade_exit` to use the new lookup
+as the primary correlation key, with the legacy `pair@rate` /
+`tid` / `external_id` paths kept as fallbacks. Regression test:
+`tests/test_monitoring.py::test_journal_find_open_by_pair_and_price`.
 
-**What's still broken.** `trade_journal` is also consumed by the
-weekly post-mortem cron, the EPT live-mode scorer, and the
-explainability replay view. All three currently see "no closed
-trades" and degrade gracefully (post-mortem skips, EPT falls back
-to mock surrogate, replay shows open-only). Real fix:
-locate the strategy's `custom_exit` / `confirm_trade_exit` /
-`order_filled` hook and add the close-side `UPDATE trade_journal
-SET closed_at=…, pnl=…, exit_reason=… WHERE id=…`.
+**Backfilled.** The 2 historical trades from tonight's pilot
+(SOL/USD −$43.02, BTC/USD −$23.37 — both `freqai_down_regime`) were
+manually backfilled from freqtrade's authoritative `/api/v1/trades`
+into trade_journal so dashboard + post-mortem see them.
 
 ### 14.6 EPT cron: drop the LLM wrapper
 

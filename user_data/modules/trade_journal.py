@@ -217,6 +217,28 @@ class TradeJournal:
         )
         return int(row["trade_id"]) if row else None
 
+    def find_open_by_pair_and_price(
+        self, pair: str, entry_price: float, tolerance_pct: float = 0.001,
+    ) -> int | None:
+        """Restart-safe correlation key for close-side updates.
+
+        The in-memory `_journal_id_by_trade` mapping the strategy uses to
+        match freqtrade.trade.id → trade_journal.trade_id is wiped on every
+        freqtrade restart. This DB-direct lookup matches by `pair` plus
+        entry-price proximity (0.1% default tolerance to absorb decimal
+        rounding) on the latest still-open journal row — survives restarts
+        and doesn't depend on the strategy passing an external_id.
+        """
+        row = db.fetch_one(
+            "SELECT trade_id FROM trade_journal "
+            " WHERE pair = %s "
+            "   AND closed_at IS NULL "
+            "   AND ABS(entry_price - %s) / NULLIF(entry_price, 0) < %s "
+            " ORDER BY opened_at DESC, trade_id DESC LIMIT 1",
+            (pair, float(entry_price), float(tolerance_pct)),
+        )
+        return int(row["trade_id"]) if row else None
+
     # ------------------------------------------------------------------
     # Reads
     # ------------------------------------------------------------------

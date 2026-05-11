@@ -226,6 +226,45 @@ def test_journal_roundtrip() -> None:
         _ok(f"entry → exit → CSV (1 row, {csv_path.stat().st_size} bytes)")
 
 
+def test_journal_find_open_by_pair_and_price() -> None:
+    """Regression: monitoring_mixin._record_trade_exit relies on this
+    restart-safe lookup to correlate freqtrade.trade.id back to the
+    journal row written at entry. Before this method existed, every
+    paper trade closed without ever updating its journal row, leaving
+    closed_at=NULL and pnl=NULL — which made the dashboard's combined
+    portfolio show zero realised P&L, the post-mortem cron see no
+    closed trades, and the EPT live scorer fall back to mock.
+    """
+    print("\n[4b] Journal: find_open_by_pair_and_price (restart-safe lookup)")
+    if not _truncate_journal():
+        return
+    j = TradeJournal()
+
+    # Open two trades on different pairs, leave both open in the journal.
+    j1 = j.log_entry(pair="BTC/USD", direction="long", entry_price=81_500.0, stake=1000.0)
+    j2 = j.log_entry(pair="SOL/USD", direction="long", entry_price=96.20, stake=500.0)
+
+    # Exact price match — must find the right row.
+    assert j.find_open_by_pair_and_price("BTC/USD", 81_500.0) == j1
+    assert j.find_open_by_pair_and_price("SOL/USD", 96.20) == j2
+
+    # Within tolerance band (0.1% default = ±$81.50 on BTC).
+    assert j.find_open_by_pair_and_price("BTC/USD", 81_540.0) == j1   # +0.05%
+    assert j.find_open_by_pair_and_price("BTC/USD", 81_420.0) == j1   # -0.10% boundary
+
+    # Outside tolerance — must not match.
+    assert j.find_open_by_pair_and_price("BTC/USD", 80_000.0) is None  # -1.8%
+    # Wrong pair — must not bleed across.
+    assert j.find_open_by_pair_and_price("ETH/USD", 81_500.0) is None
+
+    # After close, the row must stop being returned.
+    j.log_exit(j1, exit_price=81_700.0, pnl=15.0, pnl_pct=0.0024,
+               exit_reason="roi", duration_min=12.0)
+    assert j.find_open_by_pair_and_price("BTC/USD", 81_500.0) is None
+
+    _ok("price-band correlation works; closed rows are excluded")
+
+
 def test_journal_markdown_and_stats() -> None:
     print("\n[5/8] Journal: markdown export + stats math")
     if not _truncate_journal():
