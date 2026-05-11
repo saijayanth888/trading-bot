@@ -143,7 +143,9 @@
     llm_stats: "/api/ops/llm_stats",
     mcp: "/api/ops/mcp",
     sentiment: "/api/ops/sentiment",
-    stocks_sentiment: "/api/ops/stocks_sentiment",
+    // stocks_sentiment endpoint removed 2026-05-11 — see ops_routes.py
+    // comment. Shark Briefing card (data-num 13c) is the source of truth
+    // for per-symbol stocks sentiment via Shark's analyst pipeline.
     shark_briefing: "/api/ops/shark_briefing",
   };
   const SLOW_ENDPOINTS = {
@@ -1673,71 +1675,6 @@
     );
   }
 
-  // ─────────────── STOCKS SENTIMENT (per-symbol, Perplexity) ───────────────
-  // Mirrors SentimentLive's compact layout but breaks the score out per
-  // symbol (SOFI/PLTR/NVDA/AMD/SPY) instead of a single market-wide
-  // aggregate. Backed by /api/ops/stocks_sentiment which currently returns
-  // placeholder data — the "PLACEHOLDER" pill flips off once PERPLEXITY_API_KEY
-  // is wired (envelope.status === "ok" instead of "degraded").
-  function StocksSentimentLive({ data }) {
-    const slot = slotState(data, "stocks_sentiment");
-    const env = envelopeData(slot.env) || {};
-    const symbols = env.symbols || [];
-    const aggScore = env.aggregate_score;
-    const aggConf  = env.aggregate_confidence;
-    const isPlaceholder = slot.env && slot.env.status === "degraded";
-    const klass = aggScore == null ? "info" : aggScore >= 0 ? "up" : "down";
-
-    if (slot.phase === "down") {
-      return h(Card, {
-        num: "13b", title: "Stocks sentiment · per-symbol",
-        sub: "endpoint unavailable",
-        right: cardRight(slot.fetchedAt)
-      },
-        h(EmptyState, { reason: slot.reason, fetchedAt: slot.fetchedAt, period: 10 })
-      );
-    }
-
-    return h(Card, {
-      num: "13b", title: "Stocks sentiment · per-symbol",
-      sub: aggScore != null
-        ? "agg " + (aggScore >= 0 ? "+" : "") + aggScore.toFixed(2)
-          + (aggConf != null ? " · conf " + aggConf.toFixed(2) : "")
-        : "—",
-      right: cardRight(slot.fetchedAt,
-        h(F, null,
-          isPlaceholder
-            ? h("span", { className: "pill warn", title: "Perplexity API key not yet wired — showing deterministic placeholder data" }, "PLACEHOLDER")
-            : null,
-          " ",
-          h("span", { className: "pill " + klass }, aggScore == null ? "—" : aggScore >= 0 ? "BULLISH" : "BEARISH"))
-      )
-    },
-      symbols.length === 0
-        ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)", padding: "var(--s-2) 0" } }, "no symbols configured")
-        : h("div", { style: { display: "grid", gridTemplateColumns: "auto auto auto auto", gap: 6, fontSize: "var(--t-xs)", alignItems: "center" } },
-            // Header row
-            h("div", { className: "dim mono", style: { fontSize: "var(--t-2xs)", letterSpacing: ".06em" } }, "SYMBOL"),
-            h("div", { className: "dim mono", style: { fontSize: "var(--t-2xs)", letterSpacing: ".06em", textAlign: "right" } }, "SCORE"),
-            h("div", { className: "dim mono", style: { fontSize: "var(--t-2xs)", letterSpacing: ".06em", textAlign: "right" } }, "CONF"),
-            h("div", { className: "dim mono", style: { fontSize: "var(--t-2xs)", letterSpacing: ".06em", textAlign: "right" } }, "N"),
-            // Symbol rows
-            ...symbols.flatMap((row) => {
-              const s = Number(row.score || 0);
-              const c = Number(row.confidence || 0);
-              const sClass = "num " + (s >= 0 ? "up" : "down");
-              return [
-                h("div", { className: "mono", key: row.symbol + "-sym" }, row.symbol),
-                h("div", { className: sClass, style: { textAlign: "right" }, key: row.symbol + "-s" },
-                  (s >= 0 ? "+" : "") + s.toFixed(2)),
-                h("div", { className: "num", style: { textAlign: "right" }, key: row.symbol + "-c" }, c.toFixed(2)),
-                h("div", { className: "num", style: { textAlign: "right" }, key: row.symbol + "-n" }, row.n_headlines || 0),
-              ];
-            })
-          )
-    );
-  }
-
   // ─────────────── SHARK BRIEFING (today's pre-market + market-open decisions) ───────────────
   // Surfaces Shark's actual decision flow — confirmed/skipped candidates,
   // market regime, macro context — read from stocks/memory/DAILY-HANDOFF.md
@@ -1998,8 +1935,9 @@
             h("div", { style: { gridColumn: "span 8" } }, h(EntryGatesLive, { data })),
             h("div", { id: "llm", className: "anchor", style: { gridColumn: "span 4", display: "flex", flexDirection: "column", gap: "var(--gap-grid)" } },
               h(LLMHealthLive, { data }),
-              h(SentimentLive, { data }),
-              h(StocksSentimentLive, { data })
+              h(SentimentLive, { data })
+              // StocksSentimentLive removed — superseded by SharkBriefingLive
+              // (full-width card mounted below the LLM column).
             )
           ),
           // SHARK BRIEFING — full-width because the candidate lists can be long
