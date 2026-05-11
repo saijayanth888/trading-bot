@@ -556,17 +556,39 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
     # Capital allocation + rolling-Sharpe gate
     # ------------------------------------------------------------------
 
+    # P0-L: default for unknown pairs. 0.05 (5% of equity) leaves trading
+    # enabled but tightly capped; the warning surfaces the missing
+    # configuration so the operator can fix the weights table.
+    _MISSING_PAIR_WEIGHT_DEFAULT: float = 0.05
+
     def _pair_weight(self, pair: str) -> float:
         """Max fraction of equity allowed for this pair (0 = data-only).
 
         Comes from config.json[capital_allocation][pair_weights]. Defaults to
-        1.0 if no allocation is configured (i.e. no per-pair cap).
+        1.0 if no allocation is configured (i.e. no per-pair cap). When a
+        specific pair is missing from a configured weights map, fall back to
+        5% rather than 0 — the previous behaviour silently disabled trading
+        on any pair the operator forgot to add to the table.
         """
         if not self._capital_allocation:
             return 1.0
         weights = self._capital_allocation.get("pair_weights") or {}
         if pair not in weights:
-            return 0.0  # missing = excluded
+            # Log a one-shot warning per pair so the operator can fix it,
+            # but DO trade — at the safe-default cap.
+            seen = getattr(self, "_missing_weight_warned", None)
+            if seen is None:
+                seen = set()
+                self._missing_weight_warned = seen
+            if pair not in seen:
+                logger.warning(
+                    "[strategy] pair %s missing from "
+                    "capital_allocation.pair_weights — using default %.2f. "
+                    "Add an explicit entry to config.json to silence this.",
+                    pair, self._MISSING_PAIR_WEIGHT_DEFAULT,
+                )
+                seen.add(pair)
+            return self._MISSING_PAIR_WEIGHT_DEFAULT
         try:
             return max(0.0, min(1.0, float(weights[pair])))
         except (TypeError, ValueError):
@@ -777,7 +799,23 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         self, pair: str, order_type: str, amount: float, rate: float,
         time_in_force: str, current_time, entry_tag, side: str, **kwargs,
     ) -> bool:
-        """Final risk gate. Return False to abort the order."""
+        """Final risk gate. Return False to abort the order.
+
+        P0-N: idempotent on (pair, side, rate). Freqtrade retries this hook
+        when an order partially fills + the bot re-runs the entry path on
+        the next candle; without the guard we'd write a second
+        trade_journal row + a duplicate Slack alert. The journal marker
+        ``_journal_id_by_trade[pair@rate]`` is the same key the exit-side
+        code uses to correlate rows, so reusing it here is consistent.
+        """
+        marker_key = f"{pair}@{float(rate):.10g}"
+        existing_jid = getattr(self, "_journal_id_by_trade", {}).get(marker_key)
+        if existing_jid is not None:
+            logger.info(
+                "[strategy] confirm_trade_entry skip (idempotency): "
+                "%s already journaled jid=%s", marker_key, existing_jid,
+            )
+            return True
         gov = self._risk_governor
         if gov is None:
             return True

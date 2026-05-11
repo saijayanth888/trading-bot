@@ -44,6 +44,13 @@ DEFAULT_REGIME_WEIGHTS: dict[str, tuple[float, float]] = {
 HIGH_VOL_SIZE_FACTOR: float = 0.5
 MIN_TRADE_CONFIDENCE: float = 0.4
 
+# P0-M: hard floor on the high-vol position size. Without this, a low
+# confidence × low magnitude × low regime_confidence product could sink
+# size to ~0, silently disabling trading even after both legs agreed on
+# direction. If we're going to trade at all in high-vol, we trade at
+# least this fraction of base stake.
+HIGH_VOL_MIN_SIZE: float = 0.25
+
 
 @dataclass
 class MetaSignal:
@@ -69,6 +76,7 @@ def compute_signal(
     regime_weights: dict[str, tuple[float, float]] | None = None,
     min_trade_confidence: float = MIN_TRADE_CONFIDENCE,
     high_vol_size_factor: float = HIGH_VOL_SIZE_FACTOR,
+    high_vol_min_size: float = HIGH_VOL_MIN_SIZE,
 ) -> MetaSignal:
     """Combine TFT + DRL into a final trading signal."""
     weights = (regime_weights or DEFAULT_REGIME_WEIGHTS).get(
@@ -95,10 +103,15 @@ def compute_signal(
         # Both agree, non-flat — trade with reduced size
         agree_conf = (tft_confidence + drl_conf) / 2.0
         size = high_vol_size_factor * agree_conf * drl_mag * regime_confidence
+        # P0-M: floor the size so the product of three [0,1] factors can't
+        # collapse to ~0 when each individual term is "good enough" to trade.
+        # If the meta-agent decided to take the trade in a high-vol regime,
+        # we trade at *at least* high_vol_min_size of base stake.
+        sized = max(high_vol_min_size, float(_clip01(size)))
         return MetaSignal(
             final_signal=tft_signal,
             final_confidence=agree_conf,
-            position_size_pct=float(_clip01(size)),
+            position_size_pct=float(_clip01(sized)),
             tft_signal=tft_signal,
             tft_confidence=tft_confidence,
             drl_signal=drl_signal,

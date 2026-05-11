@@ -263,6 +263,15 @@ def _load_peak() -> Optional[float]:
 # margin for one missed run.
 STOCKS_STALE_SECONDS = int(os.environ.get("UNIFIED_STOCKS_STALE_S", "600"))
 
+# P0-J: a separate "we no longer trust this number" horizon for the
+# combined-DD math. Past this point (default 2 h) we can't tell whether
+# the last stocks equity reading still reflects reality (overnight gaps,
+# wheel runner crash, network split, etc.). We zero-out the stocks
+# contribution to the combined drawdown rather than carry forward a stale
+# value that could either understate (stocks bounced back) or overstate
+# (stocks crashed further) actual risk.
+STOCKS_UNTRUSTED_SECONDS = int(os.environ.get("UNIFIED_STOCKS_UNTRUSTED_S", "7200"))
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -287,6 +296,7 @@ class RiskStatus:
     threshold_pct: float
     snapshot_age_seconds: Optional[int]
     stocks_data_stale: bool
+    stocks_data_untrusted: bool   # P0-J: snapshot too old to trust at all
     sources: dict
 
 
@@ -331,10 +341,6 @@ def get_combined_risk_status() -> dict:
             {"crypto": crypto_equity, "stocks": stocks_equity},
         )
 
-    crypto_dd = _dd(crypto_equity, crypto_peak)
-    stocks_dd = _dd(stocks_equity, stocks_peak)
-    combined_dd = _dd(total, combined_peak)
-
     # Snapshot freshness (stocks-side fail-safe)
     snap_age = None
     snap_ts = stocks.get("snapshot_ts")
@@ -345,6 +351,24 @@ def get_combined_risk_status() -> dict:
         except (ValueError, TypeError):
             snap_age = None
     stocks_stale = snap_age is not None and snap_age > STOCKS_STALE_SECONDS
+
+    # P0-J: when the stocks snapshot is *very* stale (>2 h by default), we
+    # don't trust its equity figure for the combined-DD math at all. Using
+    # the last seen value silently shifts the combined peak/now ratio in
+    # whichever direction stale data flatters or worsens. Treat the stocks
+    # side as a zero contribution: combined_dd is then crypto-only.
+    stocks_untrusted = snap_age is not None and snap_age > STOCKS_UNTRUSTED_SECONDS
+
+    crypto_dd = _dd(crypto_equity, crypto_peak)
+    stocks_dd = _dd(stocks_equity, stocks_peak)
+    if stocks_untrusted:
+        # Compare crypto-only equity against the crypto peak; the combined
+        # peak still reflects historical highs that included stocks but the
+        # *current* combined number can't be honestly compared against it
+        # while stocks is dark.
+        combined_dd = crypto_dd
+    else:
+        combined_dd = _dd(total, combined_peak)
 
     # Breaker trips on threshold drawdown always. Stale-data trip only
     # fires during market hours — outside the open, the wheel_snapshot
@@ -373,6 +397,7 @@ def get_combined_risk_status() -> dict:
         threshold_pct=round(COMBINED_DD_THRESHOLD_PCT * 100, 1),
         snapshot_age_seconds=snap_age,
         stocks_data_stale=stocks_stale,
+        stocks_data_untrusted=stocks_untrusted,
         sources={
             "crypto_starting_equity": starting,
             "crypto_realised_pnl": round(realised, 2),
@@ -380,6 +405,11 @@ def get_combined_risk_status() -> dict:
             "stocks_paper": stocks["paper"],
             "stocks_snapshot_ts": snap_ts,
             "stocks_stale_threshold_s": STOCKS_STALE_SECONDS,
+            "stocks_untrusted_threshold_s": STOCKS_UNTRUSTED_SECONDS,
+            "combined_dd_method": (
+                "crypto_only_stocks_untrusted" if stocks_untrusted
+                else "crypto_plus_stocks"
+            ),
         },
     )
     return asdict(status)
