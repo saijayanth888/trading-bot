@@ -172,11 +172,26 @@
         onArm: () => setKillState && setKillState("armed"),
         onKill: () => {
           if (setKillState) setKillState("killed");
-          fetch("/api/ops/pause", { method: "POST" }).catch(() => {});
+          fetch("/api/ops/pause", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reason: "operator kill switch via pair dashboard" }),
+          }).catch(() => {});
         },
         onResume: () => {
           if (setKillState) setKillState("normal");
-          fetch("/api/ops/resume", { method: "POST" }).catch(() => {});
+          // /api/ops/resume requires confirm: true (see ops_routes.py:810).
+          // Without it the resume returns 400 and the bot stays paused —
+          // operator sees the chip flip back to "normal" but trading
+          // doesn't actually re-enable.
+          fetch("/api/ops/resume", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              reason: "operator kill switch resume via pair dashboard",
+              confirm: true,
+            }),
+          }).catch(() => {});
         },
       })
     );

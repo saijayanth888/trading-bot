@@ -16,7 +16,7 @@
     "tradable_balance_ratio": 0.99,
     "fiat_display_currency": "USD",
     "dry_run": true,
-    "dry_run_wallet": 19000,
+    "dry_run_wallet": 50000,
     "fee": 0.0025,
     "cancel_open_orders_on_exit": false,
     "trading_mode": "spot",
@@ -76,10 +76,10 @@
             "DOGE/USD",
             "AVAX/USD",
             "LINK/USD",
-            "MATIC/USD",
             "DOT/USD",
+            "MATIC/USD",
             "LTC/USD",
-            "BCH/USD"
+            "ATOM/USD"
         ],
         "pair_blacklist": []
     },
@@ -96,7 +96,7 @@
     "api_server": {
         "enabled": false,
         "listen_ip_address": "127.0.0.1",
-        "listen_port": 8081,
+        "listen_port": 8090,
         "verbosity": "error",
         "enable_openapi": false,
         "CORS_origins": [],
@@ -136,5 +136,5 @@
         "api_secret_env": "COINBASE_API_SECRET"
     },
     "logfile": "user_data/logs/freqtrade-nfi-x6.log",
-    "db_url": "sqlite:///user_data/tradesv3-nfi-x6.sqlite"
+    "db_url": "sqlite:////freqtrade/user_data/tradesv3_nfi.sqlite"
 }
