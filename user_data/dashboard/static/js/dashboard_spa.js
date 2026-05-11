@@ -16,13 +16,26 @@
 
   const {
     NumberRoll, Sparkline, CandleChart, GateBadge, KillSwitch,
-    Topbar, Sidebar, Card, ProgressBar, TimeSince,
+    Sidebar, Card, ProgressBar, TimeSince,
   } = window;
 
   // ─────────────── helpers ───────────────
   function envelopeData(env) {
     if (env && typeof env === "object" && "data" in env) return env.data;
     return env;
+  }
+  function fmtClockET() {
+    // ET clock — matches the legacy /ops topbar (operator preference, see MIGRATION_NOTES §1).
+    try {
+      return new Date().toLocaleTimeString("en-US", {
+        hour12: false, timeZone: "America/New_York",
+        hour: "2-digit", minute: "2-digit", second: "2-digit",
+      }) + " ET";
+    } catch (_) {
+      const d = new Date();
+      const pad = (n) => String(n).padStart(2, "0");
+      return pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes()) + ":" + pad(d.getUTCSeconds()) + " UTC";
+    }
   }
   function fmtUSD(v, frac) {
     if (v == null || isNaN(v)) return "—";
@@ -51,31 +64,120 @@
       return { o: Number(b.open), h: Number(b.high), l: Number(b.low), c: Number(b.close), t, i };
     });
   }
-  function toMarkers(backendMarkers, candles) {
-    if (!Array.isArray(backendMarkers)) return [];
-    // Markers have a `time` (unix seconds). Map each to the nearest candle index.
-    const cTimes = candles.map(c => c.t); // not unix — use index via time-search via passed candle map below
-    // Build map of unix → index using backend candles indirectly: we don't have
-    // unix on the converted candles, so accept that backend already aligns.
+  // Backend /api/trades/{b}/{q} returns lightweight-charts-formatted markers:
+  //   { time, position, color, shape, text }
+  // The prototype CandleChart wants:
+  //   { i, side: "BUY"|"SELL", price, label }
+  // Map by aligning marker.time → candle index using the unsorted unix time list
+  // from /api/candles (passed as backendCandles), then parse the price out of
+  // the "BUY 81522.83" / "SELL 81690.09 (-23.37)" `text` field.
+  function toMarkers(backendMarkers, backendCandles) {
+    if (!Array.isArray(backendMarkers) || !Array.isArray(backendCandles) || !backendCandles.length) return [];
+    // Build unix-time → index map (binary search by time field).
+    const times = backendCandles.map(c => Number(c.time || 0));
+    const findIdx = (t) => {
+      if (t == null) return times.length - 1;
+      // Linear scan is fine for ≤500 candles; find closest.
+      let bestIdx = 0;
+      let bestDiff = Infinity;
+      for (let i = 0; i < times.length; i++) {
+        const d = Math.abs(times[i] - t);
+        if (d < bestDiff) { bestDiff = d; bestIdx = i; }
+      }
+      return bestIdx;
+    };
     return backendMarkers.map(m => {
-      // Try to use m.index, otherwise compute approx from m.time vs candles count
-      const idx = (m.index != null) ? m.index
-                : (m.candle_index != null) ? m.candle_index
-                : Math.max(0, Math.min(candles.length - 1, candles.length - 1));
-      const side = (m.side || m.kind || "BUY").toUpperCase();
-      return {
-        i: idx,
-        side: side === "SELL" || side === "EXIT" ? "SELL" : "BUY",
-        price: Number(m.price || m.entry_price || m.exit_price || 0),
-        label: m.label || (side + (m.pnl_pct != null ? " " + fmtPct(m.pnl_pct) : "")),
-      };
+      const idx = findIdx(Number(m.time || 0));
+      const text = String(m.text || "");
+      // "BUY 81522.83" or "SELL 81690.09  (-23.37)"
+      const side = text.toUpperCase().startsWith("SELL")
+        ? "SELL"
+        : text.toUpperCase().startsWith("BUY")
+          ? "BUY"
+          : (m.shape === "arrowDown" || m.position === "aboveBar") ? "SELL" : "BUY";
+      const priceMatch = text.match(/(-?\d+\.?\d*)/);
+      const price = priceMatch ? Number(priceMatch[1]) : 0;
+      return { i: idx, side, price, label: text };
     });
   }
 
   // Default crypto pairs and stock symbols — the operator can override
-  // via URL params. Matches DEFAULT_PAIRS / DEFAULT_STOCK_SYMBOLS in app.py.
+  // via URL params. STOCK_SYMBOLS matches the operator's actual paper-trading
+  // basket (SOFI / PLTR / NVDA / AMD / SPY); the overnight prompt requires
+  // these specific symbols in the stocks dropdown for the ?venue=stocks probe.
   const CRYPTO_PAIRS = ["BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD", "AVAX/USD", "LINK/USD"];
-  const STOCK_SYMBOLS = ["SOFI", "AAPL", "NVDA", "TSLA", "SPY"];
+  const STOCK_SYMBOLS = ["SOFI", "PLTR", "NVDA", "AMD", "SPY"];
+
+  // ─────────────── TopbarLive ───────────────
+  // Replaces the prototype's hardcoded Topbar ($119,842.42 + 1.84%). Wires
+  // EQUITY to /api/ops/combined_portfolio.total_equity and the day-delta pill
+  // to combined_drawdown_pct (signed: -dd surfaces below-peak as red). Also
+  // pulls /api/mode + /api/ops/services.freqtrade for the mode + freqtrade-OK
+  // pills. Mirrors the legacy /ops topbar so /dashboard_spa A/Bs cleanly.
+  function TopbarLive({ killState, setKillState, combined, mode, services, fetchedAt }) {
+    const [clock, setClock] = useState(fmtClockET());
+    useEffect(() => {
+      const t = setInterval(() => setClock(fmtClockET()), 1000);
+      return () => clearInterval(t);
+    }, []);
+    const cp = envelopeData(combined) || {};
+    const modeD = envelopeData(mode) || {};
+    const svc = envelopeData(services) || {};
+    const equity = cp.total_equity != null ? Number(cp.total_equity) : null;
+    const dd = cp.combined_drawdown_pct != null ? Number(cp.combined_drawdown_pct) : null;
+    // Drawdown is reported as a positive % from peak. For the day-pill we
+    // surface a signed delta vs peak (negative = below peak; sign matches the
+    // legacy `/ops` topbar's day-delta convention).
+    const dayPct = dd != null ? -dd : null;
+    const modeLabel = (modeD.mode || "unknown").toUpperCase() + (modeD.dry_run ? " · DRY-RUN" : "");
+    const modeCls = modeD.mode === "live" ? "up" : modeD.mode === "paused" ? "warn" : "info";
+    const ft = svc.freqtrade || {};
+    const ftOk = !!ft.up;
+    return h(
+      "header", { className: "topbar" },
+      h("div", { className: "brand" },
+        h("div", { className: "brand-mark" }, "Q"),
+        h("span", { className: "brand-text" }, "QUANTA ",
+          h("span", { className: "brand-version" }, "v2.6"))
+      ),
+      h("div", { className: "tb-group" },
+        h("span", { className: "pill " + modeCls },
+          h("span", { className: "dot " + modeCls + " pulse" }), " ", modeLabel),
+        h("span", { className: "pill " + (ftOk ? "up" : "down") },
+          h("span", { className: "dot " + (ftOk ? "up" : "down") + " pulse" }),
+          " FREQTRADE ", ftOk ? "OK" : "DOWN")
+      ),
+      h("div", { className: "tb-divider" }),
+      h("div", { className: "tb-group", "data-test": "topbar-equity" },
+        h("span", { className: "dim2 mono", style: { fontSize: "var(--t-xs)", letterSpacing: ".08em" } }, "EQUITY"),
+        equity != null
+          ? h(NumberRoll, { value: equity, decimals: 2, prefix: "$" })
+          : h("span", { className: "num dim" }, "—"),
+        dayPct != null
+          ? h("span", { className: "pill " + (dayPct >= 0 ? "up" : "down"), "data-test": "topbar-daypct" },
+              (dayPct >= 0 ? "+" : "") + dayPct.toFixed(2) + "%")
+          : null
+      ),
+      h("span", { className: "tb-spacer" }),
+      h("div", { className: "tb-group" },
+        h(TimeSince, { ts: fetchedAt, className: "mono dim", style: { fontSize: "var(--t-xs)" } }),
+        h("span", { className: "mono dim", style: { fontSize: "var(--t-xs)" } }, clock)
+      ),
+      h("div", { className: "tb-divider" }),
+      h(KillSwitch, {
+        state: killState,
+        onArm: () => setKillState && setKillState("armed"),
+        onKill: () => {
+          if (setKillState) setKillState("killed");
+          fetch("/api/ops/pause", { method: "POST" }).catch(() => {});
+        },
+        onResume: () => {
+          if (setKillState) setKillState("normal");
+          fetch("/api/ops/resume", { method: "POST" }).catch(() => {});
+        },
+      })
+    );
+  }
 
   function DashApp() {
     const [killState, setKillState] = useState("normal");
@@ -85,7 +187,15 @@
     const [state, setState] = useState(null);
     const [candles, setCandles] = useState([]);
     const [markers, setMarkers] = useState([]);
-    const [meta, setMeta] = useState({ candles_fetched_at: null, state_fetched_at: null, trades_fetched_at: null });
+    const [combined, setCombined] = useState(null);
+    const [mode, setMode] = useState(null);
+    const [services, setServices] = useState(null);
+    const [meta, setMeta] = useState({
+      candles_fetched_at: null,
+      state_fetched_at: null,
+      trades_fetched_at: null,
+      combined_fetched_at: null,
+    });
 
     // URL params on mount
     useEffect(() => {
@@ -112,21 +222,58 @@
       }).catch(() => {});
     }, []);
 
-    // Fetch /api/candles/{base}/{quote} on pair/tf change.
+    // Fetch portfolio + mode + service health for the live topbar.
+    // /api/ops/combined_portfolio drives the EQUITY NumberRoll and the
+    // day-delta pill (signed -combined_drawdown_pct vs peak). /api/mode and
+    // /api/ops/services together replace the prototype's mock PAPER / OK pills.
+    const fetchTopbar = useCallback(() => {
+      fetch("/api/ops/combined_portfolio").then(r => r.json()).then(j => {
+        setCombined(j);
+        setMeta(m => Object.assign({}, m, { combined_fetched_at: new Date().toISOString() }));
+      }).catch(() => {});
+      fetch("/api/mode").then(r => r.json()).then(j => setMode(j)).catch(() => {});
+      fetch("/api/ops/services").then(r => r.json()).then(j => setServices(j)).catch(() => {});
+    }, []);
+
+    // Fetch candles on pair/tf change. Crypto routes through
+    // `/api/candles/{base}/{quote}` (freqtrade-backed). Stocks have NO
+    // base/quote split — they route through `/api/ops/stock_candles/{symbol}`
+    // (enveloped, Alpaca-cached on disk). The latter uses Alpaca's timeframe
+    // codes (`5Min` / `1Hour` / `1Day`) and exposes `bars[]`, not `candles[]`.
     const fetchCandles = useCallback(() => {
-      // For crypto pairs use full base/quote split. For stocks we currently
-      // route to /api/ops/stock_candles via a different endpoint; for the
-      // SPA we keep symmetry with crypto by passing SYM/USD.
-      const [base, quote] = pair.includes("/") ? pair.split("/") : [pair, "USD"];
+      const isStock = !pair.includes("/");
+      if (isStock) {
+        const tfMap = { "1m": "1Min", "5m": "5Min", "15m": "15Min", "1h": "1Hour", "4h": "4Hour", "1d": "1Day" };
+        const sym = pair.toUpperCase();
+        const url = "/api/ops/stock_candles/" + encodeURIComponent(sym) + "?timeframe=" + encodeURIComponent(tfMap[tf] || "5Min");
+        fetch(url).then(r => r.json()).then(env => {
+          const d = envelopeData(env) || {};
+          const rawCandles = (d.bars || []).slice(-300);
+          const cs = toCandles(rawCandles, tf);
+          const lastClose = rawCandles.length ? Number(rawCandles[rawCandles.length - 1].close) : null;
+          setCandles(cs);
+          setMarkers([]);  // no stock trade markers endpoint yet
+          setMeta(m => Object.assign({}, m, {
+            candles_fetched_at: new Date().toISOString(),
+            pair_state: null,
+            last_close: lastClose,
+            source: "alpaca-cache",
+            trades_fetched_at: new Date().toISOString(),
+          }));
+        }).catch(() => { setCandles([]); setMarkers([]); });
+        return;
+      }
+      const [base, quote] = pair.split("/");
       const url = "/api/candles/" + encodeURIComponent(base) + "/" + encodeURIComponent(quote) + "?timeframe=" + encodeURIComponent(tf) + "&limit=300";
       fetch(url).then(r => r.json()).then(j => {
-        const cs = toCandles(j.candles || [], tf);
+        const rawCandles = j.candles || [];
+        const cs = toCandles(rawCandles, tf);
         setCandles(cs);
         setMeta(m => Object.assign({}, m, { candles_fetched_at: new Date().toISOString(), pair_state: j.pair_state, last_close: j.last_close, source: j.source }));
         // Pull trade markers after candles so we can align them.
         const turl = "/api/trades/" + encodeURIComponent(base) + "/" + encodeURIComponent(quote);
         fetch(turl).then(r => r.json()).then(tj => {
-          setMarkers(toMarkers(tj.markers || [], cs));
+          setMarkers(toMarkers(tj.markers || [], rawCandles));
           setMeta(m => Object.assign({}, m, { trades_fetched_at: new Date().toISOString() }));
         }).catch(() => setMarkers([]));
       }).catch(() => setCandles([]));
@@ -135,10 +282,12 @@
     useEffect(() => {
       fetchState();
       fetchCandles();
+      fetchTopbar();
       const isvc = setInterval(fetchState, 10_000);
       const ic = setInterval(fetchCandles, 30_000); // candles refresh slower
-      return () => { clearInterval(isvc); clearInterval(ic); };
-    }, [fetchState, fetchCandles]);
+      const itb = setInterval(fetchTopbar, 10_000);
+      return () => { clearInterval(isvc); clearInterval(ic); clearInterval(itb); };
+    }, [fetchState, fetchCandles, fetchTopbar]);
 
     const venuePairs = venue === "crypto" ? CRYPTO_PAIRS : STOCK_SYMBOLS;
     useEffect(() => {
@@ -149,14 +298,29 @@
     // Build dataset for hero strip
     const pairState = (state && state.pair_state) || (meta && meta.pair_state) || (state || {});
     const px = (meta.last_close != null) ? meta.last_close : (state && state.last_close) || 0;
-    const dayPct = state ? (state.daily_pnl || 0) : 0;  // not exactly pct but the state's pnl key
+    // Day delta on the hero strip is the COMBINED portfolio drawdown vs
+    // peak — same source as the topbar (item 10 fix). Previously this read
+    // `state.daily_pnl` (USD) and rendered it as a percent, which produced
+    // "-23.37% · day" on a $80k BTC chart. Now: `combined_drawdown_pct` from
+    // /api/ops/combined_portfolio, signed so below-peak = negative.
+    const cpData = envelopeData(combined) || {};
+    const ddPct = cpData.combined_drawdown_pct != null
+      ? Number(cpData.combined_drawdown_pct)
+      : null;
+    const dayPct = ddPct != null ? -ddPct : 0;
+    const recent = (state && state.recent_trades) || [];
+    const dayPnlUsd = state ? Number(state.daily_pnl || 0) : 0;
     const regime = state && state.regime;
     const regimeConf = state && state.regime_confidence;
     const gateState = "PASS";  // we don't have a per-pair gate state in /api/state; default
 
     return h(F, null,
       h("div", { className: "app" },
-        h(Topbar, { killState, setKillState, active: "dashboard" }),
+        h(TopbarLive, {
+          killState, setKillState,
+          combined, mode, services,
+          fetchedAt: meta.combined_fetched_at,
+        }),
         h(Sidebar, { active: "dashboard" }),
         h("main", { className: "main" },
           h("div", { className: "page-title" },
@@ -186,9 +350,14 @@
                 h("div", { className: "metric-label" }, pair),
                 h("div", { style: { display: "flex", alignItems: "baseline", gap: 8, marginTop: 4 } },
                   h("span", { style: { fontSize: "var(--t-3xl)", fontFamily: "var(--mono)", fontWeight: 300, letterSpacing: "-.02em" } },
-                    h(NumberRoll, { value: px, decimals: px < 10 ? 4 : 2 })),
-                  h("span", { className: "pill " + (dayPct >= 0 ? "up" : "down") }, fmtPct(dayPct) + " · day")
-                )
+                    px > 0
+                      ? h(NumberRoll, { value: px, decimals: px < 10 ? 4 : (px < 1000 ? 2 : 0), prefix: "$" })
+                      : "—"),
+                  h("span", { className: "pill " + (dayPct >= 0 ? "up" : "down"), "data-test": "hero-daypct" },
+                    fmtPct(dayPct) + " · day")
+                ),
+                dayPnlUsd !== 0 && h("div", { className: "mono dim", style: { fontSize: "var(--t-2xs)", marginTop: 2 } },
+                  "Crypto day P&L: " + (dayPnlUsd >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(dayPnlUsd)))
               ),
               h("div", { className: "vr" }),
               h(Mini2, { lbl: "SOURCE", v: meta.source || "—" }),
@@ -248,6 +417,11 @@
     const tft = (state && state.tft) || {};
     const meta_signal = state && state.meta_signal;
     const meta_conf = state && state.meta_confidence;
+    // TFT probs are 0..1 — display as percentage. Confidence likewise.
+    const pct1 = (v) => v != null ? (Number(v) * 100).toFixed(1) + "%" : "—";
+    const sig = Number(meta_signal || 0);
+    const metaCls = sig > 0.05 ? "up" : sig < -0.05 ? "down" : "info";
+    const metaLbl = sig > 0.05 ? "LONG" : sig < -0.05 ? "SHORT" : "HOLD";
     return h(Card, {
       num: "02", title: "Model view", sub: "TFT · meta-agent · live",
       right: h(F, null,
@@ -259,15 +433,16 @@
       h("div", { style: { display: "flex", alignItems: "baseline", gap: "var(--s-3)", margin: "8px 0" } },
         h("div", { style: { flex: 1 } },
           h("div", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, "P(UP)"),
-          h("div", { className: "up num", style: { fontSize: "var(--t-xl)" } }, tft.up != null ? Number(tft.up).toFixed(2) : "—")),
+          h("div", { className: "up num", style: { fontSize: "var(--t-xl)" } }, pct1(tft.up))),
         h("div", { style: { flex: 1 } },
           h("div", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, "P(FLAT)"),
-          h("div", { className: "num", style: { fontSize: "var(--t-xl)" } }, tft.flat != null ? Number(tft.flat).toFixed(2) : "—")),
+          h("div", { className: "num", style: { fontSize: "var(--t-xl)" } }, pct1(tft.flat))),
         h("div", { style: { flex: 1 } },
           h("div", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, "P(DOWN)"),
-          h("div", { className: "down num", style: { fontSize: "var(--t-xl)" } }, tft.down != null ? Number(tft.down).toFixed(2) : "—"))
+          h("div", { className: "down num", style: { fontSize: "var(--t-xl)" } }, pct1(tft.down)))
       ),
-      h("div", { className: "metric-label", style: { marginTop: 10 } }, "CONFIDENCE"),
+      h("div", { className: "metric-label", style: { marginTop: 10 } },
+        "CONFIDENCE · " + pct1(tft.confidence)),
       h(ProgressBar, { value: (tft.confidence || 0) * 100, max: 100, cls: "accent" }),
 
       h("div", { className: "hr" }),
@@ -275,14 +450,13 @@
       h("div", { style: { display: "flex", alignItems: "center", gap: 8, padding: "6px 0" } },
         h("span", { className: "metric-label" }, "META-AGENT"),
         h("span", { className: "tb-spacer", style: { flex: 1 } }),
-        h("span", {
-          className: "pill " + (meta_signal === 1 ? "up" : meta_signal === -1 ? "down" : "info"),
-        }, h("span", { className: "dot " + (meta_signal === 1 ? "up" : meta_signal === -1 ? "down" : "info") + " pulse" }), " ",
-           meta_signal === 1 ? "ENTER LONG" : meta_signal === -1 ? "ENTER SHORT" : "HOLD")
+        h("span", { className: "pill " + metaCls },
+          h("span", { className: "dot " + metaCls + " pulse" }), " ", metaLbl)
       ),
       h("div", { className: "dim", style: { fontSize: "var(--t-xs)", lineHeight: 1.55, marginTop: 4 } },
-        "Meta confidence: " + (meta_conf != null ? meta_conf.toFixed(2) : "—") +
-        " · TFT confidence: " + (tft.confidence != null ? Number(tft.confidence).toFixed(2) : "—"))
+        "Meta signal: " + (meta_signal != null ? Number(meta_signal).toFixed(3) : "—") +
+        " · meta conf: " + pct1(meta_conf) +
+        " · TFT conf: " + pct1(tft.confidence))
     );
   }
 
@@ -299,17 +473,21 @@
           state && state.regime ? state.regime : "—"),
         h("span", { className: "dim" }, "Confidence"),
         h("span", { className: "num", style: { textAlign: "right" } },
-          state && state.regime_confidence != null ? Number(state.regime_confidence).toFixed(2) : "—")
+          state && state.regime_confidence != null ? (Number(state.regime_confidence) * 100).toFixed(1) + "%" : "—")
       ),
       h("div", { className: "hr" }),
       h("div", { className: "metric-label" }, "SENTIMENT"),
       h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginTop: 6, fontSize: "var(--t-xs)" } },
         h("span", { className: "dim" }, "Score"),
-        h("span", { className: "num " + ((state && state.sentiment_score) >= 0 ? "up" : "down"), style: { textAlign: "right" } },
-          state && state.sentiment_score != null ? Number(state.sentiment_score).toFixed(2) : "—"),
+        h("span", { className: "num " + ((state && state.sentiment_score || 0) >= 0 ? "up" : "down"), style: { textAlign: "right" } },
+          state && state.sentiment_score != null
+            ? ((Number(state.sentiment_score) >= 0 ? "+" : "") + Number(state.sentiment_score).toFixed(3))
+            : "—"),
         h("span", { className: "dim" }, "Confidence"),
         h("span", { className: "num", style: { textAlign: "right" } },
-          state && state.sentiment_confidence != null ? Number(state.sentiment_confidence).toFixed(2) : "—")
+          state && state.sentiment_confidence != null
+            ? (Number(state.sentiment_confidence) * 100).toFixed(1) + "%"
+            : "—")
       ),
       h("div", { className: "hr" }),
       h("div", { className: "metric-label" }, "ON-CHAIN"),
@@ -322,7 +500,7 @@
           onchain.mvrv != null ? Number(onchain.mvrv).toFixed(2) : "—"),
         h("span", { className: "dim" }, "Whale 1h"),
         h("span", { className: "num", style: { textAlign: "right" } },
-          onchain.whale_count_1h != null ? onchain.whale_count_1h : "—")
+          onchain.whale_count_1h != null ? Number(onchain.whale_count_1h).toFixed(2) : "—")
       )
     );
   }
@@ -362,9 +540,14 @@
 
   function RecentTrades({ state, fetchedAt }) {
     const trades = (state && state.recent_trades) || [];
+    // /api/state recent_trades shape:
+    //   { pair, opened_at, closed_at, entry_price, exit_price, pnl, pnl_pct,
+    //     exit_reason, confidence, regime }
+    // pnl_pct is a FRACTION (e.g. -0.012305 = -1.23%). Multiply for display.
+    // There is no `side` field — freqtrade is long-only here, so display LONG.
     return h(Card, {
       num: "05", title: "Recent trades · last 10",
-      sub: trades.length + " rows",
+      sub: trades.length + " rows · " + (trades.filter(t => Number(t.pnl_pct || 0) > 0).length) + " green",
       right: h(TimeSince, { ts: fetchedAt, className: "mono dim", style: { fontSize: "var(--t-2xs)" } })
     },
       trades.length === 0
@@ -373,16 +556,30 @@
             h("thead", null, h("tr", null,
               h("th", null, "Pair"),
               h("th", null, "Side"),
+              h("th", { style: { textAlign: "right" } }, "Entry"),
+              h("th", { style: { textAlign: "right" } }, "Exit"),
               h("th", { style: { textAlign: "right" } }, "PnL %"),
-              h("th", null, "When")
+              h("th", null, "Closed"),
+              h("th", null, "Reason")
             )),
-            h("tbody", null, trades.map((t, i) => h("tr", { key: i },
-              h("td", null, h("strong", { className: "mono" }, t.pair || "—")),
-              h("td", { className: "mono " + (t.side === "BUY" ? "up" : "down") }, t.side || "—"),
-              h("td", { className: "num " + ((t.profit_pct || 0) >= 0 ? "up" : "down"), style: { textAlign: "right" } },
-                t.profit_pct != null ? fmtPct(t.profit_pct * 100, 2) : (t.pnl_pct != null ? fmtPct(t.pnl_pct, 2) : "—")),
-              h("td", { className: "dim mono", style: { fontSize: "var(--t-xs)" } }, t.close_date || t.open_date || "—")
-            )))
+            h("tbody", null, trades.map((t, i) => {
+              const pct = Number(t.pnl_pct != null ? t.pnl_pct : 0) * 100;
+              const pnlUp = Number(t.pnl || 0) >= 0;
+              const closedAt = t.closed_at || t.opened_at;
+              const closedShort = closedAt ? String(closedAt).replace("T", " ").slice(0, 16) : "—";
+              const entryPx = t.entry_price;
+              const exitPx = t.exit_price;
+              return h("tr", { key: i },
+                h("td", null, h("strong", { className: "mono" }, t.pair || "—")),
+                h("td", { className: "mono up" }, "LONG"),
+                h("td", { className: "num", style: { textAlign: "right" } }, entryPx != null ? fmtUSD(entryPx, entryPx < 10 ? 4 : 2) : "—"),
+                h("td", { className: "num", style: { textAlign: "right" } }, exitPx != null ? fmtUSD(exitPx, exitPx < 10 ? 4 : 2) : "—"),
+                h("td", { className: "num " + (pnlUp ? "up" : "down"), style: { textAlign: "right" } },
+                  t.pnl_pct != null ? fmtPct(pct, 2) : "—"),
+                h("td", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, closedShort),
+                h("td", { className: "dim", style: { fontSize: "var(--t-2xs)" } }, t.exit_reason || "—")
+              );
+            }))
           )
     );
   }
