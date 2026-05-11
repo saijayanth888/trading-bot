@@ -20,3 +20,21 @@ data inside `.env`.
 
 This directory's contents (except `README.md` and `.gitkeep`) are excluded
 from version control via `.gitignore`. Never commit the real key.
+
+## Filesystem permissions (P0-W)
+
+After dropping the key, run:
+
+```
+./scripts/harden_secrets.sh
+```
+
+It will:
+- `chmod 700 secrets/` (operator-only)
+- `chmod 600` every file inside `secrets/`
+- Also `chmod 600 .env` if present in the repo root
+
+The script is idempotent and safe to re-run on a cron schedule. It is **not**
+run automatically by the operator main agent — invoke it explicitly after
+adding new credential files.
+

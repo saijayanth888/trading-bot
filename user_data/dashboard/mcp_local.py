@@ -259,23 +259,89 @@ def get_evolution_status() -> dict:
     return out
 
 
+_EVOLUTION_PID_LOCK = USER_DATA_ROOT / "state" / "evolution_cycle.pid"
+
+
+def _evolution_process_alive(pid: int) -> bool:
+    """True if the recorded PID corresponds to a live process."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but we can't signal it — still counts as alive.
+        return True
+    return True
+
+
 def trigger_evolution_cycle() -> dict:
+    """Spawn a DRL evolution cycle in the background.
+
+    PID-lock guard (P0-E): refuse to start a second cycle while one is still
+    running. The lock file lives under user_data/state/ which is the operator
+    state directory; stale locks (PID exited) are reclaimed automatically.
+    """
     refused = _require_auth()
     if refused:
         return refused
+
+    # Honor an in-flight cycle — multiple operator clicks on the Console
+    # button should not stack a dozen `train_drl.py` processes on the GPU.
+    if _EVOLUTION_PID_LOCK.exists():
+        try:
+            existing_pid = int(_EVOLUTION_PID_LOCK.read_text().strip() or "0")
+        except (ValueError, OSError):
+            existing_pid = 0
+        if existing_pid and _evolution_process_alive(existing_pid):
+            return {
+                "error": "evolution cycle already running",
+                "pid": existing_pid,
+                "lock_file": str(_EVOLUTION_PID_LOCK),
+            }
+        # Stale lock — caller exited without cleanup. Reclaim it.
+        try:
+            _EVOLUTION_PID_LOCK.unlink()
+        except OSError:
+            pass
+
     script = USER_DATA_ROOT.parent / "scripts" / "train_drl.py"
     if not script.exists():
         # Try the alternate location
         script = USER_DATA_ROOT / "scripts" / "train_drl.py"
         if not script.exists():
             return {"error": f"script missing: {script}"}
+
+    try:
+        _EVOLUTION_PID_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return {"error": f"could not create state dir: {exc}"}
+
     proc = subprocess.Popen(
         ["python3", str(script), "--synthetic", "--timesteps", "20000"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         env=os.environ.copy(), cwd=str(USER_DATA_ROOT.parent),
     )
+
+    # Best-effort write of the PID lock. If the disk is full or the path is
+    # read-only the cycle still ran — we just can't enforce single-flight on
+    # the next click; log it and surface a warning in the result.
+    lock_warning = None
+    try:
+        tmp = _EVOLUTION_PID_LOCK.with_suffix(".tmp")
+        tmp.write_text(str(proc.pid))
+        tmp.replace(_EVOLUTION_PID_LOCK)
+    except OSError as exc:
+        lock_warning = f"could not write pid lock: {exc}"
+        logger.warning("trigger_evolution_cycle: %s", lock_warning)
+
     _audit("trigger_evolution_cycle", {}, f"pid={proc.pid}")
-    return {"started": True, "pid": proc.pid, "note": "running in background"}
+    out = {"started": True, "pid": proc.pid, "note": "running in background",
+           "lock_file": str(_EVOLUTION_PID_LOCK)}
+    if lock_warning:
+        out["lock_warning"] = lock_warning
+    return out
 
 
 def get_champion_genome() -> dict:

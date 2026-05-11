@@ -556,17 +556,39 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
     # Capital allocation + rolling-Sharpe gate
     # ------------------------------------------------------------------
 
+    # P0-L: default for unknown pairs. 0.05 (5% of equity) leaves trading
+    # enabled but tightly capped; the warning surfaces the missing
+    # configuration so the operator can fix the weights table.
+    _MISSING_PAIR_WEIGHT_DEFAULT: float = 0.05
+
     def _pair_weight(self, pair: str) -> float:
         """Max fraction of equity allowed for this pair (0 = data-only).
 
         Comes from config.json[capital_allocation][pair_weights]. Defaults to
-        1.0 if no allocation is configured (i.e. no per-pair cap).
+        1.0 if no allocation is configured (i.e. no per-pair cap). When a
+        specific pair is missing from a configured weights map, fall back to
+        5% rather than 0 — the previous behaviour silently disabled trading
+        on any pair the operator forgot to add to the table.
         """
         if not self._capital_allocation:
             return 1.0
         weights = self._capital_allocation.get("pair_weights") or {}
         if pair not in weights:
-            return 0.0  # missing = excluded
+            # Log a one-shot warning per pair so the operator can fix it,
+            # but DO trade — at the safe-default cap.
+            seen = getattr(self, "_missing_weight_warned", None)
+            if seen is None:
+                seen = set()
+                self._missing_weight_warned = seen
+            if pair not in seen:
+                logger.warning(
+                    "[strategy] pair %s missing from "
+                    "capital_allocation.pair_weights — using default %.2f. "
+                    "Add an explicit entry to config.json to silence this.",
+                    pair, self._MISSING_PAIR_WEIGHT_DEFAULT,
+                )
+                seen.add(pair)
+            return self._MISSING_PAIR_WEIGHT_DEFAULT
         try:
             return max(0.0, min(1.0, float(weights[pair])))
         except (TypeError, ValueError):
@@ -721,6 +743,40 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         except Exception:
             return []
 
+    def _open_unrealised_pnl(self) -> float:
+        """Sum signed mark-to-market P&L of every open trade (quote ccy).
+
+        P0-I: feeds the risk governor's daily-loss check. Falls back to 0.0
+        when the trade proxy isn't available (e.g. unit tests, dry-run boot
+        before any candle has populated current_rate).
+        """
+        try:
+            from freqtrade.persistence import Trade
+            total = 0.0
+            for t in Trade.get_trades_proxy(is_open=True):
+                # Try the rich current_profit_abs accessor first (freqtrade
+                # exposes it via the strategy proxy). Fall back to a manual
+                # (current_rate - open_rate) * amount calc when the accessor
+                # is missing or returns None.
+                p = getattr(t, "calc_profit", None)
+                value = None
+                if callable(p):
+                    try:
+                        value = float(p() or 0.0)
+                    except Exception:
+                        value = None
+                if value is None:
+                    cr = getattr(t, "current_rate", None) or getattr(t, "close_rate", None)
+                    orate = getattr(t, "open_rate", None)
+                    amt = getattr(t, "amount", None)
+                    if cr is None or orate is None or amt is None:
+                        continue
+                    value = (float(cr) - float(orate)) * float(amt)
+                total += value
+            return float(total)
+        except Exception:
+            return 0.0
+
     def _pair_returns_for_correlation(self, pairs: list[str]) -> dict[str, "pd.Series"]:
         """
         Build a {pair: returns Series} dict for the governor's correlation gate.
@@ -743,7 +799,23 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         self, pair: str, order_type: str, amount: float, rate: float,
         time_in_force: str, current_time, entry_tag, side: str, **kwargs,
     ) -> bool:
-        """Final risk gate. Return False to abort the order."""
+        """Final risk gate. Return False to abort the order.
+
+        P0-N: idempotent on (pair, side, rate). Freqtrade retries this hook
+        when an order partially fills + the bot re-runs the entry path on
+        the next candle; without the guard we'd write a second
+        trade_journal row + a duplicate Slack alert. The journal marker
+        ``_journal_id_by_trade[pair@rate]`` is the same key the exit-side
+        code uses to correlate rows, so reusing it here is consistent.
+        """
+        marker_key = f"{pair}@{float(rate):.10g}"
+        existing_jid = getattr(self, "_journal_id_by_trade", {}).get(marker_key)
+        if existing_jid is not None:
+            logger.info(
+                "[strategy] confirm_trade_entry skip (idempotency): "
+                "%s already journaled jid=%s", marker_key, existing_jid,
+            )
+            return True
         gov = self._risk_governor
         if gov is None:
             return True
@@ -769,6 +841,7 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         open_positions = self._open_positions_snapshot()
         peer_pairs = [p for p, _ in open_positions if p != pair]
         pair_returns = self._pair_returns_for_correlation([pair, *peer_pairs])
+        open_unrealised = self._open_unrealised_pnl()
 
         decision = gov.approve_entry(
             pair=pair,
@@ -778,6 +851,7 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
             model_confidence=meta_conf,
             open_positions=open_positions,
             pair_returns=pair_returns,
+            open_unrealised_pnl=open_unrealised,
         )
         if not decision.approved:
             logger.warning(
@@ -1241,6 +1315,7 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
                     model_confidence=meta_conf,
                     open_positions=self._open_positions_snapshot(),
                     pair_returns=None,    # correlation re-checked in confirm_trade_entry
+                    open_unrealised_pnl=self._open_unrealised_pnl(),
                 )
                 if decision.approved and decision.suggested_stake > 0:
                     stake = float(decision.suggested_stake)

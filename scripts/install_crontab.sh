@@ -21,8 +21,10 @@ TAG="trading-bot"
 
 read -r -d '' BOT_LINES <<EOF || true
 # === ${TAG} BEGIN === (managed by install_crontab.sh; do not edit by hand)
-# Hourly safety net: emergency stop on >3% daily loss, halve ratio on negative weekly Sharpe
-0 * * * * ${SCRIPTS}/auto_rollback.py >> ${LOG_DIR}/auto_rollback.log 2>&1
+# Every 5 min safety net (P0-F): emergency stop on >3% daily loss, halve
+# ratio on negative weekly Sharpe. Tight loop so a sharp intraday move can
+# trip the kill switch before another candle of damage accumulates.
+*/5 * * * * ${SCRIPTS}/auto_rollback.py >> ${LOG_DIR}/auto_rollback.log 2>&1
 # Daily incremental backup at 02:00 UTC
 0 2 * * * ${SCRIPTS}/backup.sh daily >> ${LOG_DIR}/backup.log 2>&1
 # Weekly full backup Sunday 03:00 UTC

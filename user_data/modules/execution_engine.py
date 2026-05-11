@@ -177,6 +177,11 @@ class ExecutionEngine:
         self._price_fn = price_fn
         self._lock = threading.Lock()
         self._audit = _setup_execution_logger(self.cfg.log_path)
+        # P0-K: in dry-run, _fetch_order needs to return a real float for
+        # filled_size or monitor()'s `float(state.get("filled_size", 0.0))`
+        # cast raised ValueError on the sentinel string ``"_DRY_RUN_FULL_"``.
+        # Track the placed base_size per order_id so dry-run can return it.
+        self._dry_run_base_size_by_oid: dict[str, float] = {}
         if self.cfg.dry_run:
             self._audit.info("INIT    dry_run=True (no network calls)")
         else:
@@ -490,9 +495,16 @@ class ExecutionEngine:
         if self.cfg.dry_run:
             time.sleep(0.001)
             # Deterministic-ish synthetic ID
+            order_id = f"dry-{client_order_id}-{int(time.time()*1000)}"
+            # P0-K: stash the placed size so _fetch_order can echo a real
+            # float in the FILLED response.
+            try:
+                self._dry_run_base_size_by_oid[order_id] = float(base_size)
+            except (TypeError, ValueError):
+                self._dry_run_base_size_by_oid[order_id] = 0.0
             return {
                 "success": True,
-                "order_id": f"dry-{client_order_id}-{int(time.time()*1000)}",
+                "order_id": order_id,
                 "client_order_id": client_order_id,
             }
         client = self._ensure_client()
@@ -517,8 +529,16 @@ class ExecutionEngine:
         self, order_id: str, client_order_id: str | None,
     ) -> dict[str, Any] | None:
         if self.cfg.dry_run:
-            # Simulate fast fill in dry-run
-            return {"status": "FILLED", "filled_size": "_DRY_RUN_FULL_", "average_filled_price": None}
+            # P0-K: simulate fast full fill. Return a *real float* — the
+            # earlier sentinel string ``"_DRY_RUN_FULL_"`` crashed
+            # monitor() at ``float(state.get("filled_size", 0.0))``.
+            # The size was stashed in _submit_order keyed by order_id.
+            filled = float(self._dry_run_base_size_by_oid.get(order_id, 0.0))
+            return {
+                "status": "FILLED",
+                "filled_size": filled,
+                "average_filled_price": None,
+            }
         client = self._ensure_client()
         try:
             resp = client.get_order(order_id=order_id)
