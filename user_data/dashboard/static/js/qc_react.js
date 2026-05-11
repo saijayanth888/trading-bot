@@ -752,12 +752,31 @@
       };
     }, []);
 
+    const liveStyle = { position: "absolute", left: "-9999px", width: 1, height: 1, overflow: "hidden" };
+    const liveMsg = state === "killed" ? "Bot paused" : (state === "armed" ? "Bot armed" : "");
+    const liveRegion = h("div", {
+      "aria-live": "assertive",
+      role: "status",
+      className: "sr-only",
+      style: liveStyle,
+    }, liveMsg);
+
     if (state === "killed") {
       return h(
         "div",
         { className: "kill-wrap" },
         h("span", { className: "kill-label", style: { color: "var(--down)" } }, "● KILLED"),
-        h("button", { className: "kill-btn", onClick: onResume }, "RESUME")
+        h(
+          "button",
+          {
+            className: "kill-btn",
+            onClick: onResume,
+            "aria-pressed": true,
+            "aria-label": "Resume trading",
+          },
+          "RESUME"
+        ),
+        liveRegion
       );
     }
     if (state === "armed") {
@@ -774,18 +793,39 @@
             onMouseLeave: up,
             onTouchStart: down,
             onTouchEnd: up,
+            "aria-pressed": true,
+            "aria-label": "Pause trading (hold to confirm)",
           },
           h("span", { className: "kill-hold-fill", style: { width: holding + "%" } }),
           h("span", { className: "kill-hold-text" }, "HOLD 1.5s TO CONFIRM")
         ),
-        h("button", { className: "kill-btn", onClick: onResume }, "CANCEL")
+        h(
+          "button",
+          {
+            className: "kill-btn",
+            onClick: onResume,
+            "aria-label": "Cancel arming",
+          },
+          "CANCEL"
+        ),
+        liveRegion
       );
     }
     return h(
       "div",
       { className: "kill-wrap" },
       h("span", { className: "kill-label" }, "KILL"),
-      h("button", { className: "kill-btn", onClick: onArm }, "ARM")
+      h(
+        "button",
+        {
+          className: "kill-btn",
+          onClick: onArm,
+          "aria-pressed": false,
+          "aria-label": "Arm pause (then hold to confirm)",
+        },
+        "ARM"
+      ),
+      liveRegion
     );
   }
 
