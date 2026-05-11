@@ -253,19 +253,32 @@ def test_pause_allows_same_origin_from_localhost(monkeypatch):
     assert ops_routes.require_mcp_key(request=req, authorization=None) is None
 
 
-def test_same_origin_from_non_loopback_peer_requires_auth(monkeypatch):
-    """Reverse-proxy scenario: Origin and Host match (proxy rewrites them)
-    but the peer is non-loopback (e.g. 10.0.0.5). Defense-in-depth must
-    refuse to bypass — bearer becomes required again."""
+def test_same_origin_from_public_peer_requires_auth(monkeypatch):
+    """Reverse-proxy attack scenario: Origin and Host match (proxy rewrites
+    them) but the peer is a public address (e.g. 93.184.216.34). The
+    same-origin bypass must refuse — bearer becomes required."""
     from fastapi import HTTPException
     monkeypatch.setattr(ops_routes, "_DASHBOARD_MCP_KEY", "test-key-for-b17")
     req = _FakeAuthReq(
         headers={"Origin": "http://localhost:8081", "Host": "localhost:8081"},
-        client_host="10.0.0.5",
+        client_host="93.184.216.34",
     )
     with pytest.raises(HTTPException) as exc:
         ops_routes.require_mcp_key(request=req, authorization=None)
     assert exc.value.status_code == 401
+
+
+def test_same_origin_from_docker_bridge_peer_allowed(monkeypatch):
+    """Docker port-forwarding scenario: host binds 127.0.0.1:8081 (P0-V),
+    but inside the container the connection's peer is the docker bridge
+    gateway IP (e.g. 172.19.0.1). P0-V already refused any traffic that
+    wasn't 127.0.0.1 on the host, so an RFC1918 peer here is safe to trust."""
+    monkeypatch.setattr(ops_routes, "_DASHBOARD_MCP_KEY", "test-key-for-b17")
+    req = _FakeAuthReq(
+        headers={"Origin": "http://localhost:8081", "Host": "localhost:8081"},
+        client_host="172.19.0.1",
+    )
+    assert ops_routes.require_mcp_key(request=req, authorization=None) is None
 
 
 def test_bearer_token_still_works_from_any_peer(monkeypatch):
@@ -274,7 +287,7 @@ def test_bearer_token_still_works_from_any_peer(monkeypatch):
     monkeypatch.setattr(ops_routes, "_DASHBOARD_MCP_KEY", "test-key-for-b17")
     req = _FakeAuthReq(
         headers={"Host": "localhost:8081"},  # no Origin -- bypass path skipped
-        client_host="10.0.0.5",
+        client_host="93.184.216.34",
     )
     assert ops_routes.require_mcp_key(
         request=req, authorization="Bearer test-key-for-b17"
