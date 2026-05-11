@@ -82,7 +82,7 @@
         "train_period_days": 730,
         "backtest_period_days": 14,
         "live_retrain_hours": 24,
-        "expiration_hours": 26,
+        "expiration_hours": 72,
         "identifier": "tft_v1",
         "fit_live_predictions_candles": 300,
         "conv_width": 60,

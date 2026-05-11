@@ -1581,9 +1581,15 @@ async def gates():
     # actual gate the strategy enforces. Falls back to the strategy defaults
     # (FreqAIMeanRevV1._DEFAULT_REGIME_GATING) when keys are missing.
     _rg_live = {}
+    _expiration_h = 26.0
+    _identifier = "tft_v1"
     try:
         import json as _json
-        _rg_live = (_json.loads(CONFIG_PATH.read_text()).get("regime_gating") or {})
+        _cfg = _json.loads(CONFIG_PATH.read_text())
+        _rg_live = (_cfg.get("regime_gating") or {})
+        _freqai = (_cfg.get("freqai") or {})
+        _expiration_h = float(_freqai.get("expiration_hours") or 26.0)
+        _identifier = str(_freqai.get("identifier") or "tft_v1")
     except Exception:
         pass
     TFT_MIN = float(_rg_live.get("tft_min_confidence", 0.40))
@@ -1597,6 +1603,18 @@ async def gates():
         "high_volatility":  +0.05,
         "unknown":          0.0,
     }
+
+    # FreqAI authoritative model registry — used by the `model_freshness` gate
+    # to surface MODEL EXPIRED before the strategy-level do_predict gate.
+    _pair_dict: dict = {}
+    try:
+        import json as _json2, time as _time
+        _pd_path = Path(f"/freqtrade/user_data/models/{_identifier}/pair_dictionary.json")
+        if _pd_path.exists():
+            _pair_dict = _json2.loads(_pd_path.read_text()) or {}
+    except Exception as _exc:
+        logger.warning("gates: pair_dictionary read failed: %s", _exc)
+    _now_ts = int(__import__("time").time())
 
     pairs = [p.strip() for p in os.environ.get("DASHBOARD_PAIRS", "BTC/USD,ETH/USD,SOL/USD").split(",") if p.strip()]
     timeframe = os.environ.get("DASHBOARD_TIMEFRAME", "5m")
@@ -1649,7 +1667,35 @@ async def gates():
             "detail": "weight > 0 (assumed)",
         })
 
-        # 2. do_predict — FreqAI has live predictions
+        # 2. model_freshness — FreqAI's pair_dictionary.json is the authoritative
+        # source of "is there a usable model right now?". When the registered
+        # trained_timestamp is older than freqai.expiration_hours, FreqAI returns
+        # do_predict=2 / prediction=0 to the strategy and the bot CANNOT trade
+        # this pair. Surface that explicitly here so the operator sees the real
+        # reason on the gates panel instead of a misleading "no signal" null.
+        _pd_entry = _pair_dict.get(pair) or {}
+        _trained_ts = _pd_entry.get("trained_timestamp")
+        if not _trained_ts:
+            gate_results.append({
+                "gate": "model_freshness",
+                "pass": False,
+                "detail": "no model registered in pair_dictionary",
+            })
+            _age_h = None
+        else:
+            _age_h = (_now_ts - int(_trained_ts)) / 3600.0
+            _is_fresh = _age_h < _expiration_h
+            gate_results.append({
+                "gate": "model_freshness",
+                "pass": _is_fresh,
+                "detail": (
+                    f"model {_age_h:.1f}h old (limit {_expiration_h:.0f}h)"
+                    if _is_fresh
+                    else f"MODEL EXPIRED · {_age_h:.1f}h old > {_expiration_h:.0f}h"
+                ),
+            })
+
+        # 3. do_predict — FreqAI has live predictions on the latest bar
         gate_results.append({
             "gate": "freqai_predict",
             "pass": do_predict in (1, True, "1") if do_predict is not None else None,
@@ -1771,6 +1817,8 @@ async def gates():
                 "meta_confidence": meta_conf,
                 "volume": volume,
                 "threshold": threshold,
+                "model_age_h": _age_h,
+                "model_expiration_h": _expiration_h,
             },
         })
 

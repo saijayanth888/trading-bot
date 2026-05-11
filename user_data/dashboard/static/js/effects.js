@@ -268,15 +268,31 @@
         heroBot.setAttribute("data-state", display);
         const nameEl = document.getElementById("hero-bot-state");
         if (nameEl) {
-          const label = runState === "running" ? "Running"
-            : runState === "reload_config" ? "Reloading"
-            : runState === "starting" ? "Starting"
-            : runState === "init" ? "Init"
-            : runState === "paused" ? "Paused"
-            : runState === "stopped" ? "Stopped"
-            : runState === "unknown" ? "Offline"
-            : runState === "offline" ? "Offline"
-            : runState.charAt(0).toUpperCase() + runState.slice(1);
+          // Engine state alone ("Running") confused operators when the regime
+          // hard-block kept the bot from entering. Derive a posture label that
+          // tells the truth: "Engine Active · Holding (Downtrend)" when every
+          // pair is blocked. Mirrors the gates panel's regime [HARD BLOCK] tag.
+          // /api/ops/regime response shape: { data: { current: "trending_down", ... } }
+          // Earlier we looked at g.regime / g.current_regime — neither exists,
+          // so cryptoBlocked silently evaluated false and the label always said
+          // "READY" even mid-downtrend. The correct key is g.current.
+          const cryptoBlocked = String(g.current || g.regime || g.current_regime || "").toLowerCase() === "trending_down";
+          const openCount = Number(open) || 0;
+          let label;
+          if (runState === "running") {
+            if (openCount > 0)       label = "ENGINE ACTIVE · IN TRADE";
+            else if (cryptoBlocked)  label = "ENGINE ACTIVE · HOLDING (DOWNTREND)";
+            else                     label = "ENGINE ACTIVE · READY";
+          } else {
+            label = runState === "reload_config" ? "RELOADING"
+              : runState === "starting" ? "STARTING"
+              : runState === "init" ? "INIT"
+              : runState === "paused" ? "PAUSED"
+              : runState === "stopped" ? "STOPPED"
+              : runState === "unknown" ? "OFFLINE"
+              : runState === "offline" ? "OFFLINE"
+              : runState.toUpperCase();
+          }
           nameEl.textContent = label;
         }
         // Mode pill (PAPER / LIVE / PAUSED)
