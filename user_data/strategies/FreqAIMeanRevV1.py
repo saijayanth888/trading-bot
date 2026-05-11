@@ -323,6 +323,13 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         "trending_up_trail_distance": -0.025,
         "tft_min_confidence": 0.40,
         "meta_min_confidence": 0.40,
+        # Trending-down is no longer a categorical block — it's a
+        # probability-weighted entry. Require the model's `up` prob (or
+        # meta_confidence on long signals, when the meta-agent is active)
+        # to be >= this floor before going long against the trend. Default
+        # 0.70 picks up the rare strong-reversal candle while still
+        # excluding the bulk of choppy down-trend noise.
+        "trending_down_min_confidence": 0.70,
     }
 
     @property
@@ -351,6 +358,13 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
     @property
     def HIGH_VOL_MIN_CONFIDENCE(self) -> float:
         return float(self._regime_gating["high_vol_min_confidence"])
+
+    @property
+    def TRENDING_DOWN_MIN_CONFIDENCE(self) -> float:
+        """TFT `up` (or meta_confidence when active) floor for long entries
+        while regime_label == 'trending_down'. Replaces the prior hard block;
+        see populate_entry_trend for usage."""
+        return float(self._regime_gating["trending_down_min_confidence"])
 
     @property
     def MEAN_REV_TAKE_PROFIT(self) -> float:
@@ -1185,9 +1199,20 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         # write cannot accidentally resurrect entries on DB-down rows.
         if "regime_confidence" in dataframe.columns:
             long_conditions.append(dataframe["regime_confidence"] >= 0)
-        # In trending_down: hard block long entries.
+        # In trending_down: probability-weighted entry, NOT a categorical
+        # block. The HMM sits in trending_down ~30-50% of the time and the
+        # old hard block left us dormant for entire sessions. Allow entry
+        # against the trend only when the model is exceptionally confident
+        # (TFT up >= TRENDING_DOWN_MIN_CONFIDENCE, default 0.70). The
+        # per-row threshold already adds a +0.20 regime delta on top of the
+        # base entry_threshold; this knob is a separate hard floor so the
+        # tuner can lift the trending_down bar without disturbing the
+        # base-threshold sweep.
         if "regime_label" in dataframe.columns:
-            long_conditions.append(dataframe["regime_label"] != "trending_down")
+            long_conditions.append(
+                (dataframe["regime_label"] != "trending_down")
+                | (dataframe["up"] >= self.TRENDING_DOWN_MIN_CONFIDENCE)
+            )
         # In high_volatility: require very high model confidence on top.
         if "regime_label" in dataframe.columns:
             long_conditions.append(
@@ -1200,11 +1225,26 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
 
         # Meta-agent gate: when the DRL ensemble is loaded, require
         # meta_signal == +1 AND meta_confidence ≥ threshold. We still keep
-        # the TFT-based conditions above as a hard floor.
+        # the TFT-based conditions above as a hard floor. In trending_down
+        # the meta-confidence floor is lifted to TRENDING_DOWN_MIN_CONFIDENCE
+        # (default 0.70) so the relaxation isn't an open back-door for the
+        # meta-agent to enter at 0.40 against the trend.
         meta_active = self._meta_active(dataframe)
         if meta_active:
             long_conditions.append(dataframe["meta_signal"] == 1)
-            long_conditions.append(dataframe["meta_confidence"] >= self.META_MIN_CONFIDENCE)
+            if "regime_label" in dataframe.columns:
+                trend_down_mask = dataframe["regime_label"] == "trending_down"
+                # Per-row min confidence: 0.70 in trending_down, 0.40 elsewhere.
+                meta_floor = np.where(
+                    trend_down_mask.to_numpy(),
+                    self.TRENDING_DOWN_MIN_CONFIDENCE,
+                    self.META_MIN_CONFIDENCE,
+                )
+                long_conditions.append(
+                    dataframe["meta_confidence"] >= pd.Series(meta_floor, index=dataframe.index)
+                )
+            else:
+                long_conditions.append(dataframe["meta_confidence"] >= self.META_MIN_CONFIDENCE)
 
         tag = "meta_up_regime" if meta_active else "freqai_up_regime"
         dataframe.loc[
