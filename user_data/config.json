@@ -67,7 +67,11 @@
             "XRP/USD",
             "DOGE/USD",
             "AVAX/USD",
-            "LINK/USD"
+            "LINK/USD",
+            "DOT/USD",
+            "ATOM/USD",
+            "LTC/USD",
+            "BCH/USD"
         ],
         "pair_blacklist": []
     },
