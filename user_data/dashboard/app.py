@@ -67,7 +67,11 @@ DEFAULT_TIMEFRAME = os.environ.get("DASHBOARD_TIMEFRAME", "5m")
 DEFAULT_STOCK_SYMBOLS = [
     s.strip().upper() for s in os.environ.get(
         "DASHBOARD_STOCK_SYMBOLS",
-        os.environ.get("WHEEL_SYMBOLS", "SOFI"),
+        # Operator's full watchlist — SOFI is the only one currently traded
+        # by the wheel, but the others are chart-able + used by Shark TFT.
+        # Without these in the dropdown, /?venue=stocks&pair=SPY silently
+        # falls back to SOFI because the URL param can't match an option.
+        os.environ.get("WHEEL_SYMBOLS", "SOFI,PLTR,NVDA,AMD,SPY"),
     ).split(",") if s.strip()
 ]
 WS_PUSH_INTERVAL = float(os.environ.get("DASHBOARD_WS_INTERVAL_SEC", "30"))
