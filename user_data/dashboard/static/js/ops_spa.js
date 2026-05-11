@@ -219,12 +219,29 @@
     const equity = Number(cp.total_equity ?? 0);
     const peak = Number(cp.combined_peak_equity ?? equity);
     const dd = Math.abs(Number(cp.combined_drawdown_pct ?? 0));
-    const dayPnlUsd = Number(cp.day_pnl_usd ?? 0);
-    const dayPnlPct = Number(cp.day_pnl_pct ?? 0);
+    // Closed-trade day P&L (from trade_journal, server-side at ops_routes:2549).
+    // This is the "realized" component — only moves when a trade closes.
+    const closedPnl = Number(cp.day_pnl_usd ?? 0);
+    // Live unrealized P&L on open positions — this is what makes the number
+    // TICK with market moves. Operator complaint (2026-05-11 ~3 PM): "I don't
+    // see the drop in -23.37, that is not getting changed" because the page
+    // was showing closed-only. Sum crypto-unrealized (sources.crypto_unrealised_pnl
+    // — freqtrade hot-quotes) and stocks day-move (stocks_equity − stocks_peak_equity,
+    // captures wheel MTM since the wheel_snapshot cron now fires every minute).
+    const srcs = cp.sources || {};
+    const cryptoUnrl = Number(srcs.crypto_unrealised_pnl ?? 0);
+    const stocksEq = Number(cp.stocks_equity ?? 0);
+    const stocksPeak = Number(cp.stocks_peak_equity ?? stocksEq);
+    const stocksMove = stocksEq - stocksPeak;
+    const liveDayPnl = closedPnl + cryptoUnrl + stocksMove;
+    // Percent against starting combined capital — use peak as a sane proxy
+    // when peak ≈ start (early in the campaign). Operator-readable %.
+    const baseCap = peak > 0 ? peak : equity;
+    const liveDayPct = baseCap > 0 ? (liveDayPnl / baseCap) * 100 : 0;
     const closedToday = Number(tr.closed_today ?? 0);
     const openCrypto = Number(tr.open_count ?? 0);
     const totalOpen = openCrypto + wheelOpen;
-    const dayCls = dayPnlUsd >= 0 ? "up" : "down";
+    const dayCls = liveDayPnl >= 0 ? "up" : "down";
     const ddCls = dd >= 8 ? "down" : dd >= 5 ? "warn" : "up";
 
     const stat = (lbl, val, cls) => h("div", { style: { display: "flex", flexDirection: "column", gap: 2, minWidth: 110 } },
@@ -234,16 +251,19 @@
 
     return h(Card, {
       num: "00", title: "Today · scoreboard",
-      sub: "capital · day P&L · trades · positions · drawdown",
+      sub: "live · realized + unrealized · refreshes every 10s",
       right: cardRight(cpSlot.fetchedAt,
         h("span", { className: "pill " + dayCls, style: { height: 18 } },
-          h("span", { className: "dot " + dayCls + (dayPnlUsd === 0 ? "" : " pulse") }),
-          " ", (dayPnlPct >= 0 ? "+" : "") + dayPnlPct.toFixed(2) + "% day"))
+          h("span", { className: "dot " + dayCls + (liveDayPnl === 0 ? "" : " pulse") }),
+          " ", (liveDayPct >= 0 ? "+" : "") + liveDayPct.toFixed(2) + "% live"))
     },
       h("div", { style: { display: "flex", flexWrap: "wrap", gap: "var(--s-5)", alignItems: "baseline" } },
         stat("Capital", "$" + fmtUSD(equity)),
-        stat("Day P&L", (dayPnlUsd >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(dayPnlUsd)), dayCls),
-        stat("Day %", (dayPnlPct >= 0 ? "+" : "") + dayPnlPct.toFixed(2) + "%", dayCls),
+        stat("Live P&L", (liveDayPnl >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(liveDayPnl)), dayCls),
+        stat("Realized today", (closedPnl >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(closedPnl)),
+          closedPnl >= 0 ? "up" : "down"),
+        stat("Unrealized", (cryptoUnrl + stocksMove >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(cryptoUnrl + stocksMove)),
+          (cryptoUnrl + stocksMove) >= 0 ? "up" : "down"),
         stat("Drawdown", dd.toFixed(2) + "%", ddCls),
         stat("Peak", "$" + fmtUSD(peak)),
         stat("Open", totalOpen + " (" + openCrypto + "C + " + wheelOpen + "S)"),
