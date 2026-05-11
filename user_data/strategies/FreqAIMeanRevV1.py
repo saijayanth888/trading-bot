@@ -397,6 +397,9 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
     # makes "failed-and-cached" distinguishable from "not yet attempted".
     _DRL_LOAD_FAILED: object = object()
     _DRL_CACHE: "dict[str, object]" = {}
+    # Once-per-process latch for the "DRL missing → TFT-only" warning so a
+    # fresh container start logs it exactly once instead of every candle.
+    _TFT_ONLY_WARNED: bool = False
 
     # Risk governor instance — populated in bot_start. Gates every entry.
     _risk_governor: object | None = None
@@ -1129,7 +1132,13 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         return np.clip(obs, -5.0, 5.0)
 
     def _compute_meta_signals(self, dataframe: DataFrame) -> DataFrame:
-        """Add `meta_signal`, `meta_confidence`, `meta_position_size` columns."""
+        """Add `meta_signal`, `meta_confidence`, `meta_position_size` columns.
+
+        If the DRL ensemble can't be loaded (no weights on disk), fall
+        back to a TFT-only blend so the strategy can still trade off the
+        TFT classifier alone. The DRL has never been trained operationally
+        — this keeps crypto alive until real weights exist.
+        """
         n = len(dataframe)
         # Defaults: zero so any AND-gating below is a no-op when the meta
         # column is missing (we treat 0 as "no opinion").
@@ -1138,23 +1147,32 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         dataframe["meta_position_size"] = 0.0
         dataframe["meta_blocked_reason"] = ""
 
-        if not _DRL_AVAILABLE or vote_batch is None or meta_compute_signal is None:
+        if meta_compute_signal is None:
+            # meta_agent / ensemble_voter imports failed; nothing we can do.
+            return dataframe
+        if n == 0:
             return dataframe
 
-        ensemble = self._load_drl_ensemble()
-        if ensemble is None:
-            return dataframe
+        ensemble = self._load_drl_ensemble() if _DRL_AVAILABLE else None
+        votes: list | None = None
+        if ensemble is not None and vote_batch is not None:
+            obs = self._build_observation_matrix(dataframe)
+            if obs is not None:
+                try:
+                    actions = ensemble.predict(obs)
+                    votes = vote_batch(actions)
+                except Exception as exc:
+                    logger.warning("DRL ensemble predict failed: %s", exc)
+                    votes = None
 
-        obs = self._build_observation_matrix(dataframe)
-        if obs is None or n == 0:
-            return dataframe
-
-        try:
-            actions = ensemble.predict(obs)
-            votes = vote_batch(actions)
-        except Exception as exc:
-            logger.warning("DRL ensemble predict failed: %s", exc)
-            return dataframe
+        if votes is None:
+            # TFT-only mode — emit a one-shot warning so the operator sees
+            # the state on every fresh process without spamming each candle.
+            if not type(self)._TFT_ONLY_WARNED:
+                logger.warning(
+                    "[meta] running in TFT-only mode — DRL weights missing"
+                )
+                type(self)._TFT_ONLY_WARNED = True
 
         sig = np.zeros(n, dtype=np.int64)
         conf = np.zeros(n, dtype=np.float32)
@@ -1178,7 +1196,8 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         flat = (dataframe["flat"].astype(float).fillna(0.0).to_numpy()
                 if "flat" in dataframe.columns else 1.0 - down - up)
 
-        for i, v in enumerate(votes):
+        for i in range(n):
+            v = votes[i] if votes is not None else None
             ms = meta_compute_signal(
                 tft_probs={"down": float(down[i]), "flat": float(flat[i]), "up": float(up[i])},
                 tft_confidence=float(tft_conf_arr[i]),
