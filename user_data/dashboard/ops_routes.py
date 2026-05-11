@@ -1766,6 +1766,94 @@ async def stocks_status():
 # Keeps `/api/ops/stock_candles/{sym}` from being a generic Alpaca proxy.
 _STOCK_SYMBOL_WHITELIST = {"SOFI", "AAPL", "TSLA", "NVDA", "META", "MSFT", "GOOGL", "AMZN", "MARA", "F", "PLTR", "AMD", "SPY"}
 
+# Default basket for /api/ops/stocks_sparklines. Operator can override via the
+# DASHBOARD_STOCK_SYMBOLS env var (comma-separated). Each symbol must also
+# appear in _STOCK_SYMBOL_WHITELIST or it is filtered out at request time.
+DEFAULT_STOCK_SYMBOLS = [
+    s.strip().upper() for s in os.environ.get(
+        "DASHBOARD_STOCK_SYMBOLS", "SOFI,PLTR,NVDA,AMD,SPY",
+    ).split(",") if s.strip()
+]
+
+
+def _stock_timeframe_minutes(tf: str) -> int:
+    return {"1Min": 1, "5Min": 5, "15Min": 15, "1Hour": 60, "1Day": 1440}.get(tf, 5)
+
+
+def _is_nyse_open_now() -> bool:
+    """Cheap NYSE-open check (no holiday awareness). M-F 09:30-16:00 ET.
+
+    Matches the same logic as /api/ops/market_hours but inlined here so the
+    sparklines envelope doesn't pay an extra round-trip. Holiday awareness
+    is a TODO across both call sites.
+    """
+    from datetime import datetime, time, timezone
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:  # pragma: no cover
+        from backports.zoneinfo import ZoneInfo
+    et = ZoneInfo("America/New_York")
+    now_et = datetime.now(timezone.utc).astimezone(et)
+    if now_et.weekday() >= 5:
+        return False
+    return time(9, 30) <= now_et.time() < time(16, 0)
+
+
+def _stock_candles_inner(symbol: str, timeframe: str) -> dict:
+    """Load the cached candles payload for one stock symbol.
+
+    Single source of truth for the per-symbol `/stock_candles/{sym}` route
+    and the basket `/stocks_sparklines` route. Reads from the JSON cache
+    the `wheel_candles` Hermes cron writes every 5 min during market hours.
+
+    Raises:
+        HTTPException(404) if the symbol is not on the operator whitelist.
+        HTTPException(400) if the timeframe is not one of the Alpaca codes.
+
+    Returns a dict that carries an internal `_status` field of {"ok",
+    "degraded", "down"} plus an optional `_error` so callers can wrap
+    the payload into the right `_envelope(...)` reply without duplicating
+    the cache-staleness rules.
+    """
+    sym = (symbol or "").upper()
+    if sym not in _STOCK_SYMBOL_WHITELIST:
+        raise HTTPException(status_code=404, detail=f"symbol not whitelisted: {sym}")
+    if timeframe not in {"1Min", "5Min", "15Min", "1Hour", "1Day"}:
+        raise HTTPException(status_code=400, detail=f"unsupported timeframe: {timeframe}")
+
+    candles_file = STOCKS_ROOT / "wheel" / "state" / f"candles_{sym}_{timeframe}.json"
+    raw = _read_json(candles_file)
+    if not raw:
+        return {
+            "_status": "down",
+            "_error": (
+                f"no cached candles for {sym} {timeframe} — run "
+                f"`python -m wheel.cli candles {sym} --timeframe {timeframe}`"
+            ),
+            "symbol": sym,
+            "timeframe": timeframe,
+            "ts": None,
+            "age_seconds": None,
+            "bars": [],
+        }
+
+    bars = raw.get("bars") or []
+    age = _file_age_seconds(candles_file)
+    status = "ok"
+    error = None
+    if age is not None and age > 86400:
+        status = "degraded"
+        error = f"candles stale ({age}s old)"
+    return {
+        "_status": status,
+        "_error": error,
+        "symbol": sym,
+        "timeframe": timeframe,
+        "ts": raw.get("ts"),
+        "age_seconds": age,
+        "bars": bars,
+    }
+
 
 @router.get("/stock_candles/{symbol}")
 async def stock_candles(symbol: str, timeframe: str = "5Min"):
@@ -1776,34 +1864,134 @@ async def stock_candles(symbol: str, timeframe: str = "5Min"):
     during market hours; this endpoint streams the cached file as a
     Lightweight-Charts-compatible payload.
     """
-    sym = symbol.upper()
-    if sym not in _STOCK_SYMBOL_WHITELIST:
-        raise HTTPException(status_code=404, detail=f"symbol not whitelisted: {sym}")
-    if timeframe not in {"1Min", "5Min", "15Min", "1Hour", "1Day"}:
-        raise HTTPException(status_code=400, detail=f"unsupported timeframe: {timeframe}")
+    inner = _stock_candles_inner(symbol, timeframe)
+    status = inner.pop("_status", "ok")
+    error = inner.pop("_error", None)
+    if status == "down":
+        return _envelope("down", error=error)
+    if status == "degraded":
+        return _envelope("degraded", data=inner, error=error)
+    return _envelope("ok", data=inner)
 
-    candles_file = STOCKS_ROOT / "wheel" / "state" / f"candles_{sym}_{timeframe}.json"
-    raw = _read_json(candles_file)
-    if not raw:
+
+@router.get("/stocks_sparklines")
+async def stocks_sparklines(timeframe: str = "5Min", limit: int = 78):
+    """Per-symbol close-price arrays + %-change since first bar in window.
+
+    Mirrors the crypto `/sparklines` envelope so the SPA can render the
+    same PairTelemetry card pattern for the stocks basket.
+
+    `timeframe` accepts Alpaca codes: `1Min`, `5Min`, `15Min`, `1Hour`,
+    `1Day`. `limit=78` × 5Min ≈ 6.5h ≈ one US trading session.
+
+    Returns `_envelope(status, data={symbols, timeframe, limit, basket,
+    market_open})`. Each per-symbol payload carries `{closes, current,
+    pct_session, bars_count, session_window_h}` or, on failure,
+    `{closes: [], current: None, pct_session: None, error}`.
+
+    GET, no `require_mcp_key` — matches the crypto `/sparklines` pattern.
+    Read-only operator data.
+    """
+    if timeframe not in ("1Min", "5Min", "15Min", "1Hour", "1Day"):
+        return _envelope("down", error=f"unsupported timeframe: {timeframe}")
+    limit = max(2, min(390, int(limit)))  # 390×1min = full session
+
+    basket = [s for s in DEFAULT_STOCK_SYMBOLS if s in _STOCK_SYMBOL_WHITELIST]
+    if not basket:
         return _envelope(
             "down",
-            error=f"no cached candles for {sym} {timeframe} — run `python -m wheel.cli candles {sym} --timeframe {timeframe}`",
+            error=(
+                "DASHBOARD_STOCK_SYMBOLS yielded zero whitelisted symbols "
+                f"(input={DEFAULT_STOCK_SYMBOLS})"
+            ),
         )
 
-    bars = raw.get("bars") or []
-    age = _file_age_seconds(candles_file)
-    payload = {
-        "symbol": sym,
-        "timeframe": timeframe,
-        "ts": raw.get("ts"),
-        "age_seconds": age,
-        "bars": bars,
-    }
+    def _empty(reason: str | None = None) -> dict:
+        out = {
+            "closes": [],
+            "current": None,
+            "pct_session": None,
+            "bars_count": 0,
+            "session_window_h": (limit * _stock_timeframe_minutes(timeframe)) / 60.0,
+        }
+        if reason:
+            out["error"] = reason[:160]
+        return out
 
-    # Stale = no refresh in 24h
-    if age is not None and age > 86400:
-        return _envelope("degraded", data=payload, error=f"candles stale ({age}s old)")
-    return _envelope("ok", data=payload)
+    async def _one(symbol: str) -> tuple[str, dict]:
+        # `_stock_candles_inner` is synchronous (cheap JSON read); push it
+        # to the default executor so a slow filesystem can't block the loop.
+        try:
+            loop = asyncio.get_running_loop()
+            inner = await loop.run_in_executor(
+                None, _stock_candles_inner, symbol, timeframe,
+            )
+        except HTTPException as exc:
+            return symbol, _empty(reason=str(exc.detail))
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("stocks_sparklines %s: %s", symbol, exc)
+            return symbol, _empty(reason=str(exc))
+
+        if inner.get("_status") == "down":
+            return symbol, _empty(reason=inner.get("_error"))
+
+        bars = (inner.get("bars") or [])[-limit:]
+        # The wheel candle cache uses long-key OHLC ("close"); accept the
+        # crypto-style short keys too in case the cron schema ever flips.
+        closes = []
+        for b in bars:
+            v = b.get("close") if "close" in b else b.get("c")
+            if v is not None:
+                try:
+                    closes.append(float(v))
+                except (TypeError, ValueError):
+                    continue
+        if len(closes) < 2:
+            return symbol, _empty(reason="insufficient bars")
+        ref = closes[0]
+        current = closes[-1]
+        pct = ((current - ref) / ref * 100.0) if ref else None
+        return symbol, {
+            "closes": closes,
+            "current": current,
+            "pct_session": pct,
+            "bars_count": len(closes),
+            "session_window_h": (limit * _stock_timeframe_minutes(timeframe)) / 60.0,
+        }
+
+    try:
+        results = await asyncio.wait_for(
+            # return_exceptions=True so one bad symbol doesn't poison the
+            # whole basket (lesson from the crypto endpoint's P1 #2.5 bug).
+            asyncio.gather(*(_one(s) for s in basket), return_exceptions=True),
+            timeout=ENDPOINT_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        return _envelope("down", error="stocks_sparklines fetch timed out")
+    except Exception as exc:
+        logger.exception("stocks_sparklines failed")
+        return _envelope("down", error=str(exc))
+
+    data: dict[str, dict] = {}
+    for entry, sym in zip(results, basket):
+        if isinstance(entry, Exception):
+            data[sym] = _empty(reason=str(entry))
+        else:
+            data[sym] = entry[1]
+
+    has_any = any((p.get("closes") or []) for p in data.values())
+    status = "ok" if has_any else "degraded"
+    return _envelope(
+        status,
+        data={
+            "symbols": data,
+            "timeframe": timeframe,
+            "limit": limit,
+            "basket": basket,
+            "market_open": _is_nyse_open_now(),
+        },
+        error=None if has_any else "no cached candles for any basket symbol",
+    )
 
 
 @router.get("/gates")
