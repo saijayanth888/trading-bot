@@ -103,11 +103,11 @@
     });
   }
 
-  // Default crypto pairs and stock symbols — the operator can override
-  // via URL params. STOCK_SYMBOLS matches the operator's actual paper-trading
-  // basket (SOFI / PLTR / NVDA / AMD / SPY); the overnight prompt requires
-  // these specific symbols in the stocks dropdown for the ?venue=stocks probe.
-  const CRYPTO_PAIRS = ["BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD", "AVAX/USD", "LINK/USD"];
+  // Crypto pairs are fetched from /api/pairs (server is source of truth —
+  // configured via the freqtrade pair_whitelist). Stocks venue stays
+  // hardcoded since the endpoint is crypto-only; STOCK_SYMBOLS matches the
+  // operator's paper-trading basket (SOFI / PLTR / NVDA / AMD / SPY).
+  const FALLBACK_CRYPTO_PAIRS = ["BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD", "AVAX/USD", "LINK/USD"];
   const STOCK_SYMBOLS = ["SOFI", "PLTR", "NVDA", "AMD", "SPY"];
 
   // ─────────────── TopbarLive ───────────────
@@ -203,6 +203,20 @@
       combined_fetched_at: null,
     });
 
+    // Crypto pair list — fetched from /api/pairs (server has the canonical
+    // freqtrade pair_whitelist). Falls back to FALLBACK_CRYPTO_PAIRS on a
+    // network error so the dropdown still has something selectable.
+    const [cryptoPairs, setCryptoPairs] = useState(FALLBACK_CRYPTO_PAIRS);
+    useEffect(() => {
+      fetch("/api/pairs")
+        .then(r => r.json())
+        .then(d => {
+          const arr = Array.isArray(d && d.pairs) ? d.pairs : [];
+          if (arr.length) setCryptoPairs(arr);
+        })
+        .catch(() => { /* keep fallback */ });
+    }, []);
+
     // URL params on mount
     useEffect(() => {
       const params = new URLSearchParams(window.location.search);
@@ -213,8 +227,8 @@
     }, []);
 
     useEffect(() => {
-      document.documentElement.setAttribute("data-theme", "control");
-      document.documentElement.setAttribute("data-density", "default");
+      // Theme + density are now seeded from localStorage by an inline boot
+      // script in templates/dashboard_spa.html before React mounts (B-5).
       document.documentElement.style.setProperty("--accent", "#7c5cff");
     }, []);
 
@@ -296,11 +310,13 @@
       return () => { clearInterval(isvc); clearInterval(ic); clearInterval(itb); };
     }, [fetchState, fetchCandles, fetchTopbar]);
 
-    const venuePairs = venue === "crypto" ? CRYPTO_PAIRS : STOCK_SYMBOLS;
+    const venuePairs = venue === "crypto" ? cryptoPairs : STOCK_SYMBOLS;
     useEffect(() => {
-      // When venue switches and current pair is not in that venue, jump to first
-      if (!venuePairs.includes(pair)) setPair(venuePairs[0]);
-    }, [venue]);  // eslint-disable-line react-hooks/exhaustive-deps
+      // When venue switches and current pair is not in that venue, jump to first.
+      // Also re-runs when cryptoPairs lands so the default selection lines up
+      // with the server's first whitelisted pair.
+      if (venuePairs.length && !venuePairs.includes(pair)) setPair(venuePairs[0]);
+    }, [venue, cryptoPairs]);  // eslint-disable-line react-hooks/exhaustive-deps
 
     // Build dataset for hero strip
     const pairState = (state && state.pair_state) || (meta && meta.pair_state) || (state || {});
@@ -438,7 +454,9 @@
             // INTELLIGENCE RAIL
             h("div", { style: { gridColumn: "span 4", display: "flex", flexDirection: "column", gap: "var(--gap-grid)" } },
               h(ModelViewLive, { state, fetchedAt: meta.state_fetched_at }),
-              h(MarketContextLive, { state, fetchedAt: meta.state_fetched_at })
+              h(MarketContextLive, { state, fetchedAt: meta.state_fetched_at }),
+              h(ChampionGenome, { state, fetchedAt: meta.state_fetched_at }),
+              h(PnLHistoryCard, { state, fetchedAt: meta.state_fetched_at })
             )
           ),
 
@@ -554,6 +572,71 @@
     );
   }
 
+  // Champion genome sidebar — parity with legacy /charts. Reads state.champion
+  // from /api/state. Backend shape (data_sources.fetch_champion):
+  //   { generation, champion_id, runner_up_id, champion_fitness }
+  function ChampionGenome({ state, fetchedAt }) {
+    const c = (state && state.champion) || {};
+    const has = c && (c.generation != null || c.champion_id || c.runner_up_id);
+    return h(Card, {
+      num: "06", title: "Champion genome", sub: "evolution snapshot",
+      right: h(TimeSince, { ts: fetchedAt, className: "mono dim", style: { fontSize: "var(--t-2xs)" } })
+    },
+      !has
+        ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)" } }, "no snapshot yet")
+        : h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, fontSize: "var(--t-xs)" } },
+            h("span", { className: "dim" }, "Gen"),
+            h("span", { className: "num", style: { textAlign: "right" } },
+              c.generation != null ? String(c.generation) : "—"),
+            h("span", { className: "dim" }, "Champion"),
+            h("span", { className: "mono", style: { textAlign: "right" } }, c.champion_id || "—"),
+            h("span", { className: "dim" }, "Fitness"),
+            h("span", { className: "num", style: { textAlign: "right" } },
+              c.champion_fitness != null ? Number(c.champion_fitness).toFixed(3) : "—"),
+            h("span", { className: "dim" }, "Runner-up"),
+            h("span", { className: "mono", style: { textAlign: "right" } }, c.runner_up_id || "—")
+          )
+    );
+  }
+
+  // P&L history sidebar — parity with legacy /charts. Reads
+  // state.daily_pnl_history (backend shape: `{ "YYYY-MM-DD": float_usd }`).
+  // Shows the most recent 14 days as a sparkline and the most recent 5 as
+  // a dl-style list — operator scans the table while the spark provides shape.
+  function PnLHistoryCard({ state, fetchedAt }) {
+    const hist = (state && state.daily_pnl_history) || {};
+    const days = Object.keys(hist).sort();
+    const last14 = days.slice(-14).map(d => Number(hist[d] || 0));
+    const last5 = days.slice(-5).reverse();
+    const total14 = last14.reduce((a, v) => a + v, 0);
+    return h(Card, {
+      num: "07", title: "P&L history", sub: days.length + " days · trailing " + Math.min(14, days.length),
+      right: h(TimeSince, { ts: fetchedAt, className: "mono dim", style: { fontSize: "var(--t-2xs)" } })
+    },
+      days.length === 0
+        ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)" } }, "no closed days yet")
+        : h(F, null,
+            h("div", { className: "metric-label" },
+              "14d net · " + (total14 >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(total14))),
+            last14.length > 1
+              ? h("div", { style: { marginTop: 6, marginBottom: 8 } },
+                  h(Sparkline, { data: last14, color: "var(--accent)", fill: false, height: 32 }))
+              : null,
+            h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, fontSize: "var(--t-xs)" } },
+              last5.map(d => {
+                const v = Number(hist[d] || 0);
+                const cls = v > 0 ? "up" : v < 0 ? "down" : "";
+                return h(F, { key: d },
+                  h("span", { className: "dim mono" }, d.slice(5)),
+                  h("span", { className: "num " + cls, style: { textAlign: "right" } },
+                    (v >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(v)))
+                );
+              })
+            )
+          )
+    );
+  }
+
   function PositionsForPair({ state, pair, fetchedAt }) {
     const positions = (state && state.positions) || [];
     const forPair = positions.filter(p => (p.pair || "").toUpperCase() === pair.toUpperCase());
@@ -618,9 +701,20 @@
               const closedShort = closedAt ? String(closedAt).replace("T", " ").slice(0, 16) : "—";
               const entryPx = t.entry_price;
               const exitPx = t.exit_price;
+              // freqtrade crypto today is long-only, but state.recent_trades will
+              // carry wheel rows (short_put / short_call / long_shares) once
+              // wheel execution is wired. Prefer the explicit side field when
+              // present; fall back to t.kind; finally to LONG.
+              const side = t.direction || t.side || (
+                t.kind === "short_put"   ? "SHORT PUT"  :
+                t.kind === "short_call"  ? "SHORT CALL" :
+                t.kind === "long_shares" ? "LONG"       :
+                "LONG"
+              );
+              const sideCls = (side === "SHORT PUT" || side === "SHORT CALL") ? "down" : "up";
               return h("tr", { key: i },
                 h("td", null, h("strong", { className: "mono" }, t.pair || "—")),
-                h("td", { className: "mono up" }, "LONG"),
+                h("td", { className: "mono " + sideCls }, side),
                 h("td", { className: "num", style: { textAlign: "right" } }, entryPx != null ? fmtUSD(entryPx, entryPx < 10 ? 4 : 2) : "—"),
                 h("td", { className: "num", style: { textAlign: "right" } }, exitPx != null ? fmtUSD(exitPx, exitPx < 10 ? 4 : 2) : "—"),
                 h("td", { className: "num " + (pnlUp ? "up" : "down"), style: { textAlign: "right" } },

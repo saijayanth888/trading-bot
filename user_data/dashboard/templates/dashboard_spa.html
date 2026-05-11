@@ -10,15 +10,32 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="/static/css/quanta.css?v=20260511-1" />
 
+  <!-- Theme + density boot (B-5) — seed <html> from localStorage BEFORE
+       React mounts so the operator's prior selection (Control / Geist /
+       Bloomberg, Compact / Default / Roomy) survives navigation between
+       legacy / and the SPA without a flash of the wrong palette. -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("quanta.theme") || "control";
+        var d = localStorage.getItem("quanta.density") || "default";
+        document.documentElement.setAttribute("data-theme", t);
+        document.documentElement.setAttribute("data-density", d);
+      } catch (e) { /* localStorage may be unavailable */ }
+    })();
+  </script>
+
   <!-- React 18.3.1 (pinned UMD) -->
   <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
 </head>
-<body class="js-on" data-theme="control" data-density="default">
+<body class="js-on">
   <div id="root"></div>
 
   <!-- shared primitives -->
   <script src="/static/js/qc_react.js?v=20260511-1"></script>
+  <!-- shared DOM lib + TweaksFab (theme/density drawer, self-mounts) -->
+  <script src="/static/js/components.js?v=20260511-D1"></script>
   <!-- this page's SPA shell -->
   <script src="/static/js/dashboard_spa.js?v=20260512-B6"></script>
 </body>
