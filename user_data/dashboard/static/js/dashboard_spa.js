@@ -217,6 +217,10 @@
     const [combined, setCombined] = useState(null);
     const [mode, setMode] = useState(null);
     const [services, setServices] = useState(null);
+    // Wheel positions snapshot — drives the stocks-venue positions card so
+    // selecting NVDA / SOFI / etc. surfaces the open short put / long shares
+    // instead of an empty "no positions" panel.
+    const [stocksData, setStocksData] = useState(null);
     const [meta, setMeta] = useState({
       candles_fetched_at: null,
       state_fetched_at: null,
@@ -274,6 +278,10 @@
       }).catch(() => {});
       fetch("/api/mode").then(r => r.json()).then(j => setMode(j)).catch(() => {});
       fetch("/api/ops/services").then(r => r.json()).then(j => setServices(j)).catch(() => {});
+      // Wheel positions (cash, BP, open short puts / covered calls / longs).
+      // Polled on the same 10s cadence as the topbar so the per-pair stocks
+      // panel reflects today's CSP fires within one tick.
+      fetch("/api/ops/stocks").then(r => r.json()).then(j => setStocksData(j)).catch(() => {});
     }, []);
 
     // Fetch candles on pair/tf change. Crypto routes through
@@ -524,7 +532,7 @@
 
           // POSITIONS + RECENT TRADES
           h("div", { className: "grid g-12", style: { gap: "var(--gap-grid)" } },
-            h("div", { style: { gridColumn: "span 7" } }, h(PositionsForPair, { state, pair, fetchedAt: meta.state_fetched_at })),
+            h("div", { style: { gridColumn: "span 7" } }, h(PositionsForPair, { state, pair, venue, stocksData, fetchedAt: meta.state_fetched_at })),
             h("div", { style: { gridColumn: "span 5" } }, h(RecentTrades, { state, fetchedAt: meta.state_fetched_at }))
           ),
 
@@ -699,7 +707,63 @@
     );
   }
 
-  function PositionsForPair({ state, pair, fetchedAt }) {
+  function PositionsForPair({ state, pair, venue, stocksData, fetchedAt }) {
+    // Stocks venue: route through wheel.open_positions from /api/ops/stocks
+    // and filter by underlying ticker == selected pair. Operator complaint
+    // (2026-05-11): "if I go to NVDA you said we have purchased right I
+    // don't see the data" — the crypto-only positions path returned empty.
+    if (venue === "stocks") {
+      const wheel = (stocksData && (stocksData.data || {}).wheel) || {};
+      const allWheel = wheel.open_positions || [];
+      const forPair = allWheel.filter(p => (p.underlying || "").toUpperCase() === pair.toUpperCase());
+      const others = allWheel.filter(p => (p.underlying || "").toUpperCase() !== pair.toUpperCase());
+      const subText = forPair.length + " on " + pair + " · " + others.length + " other ticker" + (others.length === 1 ? "" : "s");
+
+      return h(Card, {
+        num: "04", title: "Open positions · " + pair,
+        sub: allWheel.length === 0 ? "no open wheel positions" : subText,
+        right: h(TimeSince, { ts: (stocksData && stocksData.checked_at) || fetchedAt, className: "mono dim", style: { fontSize: "var(--t-2xs)" } })
+      },
+        allWheel.length === 0
+          ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)" } }, "no open positions across the wheel basket")
+          : forPair.length === 0
+            ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)" } },
+                "no open position on " + pair + " · " + others.length + " active on other ticker" + (others.length === 1 ? "" : "s"))
+            : h("table", { className: "t" },
+                h("thead", null, h("tr", null,
+                  h("th", null, "Sym"),
+                  h("th", null, "Type"),
+                  h("th", { style: { textAlign: "right" } }, "Qty"),
+                  h("th", { style: { textAlign: "right" } }, "Strike"),
+                  h("th", null, "Expiry"),
+                  h("th", { style: { textAlign: "right" } }, "Premium"),
+                  h("th", { style: { textAlign: "right" } }, "Collateral")
+                )),
+                h("tbody", null,
+                  forPair.map((p, i) => {
+                    const kindLabel = p.kind === "short_put" ? "SHORT PUT"
+                      : p.kind === "short_call" ? "SHORT CALL"
+                      : p.kind === "long_shares" ? "LONG"
+                      : (p.kind || "—");
+                    const kindCls = p.kind === "long_shares" ? "up" : "warn";
+                    const collateral = p.kind === "short_put" ? Number(p.strike || 0) * Number(p.qty || 1) * 100 : 0;
+                    return h("tr", { key: i },
+                      h("td", null, h("strong", { className: "mono" }, p.underlying || "—")),
+                      h("td", null, h("span", { className: "pill " + kindCls, style: { height: 16, fontSize: "var(--t-2xs)" } }, kindLabel)),
+                      h("td", { className: "num", style: { textAlign: "right" } }, p.qty),
+                      h("td", { className: "num", style: { textAlign: "right" } }, p.strike != null ? "$" + Number(p.strike).toFixed(2) : "—"),
+                      h("td", { className: "dim mono", style: { fontSize: "var(--t-xs)" } }, (p.expiry || "—").slice(0, 10)),
+                      h("td", { className: "num up", style: { textAlign: "right" } },
+                        "$" + fmtUSD(Number(p.entry_credit || 0) * Number(p.qty || 1))),
+                      h("td", { className: "num dim", style: { textAlign: "right" } },
+                        collateral > 0 ? "$" + fmtUSD(collateral) : "—")
+                    );
+                  })
+                )
+              )
+      );
+    }
+    // Crypto venue: original freqtrade positions path
     const positions = (state && state.positions) || [];
     const forPair = positions.filter(p => (p.pair || "").toUpperCase() === pair.toUpperCase());
     const others = positions.filter(p => (p.pair || "").toUpperCase() !== pair.toUpperCase());
