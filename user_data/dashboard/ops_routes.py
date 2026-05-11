@@ -1121,6 +1121,10 @@ def _compute_rebalance(
         )
         rows = cur.fetchall()
 
+    # Per-pair daily PnL buckets → annualised rolling Sharpe. pnl_pct is
+    # fractional; Sharpe is scale-invariant in pnl_pct units, so the
+    # config-level threshold (capital_allocation.min_sharpe_for_trading,
+    # currently 0.7) compares apples-to-apples regardless of unit choice.
     daily: dict[str, dict[str, float]] = {}
     for r in rows:
         pair = r["pair"]
