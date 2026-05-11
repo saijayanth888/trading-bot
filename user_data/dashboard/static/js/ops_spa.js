@@ -1896,6 +1896,90 @@
     );
   }
 
+  // ─────────────── DECISION AUDIT — per-pair why-trade rationale ───────────────
+  // Mirrors the legacy /ops "Decision audit" card. Fetches the pair list from
+  // /api/pairs and the last 5 decisions for the selected pair from
+  // /api/ops/explainability/{base}/{quote}?limit=5. Decisions come in two
+  // kinds: "entered" (full TFT/DRL/sentiment context) and "blocked" (risk
+  // governor refused, with constraint name + reason).
+  function ExplainabilityCardLive() {
+    const [pairs, setPairs] = useState([]);
+    const [selected, setSelected] = useState("");
+    const [env, setEnv] = useState(null);
+    const [fetchedAt, setFetchedAt] = useState(null);
+    const [err, setErr] = useState(null);
+
+    useEffect(() => {
+      safeJsonFetch("/api/pairs")
+        .then(j => {
+          const list = (j && j.pairs) || [];
+          setPairs(list);
+          if (list.length && !selected) setSelected(list[0]);
+        })
+        .catch(() => { /* leave pairs empty — card renders the empty placeholder */ });
+    }, []);
+
+    useEffect(() => {
+      if (!selected) return;
+      const [base, quote] = selected.split("/");
+      if (!base || !quote) return;
+      const url = "/api/ops/explainability/"
+        + encodeURIComponent(base) + "/" + encodeURIComponent(quote)
+        + "?limit=5";
+      setErr(null);
+      safeJsonFetch(url)
+        .then(j => { setEnv(j); setFetchedAt(new Date().toISOString()); })
+        .catch(e => { setErr(String(e && e.message || e)); setFetchedAt(new Date().toISOString()); });
+    }, [selected]);
+
+    const data = envelopeData(env) || {};
+    const status = envelopeStatus(env);
+    const decisions = data.decisions || [];
+    const placeholder = (status === "degraded" || status === "down" || err || decisions.length === 0);
+
+    return h(Card, {
+      num: "22", title: "Decision audit",
+      sub: selected ? ("last " + decisions.length + " decisions · " + selected) : "pick a pair…",
+      right: cardRight(fetchedAt,
+        h("select", {
+          className: "select",
+          value: selected,
+          onChange: e => setSelected(e.target.value),
+          "aria-label": "Pair selector for decision audit",
+          style: { fontFamily: "var(--mono)", fontSize: "var(--t-xs)", minWidth: 110 },
+        }, pairs.map(p => h("option", { key: p, value: p }, p))))
+    },
+      placeholder
+        ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)", padding: "var(--s-2) 0" } },
+            err ? "—" : (data.decisions != null ? "no recent decisions for this pair" : "—"))
+        : h("div", { style: { display: "flex", flexDirection: "column", gap: "var(--s-3)" } },
+            decisions.map((d, i) => {
+              const isBlocked = d.kind === "blocked";
+              const verdictCls = isBlocked ? "warn" : "up";
+              const verdict = isBlocked ? "NO ENTRY · blocked" : ("ENTRY · " + (d.side || "long"));
+              const reason = isBlocked
+                ? (d.reason || "—") + " (constraint=" + (d.constraint || "—") + ")"
+                : (d.reasoning || ((d.regime || "—") + " · conf " + (d.confidence != null ? Number(d.confidence).toFixed(2) : "—")));
+              const ts = (d.ts || "").replace("T", " ").slice(0, 19);
+              return h("div", {
+                key: i,
+                style: {
+                  border: "1px solid var(--line-1)", borderRadius: 4,
+                  padding: "var(--s-2) var(--s-3)",
+                  display: "flex", flexDirection: "column", gap: 4,
+                }
+              },
+                h("div", { style: { display: "flex", alignItems: "baseline", gap: "var(--s-2)" } },
+                  h("span", { className: "mono dim", style: { fontSize: "var(--t-2xs)" } }, ts || "—"),
+                  h("span", { className: "tb-spacer", style: { flex: 1 } }),
+                  h("span", { className: "pill " + verdictCls, style: { height: 18 } }, verdict)),
+                h("div", { className: "dim", style: { fontSize: "var(--t-xs)", lineHeight: 1.45 } }, reason)
+              );
+            })
+          )
+    );
+  }
+
   // ─────────────── MAIN ───────────────
   function OpsApp() {
     const [killState, setKillStateRaw] = useState("normal");
@@ -1994,6 +2078,8 @@
             h("div", { style: { gridColumn: "span 8" } }, h(TradesRiskLive, { data })),
             h("div", { style: { gridColumn: "span 4" } }, h(ChampionCardLive, { data }))
           ),
+          // DECISION AUDIT — per-pair why-trade rationale (parity port from legacy /ops)
+          h("div", { id: "decision-audit", className: "anchor" }, h(ExplainabilityCardLive)),
           // BREAKERS detail + CONTROL PANEL
           h("div", { id: "config", className: "grid g-12 anchor", style: { gap: "var(--gap-grid)" } },
             h("div", { style: { gridColumn: "span 6" } }, h(CircuitBreakersLive, { data })),
