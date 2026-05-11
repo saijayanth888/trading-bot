@@ -97,15 +97,24 @@ async function refreshRegime() {
   const env = r.body;
   setStatus("hero", env.status || "down");
   setRefresh(env.checked_at);
+  // The new hero design (committed in cd90f28+) uses cells under
+  // #hero-regime-cell / #hero-regime-pill / #hero-regime-conf, populated
+  // by the inline hero script in ops.html. The legacy `#hero-regime`
+  // headline + `#hero-meta` elements were removed — guard so this
+  // refresher doesn't NPE on the old IDs (and doesn't redundantly
+  // duplicate work the new hero already does).
+  const heroEl  = document.getElementById("hero-regime");
+  const metaEl  = document.getElementById("hero-meta");
+  if (!heroEl || !metaEl) return;
   if (env.status === "down") {
-    document.getElementById("hero-regime").textContent = "Regime — DOWN";
-    document.getElementById("hero-meta").textContent = env.error || "";
+    heroEl.textContent = "Regime — DOWN";
+    metaEl.textContent = env.error || "";
     return;
   }
   const d = env.data || {};
   const arrow = REGIME_ARROW[d.current] || "·";
-  document.getElementById("hero").dataset.regime = d.current || "";
-  const heroEl = document.getElementById("hero-regime");
+  const heroBox = document.getElementById("hero");
+  if (heroBox) heroBox.dataset.regime = d.current || "";
   while (heroEl.firstChild) heroEl.removeChild(heroEl.firstChild);
   heroEl.appendChild(document.createTextNode("Market: "));
   const strong = document.createElement("strong");
@@ -118,13 +127,9 @@ async function refreshRegime() {
   heroEl.appendChild(arrowSpan);
   const dur = d.duration_hours ? `${Number(d.duration_hours).toFixed(1)}h` : "—";
   const prob = d.probability ? Number(d.probability).toFixed(2) : "—";
-  // The HMM model writes once per closed hour. row-age is therefore
-  // expected to be 0–60 min mid-cycle; that's not staleness, that's
-  // cadence. Show as minutes + a "next tick" hint so it stops looking
-  // alarming.
   const ageMin = d.age_s == null ? null : Math.floor(d.age_s / 60);
   const tickHint = ageMin == null ? "" : ` · next tick in ~${Math.max(0, 60 - ageMin)}m`;
-  document.getElementById("hero-meta").textContent =
+  metaEl.textContent =
     `prob ${prob} · active ${dur}` + (ageMin != null ? ` · last tick ${ageMin}m ago${tickHint}` : "");
 }
 
@@ -142,6 +147,7 @@ async function refreshSentiment() {
   const deepStr = d.deep_score == null ? "—" : `${fmt(d.deep_score, 2)}/${d.deep_impact || "?"}`;
   const fgStr = d.fear_greed == null ? "" : ` · F&G ${d.fear_greed} ${d.fear_greed_label || ""}`;
   const meta = document.getElementById("hero-meta");
+  if (!meta) return;  // new hero design moved this info into pulse + regime cells
   meta.textContent = meta.textContent +
     ` · agg ${fmt(d.score, 2)} (${direction}, ${agree}, conf ${fmt(d.confidence, 2)}) · fast ${fastStr} · deep ${deepStr}${fgStr} · ${d.n_headlines} hl`;
 }

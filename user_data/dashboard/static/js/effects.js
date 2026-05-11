@@ -252,20 +252,33 @@
       const heroBot = document.querySelector(".hero-bot");
       if (heroBot) {
         const runState = String(m.state || "unknown").toLowerCase();
-        // Map raw freqtrade states → display states
-        const display = runState === "running" ? "running"
-                      : runState === "paused"  ? "paused"
+        // Map raw freqtrade states → display states.
+        // Freqtrade has transient internal states like reload_config,
+        // starting, waiting that are NOT errors — they're transitions.
+        // We were defaulting to "error" for anything unknown, which
+        // alarmed the operator unnecessarily.
+        const isHealthy = ["running", "reload_config", "starting", "init"].includes(runState);
+        const isPaused  = ["paused", "stopped"].includes(runState);
+        const isOffline = ["unknown", "offline", ""].includes(runState);
+        const display = isHealthy ? "running"
+                      : runState === "paused" ? "paused"
                       : runState === "stopped" ? "stopped"
-                      : runState === "unknown" ? "offline"
+                      : isOffline ? "offline"
                       : "error";
         heroBot.setAttribute("data-state", display);
         const nameEl = document.getElementById("hero-bot-state");
-        if (nameEl) nameEl.textContent =
-          display === "running" ? "Running"
-          : display === "paused" ? "Paused"
-          : display === "stopped" ? "Stopped"
-          : display === "offline" ? "Offline"
-          : "Error";
+        if (nameEl) {
+          const label = runState === "running" ? "Running"
+            : runState === "reload_config" ? "Reloading"
+            : runState === "starting" ? "Starting"
+            : runState === "init" ? "Init"
+            : runState === "paused" ? "Paused"
+            : runState === "stopped" ? "Stopped"
+            : runState === "unknown" ? "Offline"
+            : runState === "offline" ? "Offline"
+            : runState.charAt(0).toUpperCase() + runState.slice(1);
+          nameEl.textContent = label;
+        }
         // Mode pill (PAPER / LIVE / PAUSED)
         const modeEl = document.getElementById("hero-bot-mode");
         if (modeEl) {
