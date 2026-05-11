@@ -23,7 +23,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1352,6 +1352,27 @@ def _read_json(path: Path) -> dict | None:
         return None
 
 
+def _next_sun_23_et_iso() -> str:
+    """Return the next Sunday-23:00-ET firing of the stocks_ml_train cron
+    as a human-readable string + ISO datetime. Used by /api/ops/stocks_ml
+    so the operator sees "next Sun, May 17, 11 PM ET" instead of an
+    ambiguous cron expression that was the same string regardless of
+    whether tonight's run had already completed."""
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        return "0 23 * * 0  (Sun 11 PM ET)"
+    et = ZoneInfo("America/New_York")
+    now_et = datetime.now(et)
+    # Sunday is weekday 6 in Python's isoweekday (Mon=1..Sun=7)
+    days_ahead = (6 - now_et.weekday()) % 7
+    candidate = now_et.replace(hour=23, minute=0, second=0, microsecond=0)
+    candidate += timedelta(days=days_ahead)
+    if candidate <= now_et:
+        candidate += timedelta(days=7)
+    return candidate.strftime("%a %b %d · 11:00 PM ET")
+
+
 def _file_age_seconds(path: Path) -> int | None:
     try:
         if not path.is_file():
@@ -1845,7 +1866,7 @@ async def gates():
         })
 
         # 7. Calendar / cron schedule (today is Friday for sell-csps)
-        from datetime import datetime, timezone
+        from datetime import datetime, timezone, timedelta
         weekday = datetime.now(timezone.utc).weekday()
         gate_results.append({
             "gate": "schedule",
@@ -2338,7 +2359,13 @@ async def stocks_ml():
         "history": (summary.get("history") or [])[-10:],
         "evolution": evolution[-5:],
         "log_tail": log_tail,
-        "next_train_cron": "0 23 * * 0  (Sun 11 PM ET)",
+        # Compute the *actual* next firing of the Sunday-23:00-ET cron
+        # relative to now. The cron expression alone (`0 23 * * 0`) was
+        # ambiguous — operator saw "Sun 11 PM ET" on Monday morning after
+        # the Sunday run had already completed, and read it as "still
+        # waiting for tonight's run".
+        "next_train_cron": _next_sun_23_et_iso(),
+        "next_train_cron_expr": "0 23 * * 0  (Sun 11 PM ET)",
         # Live training progress — populated whenever a worker is running.
         "training_state": live_state,
         "training_pid": live_pid,
