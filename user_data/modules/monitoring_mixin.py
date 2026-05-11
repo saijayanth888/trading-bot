@@ -37,6 +37,13 @@ Public surface (the only methods the strategy should call):
 
 All public methods catch exceptions internally — monitoring failures never
 crash the trading loop.
+
+Convention: every drawdown / pnl ``_pct`` value flowing through this mixin
+is a **fraction** (e.g. ``0.05`` = 5%). ``risk_governor.status()`` returns
+``drawdown_pct`` as ``1.0 - current/peak`` (fractional); the Slack
+formatter ``slack_alerts._fmt_pct`` consumes fractions via ``f"{x:.2%}"``.
+The 5% / 8% / 3% thresholds in ``_send_risk_alert`` are likewise
+fractional. Do not multiply by 100 anywhere in this chain.
 """
 
 from __future__ import annotations
