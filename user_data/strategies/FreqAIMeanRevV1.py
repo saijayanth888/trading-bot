@@ -212,10 +212,25 @@ def _attach_sentiment(dataframe: DataFrame, pair: str) -> DataFrame:
     return merged
 
 
+#: Sentinel for `regime_confidence` meaning "regime source unreachable"
+#: (e.g. Postgres blip, module import failure). Distinct from 0.0 which
+#: means "regime determined but the model is uncertain". Downstream gating
+#: MUST treat <0 as halt-trading (data hole) and ==0 as block-trading
+#: (uncertain but operational). See `_attach_regime` and entry-trend gates.
+REGIME_CONFIDENCE_DB_DOWN: float = -1.0
+
+
 def _attach_regime(dataframe: DataFrame, pair: str) -> DataFrame:
     """
     Merge regime features (1h cadence) and the non-feature `regime_label` /
     `regime_confidence` columns used by gating logic.
+
+    regime_confidence sentinel values:
+      -1.0  → regime source unreachable (DB down, module missing). Treat as
+              halt: do NOT trade.
+       0.0  → regime determined but model uncertain. Block entries, allow
+              exits to run normally.
+      >0.0  → real probability from HMM.
     """
     regime = None
     if _REGIME_AVAILABLE and get_regime_features is not None:
@@ -229,7 +244,9 @@ def _attach_regime(dataframe: DataFrame, pair: str) -> DataFrame:
         for col, default in _REGIME_NEUTRAL.items():
             dataframe[col] = default
         dataframe["regime_label"] = "unknown"
-        dataframe["regime_confidence"] = 0.0
+        # -1 sentinel: regime DB / module unreachable. Downstream gating
+        # halts trading rather than mistaking this for an uncertain regime.
+        dataframe["regime_confidence"] = REGIME_CONFIDENCE_DB_DOWN
         return dataframe
 
     df_sorted = _normalize_dt_column(dataframe.sort_values("date").reset_index(drop=True))
@@ -249,9 +266,14 @@ def _attach_regime(dataframe: DataFrame, pair: str) -> DataFrame:
     else:
         merged["regime_label"] = merged["regime_label"].fillna("unknown")
     if "regime_confidence" not in merged.columns:
-        merged["regime_confidence"] = 0.0
+        # Column missing from upstream feed: DB-down equivalent.
+        merged["regime_confidence"] = REGIME_CONFIDENCE_DB_DOWN
     else:
-        merged["regime_confidence"] = merged["regime_confidence"].fillna(0.0)
+        # merge_asof can leave NaN for rows whose candle timestamp predates
+        # the first regime row — that's a data-hole, treat as DB-down.
+        merged["regime_confidence"] = merged["regime_confidence"].fillna(
+            REGIME_CONFIDENCE_DB_DOWN
+        )
     return merged
 
 
@@ -1133,6 +1155,21 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
                 dataframe["enter_long"] = 0
                 return dataframe
 
+        # Regime-source health gate. regime_confidence < 0 is the DB-down /
+        # module-missing sentinel set by `_attach_regime`. Treat as halt:
+        # we'd rather skip the candle than make a regime-blind decision.
+        # A value of exactly 0.0 means the HMM ran but is uncertain — that
+        # case is handled later by the regime_label-specific gates (see
+        # trending_down / high_volatility checks below).
+        if "regime_confidence" in dataframe.columns:
+            db_down = dataframe["regime_confidence"] < 0
+            if db_down.any():
+                # Only the affected rows are halted; if the DB came back
+                # mid-window the more recent rows are still tradable.
+                dataframe.loc[db_down, "enter_long"] = 0
+                if db_down.all():
+                    return dataframe
+
         # Per-pair entry-threshold tweak: stronger live Sharpe lowers the bar,
         # weaker raises it. base is the strategy's hyperopt-tunable default.
         base = self._entry_threshold_adjust(pair, float(self.entry_threshold.value))
@@ -1143,6 +1180,11 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
             dataframe["up"] >= threshold,
             dataframe["volume"] > 0,
         ]
+        # Belt-and-braces: also enforce the regime-source health gate inside
+        # long_conditions so any subsequent `dataframe.loc[...] = (1, tag)`
+        # write cannot accidentally resurrect entries on DB-down rows.
+        if "regime_confidence" in dataframe.columns:
+            long_conditions.append(dataframe["regime_confidence"] >= 0)
         # In trending_down: hard block long entries.
         if "regime_label" in dataframe.columns:
             long_conditions.append(dataframe["regime_label"] != "trending_down")
