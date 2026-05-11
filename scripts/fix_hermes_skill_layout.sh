@@ -60,9 +60,8 @@ set -euo pipefail
 # script's parent dir if git isn't available.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if command -v git >/dev/null 2>&1 && git -C "${SCRIPT_DIR}" rev-parse --git-dir >/dev/null 2>&1; then
-  GIT_COMMON_DIR="$(git -C "${SCRIPT_DIR}" rev-parse --git-common-dir)"
-  # --git-common-dir may be relative; resolve absolute then take parent.
-  GIT_COMMON_DIR="$(cd "$(dirname "${GIT_COMMON_DIR}")/$(basename "${GIT_COMMON_DIR}")" && pwd)"
+  GIT_COMMON_DIR="$(git -C "${SCRIPT_DIR}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null \
+    || (cd "${SCRIPT_DIR}" && cd "$(git rev-parse --git-common-dir)" && pwd))"
   REPO_ROOT="$(dirname "${GIT_COMMON_DIR}")"
 else
   REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
