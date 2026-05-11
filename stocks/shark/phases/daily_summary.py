@@ -9,6 +9,7 @@ from shark.memory import handoff, state
 from shark.memory.journal import write_daily_summary
 from shark.signals.distributor import send_email_digest
 from shark.signals.templates import daily_summary_html
+from shark.notify import notify as _notify
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +232,22 @@ def run(dry_run: bool = False) -> bool:
             send_email_digest(subject=subject, body_html=body_html)
     except Exception:
         logger.exception("send_email_digest failed")
+
+    # Slack/Telegram daily summary — operator's overnight at-a-glance.
+    # Same conditions as the email path (skip on dry-run).
+    if not dry_run:
+        try:
+            _notify.daily_summary(
+                date=today,
+                equity=current_equity,
+                day_pnl_dollars=day_pnl_dollars,
+                day_pnl_pct=day_pnl_pct,
+                open_positions=len(positions),
+                weekly_trades=weekly_count,
+                circuit_breaker=circuit_breaker_active,
+            )
+        except Exception as exc:
+            logger.warning("notify.daily_summary failed: %s", exc)
 
     handoff.write_handoff_section("daily-summary", {
         "equity": f"${current_equity:,.2f}",

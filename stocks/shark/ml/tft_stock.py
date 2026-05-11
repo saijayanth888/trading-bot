@@ -330,8 +330,12 @@ def predict_direction(
     model, norms, payload, _cols = _load_for_inference(weights_path)
     mu, sd = norms.get(ticker, (None, None))
     if mu is None:
-        mu = np.zeros(feature_window.shape[1])
-        sd = np.ones(feature_window.shape[1])
+        # New ticker absent from training-time norms — neutral z-score.
+        # MUST be float32 or the model.forward() linear layer rejects with
+        # "expected mat1 and mat2 to have the same dtype, but got: double != float"
+        # because np.zeros defaults to float64.
+        mu = np.zeros(feature_window.shape[1], dtype=np.float32)
+        sd = np.ones(feature_window.shape[1], dtype=np.float32)
     else:
         mu = np.asarray(mu, dtype=np.float32)
         sd = np.asarray(sd, dtype=np.float32)

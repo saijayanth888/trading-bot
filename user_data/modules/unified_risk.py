@@ -297,6 +297,9 @@ class RiskStatus:
     snapshot_age_seconds: Optional[int]
     stocks_data_stale: bool
     stocks_data_untrusted: bool   # P0-J: snapshot too old to trust at all
+    market_open_now: bool         # Lets the dashboard suppress
+                                  # stocks-stale/untrusted false alarms
+                                  # outside market hours.
     sources: dict
 
 
@@ -398,6 +401,7 @@ def get_combined_risk_status() -> dict:
         snapshot_age_seconds=snap_age,
         stocks_data_stale=stocks_stale,
         stocks_data_untrusted=stocks_untrusted,
+        market_open_now=market_open_now,
         sources={
             "crypto_starting_equity": starting,
             "crypto_realised_pnl": round(realised, 2),

@@ -371,6 +371,16 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         return float(self._regime_gating["mean_rev_take_profit"])
 
     @property
+    def REGIME_MIN_STABLE_HOURS(self) -> float:
+        """Minimum HMM regime hold-time (in hours) before allowing entries.
+        Today's 3-for-3 losses entered minutes after a regime flip and
+        stopped out when the flip reversed. Default 2.0h blocks freshly
+        flipped regimes from seeing new positions; absent column or
+        regime-source down (default 0.0) also fails the gate, which is
+        the safer default."""
+        return float(self._regime_gating.get("regime_min_stable_hours", 2.0))
+
+    @property
     def TRENDING_UP_TRAIL_TRIGGER(self) -> float:
         return float(self._regime_gating["trending_up_trail_trigger"])
 
@@ -1326,6 +1336,18 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         # TFT quantile-spread confidence — only enforced if the column is present.
         if "tft_confidence" in dataframe.columns:
             long_conditions.append(dataframe["tft_confidence"] >= self.TFT_MIN_CONFIDENCE)
+
+        # Regime-stability gate (B-22). Block entries that arrive within
+        # REGIME_MIN_STABLE_HOURS of an HMM regime flip — today's 3-for-3
+        # losses all entered minutes after a flip and stopped out when the
+        # flip reversed. Column missing (regime-source down) → duration is
+        # 0.0 → gate blocks, which is the safer fallback. Applies to the
+        # primary TFT/meta path; the BollingerRSI MR path below has its own
+        # entry rules and is intentionally exempt (it WANTS post-flip dips).
+        if "%-regime_duration_h" in dataframe.columns:
+            long_conditions.append(
+                dataframe["%-regime_duration_h"] >= self.REGIME_MIN_STABLE_HOURS
+            )
 
         # Meta-agent gate: when the DRL ensemble is loaded, require
         # meta_signal == +1 AND meta_confidence ≥ threshold. We still keep

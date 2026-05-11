@@ -15,6 +15,8 @@ import uuid
 from datetime import date, timezone
 from typing import Any, Callable, TypeVar
 
+from shark.notify import notify as _notify
+
 logger = logging.getLogger(__name__)
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -301,6 +303,13 @@ def place_order(
         raise
     except Exception as exc:
         logger.error("Order failed for %s: %s", symbol, exc)
+        # Slack/Telegram ping so the operator doesn't have to tail logs to
+        # discover an order placement failure. Best-effort — never mask
+        # the original RuntimeError if the notifier itself blows up.
+        try:
+            _notify.error("orders.place_order", exc, context={"symbol": symbol, "qty": qty})
+        except Exception:
+            pass
         raise RuntimeError(f"Alpaca order failed for {symbol}: {exc}") from exc
 
 

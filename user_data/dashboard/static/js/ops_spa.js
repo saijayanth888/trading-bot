@@ -2302,16 +2302,26 @@
     const portfolioTripped = !!cp.circuit_breaker_active;
     const dd = Number(cp.combined_drawdown_pct || 0);
     const ddThreshold = Number(cp.threshold_pct || 10);
-    const stocksStale = !!cp.stocks_data_stale;
-    const stocksUntrusted = !!cp.stocks_data_untrusted;
+    // wheel_snapshot cron only runs Mon-Fri 9am-4pm ET. Outside those
+    // hours the snapshot is *expected* to drift older than the 600s/7200s
+    // thresholds — surfacing stale/untrusted as tripped rows produces
+    // false alarms every evening + weekend. The unified-risk breaker
+    // already gates the actual trip on market_open_now; mirror that here.
+    const marketOpen = cp.market_open_now !== false; // undefined → assume open (legacy safety)
+    const stocksStale = !!cp.stocks_data_stale && marketOpen;
+    const stocksUntrusted = !!cp.stocks_data_untrusted && marketOpen;
     const snapAge = Number(cp.snapshot_age_seconds || 0);
     const portfolioConditions = [
       { name: "combined drawdown", tripped: dd >= ddThreshold,
         detail: dd.toFixed(2) + "% / " + ddThreshold.toFixed(1) + "% threshold" },
       { name: "stocks data stale", tripped: stocksStale,
-        detail: stocksStale ? ("snapshot " + Math.round(snapAge) + "s old (limit 600s)") : "snapshot fresh" },
+        detail: !marketOpen
+          ? "market closed — gate inactive"
+          : (stocksStale ? ("snapshot " + Math.round(snapAge) + "s old (limit 600s)") : "snapshot fresh") },
       { name: "stocks data untrusted", tripped: stocksUntrusted,
-        detail: stocksUntrusted ? ("snapshot >2h old — combined-dd fail-safe") : "trust window OK" },
+        detail: !marketOpen
+          ? "market closed — gate inactive"
+          : (stocksUntrusted ? ("snapshot >2h old — combined-dd fail-safe") : "trust window OK") },
     ];
 
     if (slot.phase === "down" && cpSlot.phase === "down") {

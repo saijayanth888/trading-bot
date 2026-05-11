@@ -18,6 +18,7 @@ from shark.execution.position_sizer import compute_position_size, compute_partia
 from shark.agents.combined_analyst import analyze_symbol
 from shark.execution.orders import place_bracket_order
 from shark.memory.journal import log_trade
+from shark.notify import notify as _notify
 from shark.signals.generator import generate_signal
 from shark.signals.distributor import send_email_digest
 from shark.signals.templates import trade_signal_html
@@ -41,6 +42,61 @@ _EARNINGS_BLOCK_DAYS = 2
 _MIN_CONFIDENCE = 0.70
 _MIN_RISK_REWARD = 2.0          # claimed by LLM
 _MIN_RISK_REWARD_TOL = 1.8      # derived from stop/target/entry, small tolerance
+
+# Stocks TFT inference gate — a trained model votes UP/FLAT/DOWN on the
+# candidate. We veto BUYs the model disagrees with above the confidence
+# floor. Set TFT_GATE_ENABLED=0 to disable (debug/training-only mode).
+_TFT_GATE_ENABLED = os.environ.get("TFT_GATE_ENABLED", "1") != "0"
+_TFT_MIN_UP_PROB = float(os.environ.get("TFT_MIN_UP_PROB", "0.40"))
+_TFT_MIN_CONFIDENCE = float(os.environ.get("TFT_MIN_CONFIDENCE", "0.05"))
+
+
+def _tft_gate(symbol: str) -> tuple[bool, str]:
+    """Run the stocks TFT against the most recent 60-bar window for *symbol*
+    and decide whether the candidate clears the model's UP-direction floor.
+
+    Returns (allowed, reason). On any failure (model missing, insufficient
+    bars, runtime error) the gate FAILS OPEN — we'd rather pass a trade
+    through than veto every signal because of an infrastructure hiccup."""
+    try:
+        from shark.ml.tft_stock import predict_direction
+        from shark.ml.dataset_stock import _load_bars_json
+        from shark.ml.features_stock import build_features, FEATURE_COLS
+    except ImportError as exc:
+        return True, f"tft-import-failed:{exc}"
+
+    bars_path = Path(_REPO_ROOT) / "kb" / "historical_bars" / f"{symbol.upper()}.json"
+    if not bars_path.is_file():
+        return True, "tft-no-bars"
+
+    try:
+        bars = _load_bars_json(bars_path)
+        feats = build_features(bars)
+        if len(feats) < 60:
+            return True, "tft-insufficient-history"
+        window = feats[list(FEATURE_COLS)].iloc[-60:].values
+        pred = predict_direction(symbol.upper(), window)
+    except Exception as exc:
+        logger.warning("[TFT_GATE] %s — gate failed open: %s", symbol, exc)
+        return True, f"tft-runtime-err:{exc}"
+
+    if pred.get("error"):
+        return True, f"tft-no-model:{pred['error']}"
+
+    up = float(pred.get("up") or 0.0)
+    conf = float(pred.get("confidence") or 0.0)
+    down = float(pred.get("down") or 0.0)
+
+    # Hard veto: model thinks DOWN is the most-likely outcome with material
+    # confidence. This is the cleanest case of LLM-vs-model disagreement.
+    if down > up and conf >= _TFT_MIN_CONFIDENCE:
+        return False, f"tft-veto-down: up={up:.2f} down={down:.2f} conf={conf:.2f}"
+
+    # Soft veto: UP-prob too low even though it's the argmax.
+    if up < _TFT_MIN_UP_PROB:
+        return False, f"tft-low-up-prob: up={up:.2f} (floor={_TFT_MIN_UP_PROB})"
+
+    return True, f"tft-pass: up={up:.2f} conf={conf:.2f}"
 
 
 def _verify_risk_reward(
@@ -552,6 +608,16 @@ def _execute(dry_run: bool = False) -> bool:
             )
             continue
 
+        # === Stocks TFT inference gate ===
+        # The LLM agreed; now ask the trained model. If TFT predicts DOWN
+        # with confidence or UP-prob is under the floor, skip the trade.
+        if _TFT_GATE_ENABLED:
+            allowed, reason = _tft_gate(symbol)
+            if not allowed:
+                logger.info("%s rejected — %s", symbol, reason)
+                continue
+            logger.info("[TFT_GATE] %s %s", symbol, reason)
+
         logger.info(
             "%s EXECUTE qty=%d confidence=%.2f rr=%.2f stop=$%.2f target=$%.2f",
             symbol, qty, confidence, derived_rr,
@@ -619,6 +685,22 @@ def _execute(dry_run: bool = False) -> bool:
             subject=f"Shark BUY Signal — {symbol} @ ${fill_price}",
             body_html=body_html,
         )
+        # Slack/Telegram ping — operator needs out-of-band signal that a
+        # stocks trade just opened. Failure is silently ignored by notify.
+        try:
+            _notify.trade_entry(
+                pair=symbol,
+                signal="long",
+                entry_price=float(fill_price),
+                stake_amount=float(qty) * float(fill_price),
+                confidence=confidence,
+                regime=regime_str,
+                stop_loss=float(llm_stop),
+                take_profit=float(llm_target),
+                rationale=dec.get("bull_thesis", "")[:200],
+            )
+        except Exception as exc:
+            logger.warning("notify.trade_entry failed for %s: %s", symbol, exc)
         symbols_traded.append(symbol)
         trades_placed += 1
 

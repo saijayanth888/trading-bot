@@ -6,7 +6,7 @@
     "fiat_display_currency": "USD",
     "dry_run": true,
     "dry_run_wallet": 19000,
-    "fee": 0.0025,
+    "fee": 0.005,
     "cancel_open_orders_on_exit": false,
     "trading_mode": "spot",
     "margin_mode": "",
@@ -209,7 +209,8 @@
         "trending_up_trail_trigger": 0.025,
         "trending_up_trail_distance": -0.02,
         "tft_min_confidence": 0.4,
-        "meta_min_confidence": 0.35
+        "meta_min_confidence": 0.35,
+        "regime_min_stable_hours": 2.0
     },
     "capital_allocation": {
         "_doc": "Weights determine max capital allocation per pair. Pairs below min_sharpe_for_trading are data-only (model still trains, no entries). The strategy reads rolling 14-day Sharpe from trade_journal at bot_loop_start cadence; when fewer than `rebalance_after_days` of live data exist the trained val_sharpe is used as a bootstrap. Auto-rebalance recomputes weights on the rebalance_after_days schedule.",
