@@ -455,7 +455,8 @@
             h("div", { style: { gridColumn: "span 4", display: "flex", flexDirection: "column", gap: "var(--gap-grid)" } },
               h(ModelViewLive, { state, fetchedAt: meta.state_fetched_at }),
               h(MarketContextLive, { state, fetchedAt: meta.state_fetched_at }),
-              h(ChampionGenome, { state, fetchedAt: meta.state_fetched_at })
+              h(ChampionGenome, { state, fetchedAt: meta.state_fetched_at }),
+              h(PnLHistoryCard, { state, fetchedAt: meta.state_fetched_at })
             )
           ),
 
@@ -594,6 +595,44 @@
               c.champion_fitness != null ? Number(c.champion_fitness).toFixed(3) : "—"),
             h("span", { className: "dim" }, "Runner-up"),
             h("span", { className: "mono", style: { textAlign: "right" } }, c.runner_up_id || "—")
+          )
+    );
+  }
+
+  // P&L history sidebar — parity with legacy /charts. Reads
+  // state.daily_pnl_history (backend shape: `{ "YYYY-MM-DD": float_usd }`).
+  // Shows the most recent 14 days as a sparkline and the most recent 5 as
+  // a dl-style list — operator scans the table while the spark provides shape.
+  function PnLHistoryCard({ state, fetchedAt }) {
+    const hist = (state && state.daily_pnl_history) || {};
+    const days = Object.keys(hist).sort();
+    const last14 = days.slice(-14).map(d => Number(hist[d] || 0));
+    const last5 = days.slice(-5).reverse();
+    const total14 = last14.reduce((a, v) => a + v, 0);
+    return h(Card, {
+      num: "07", title: "P&L history", sub: days.length + " days · trailing " + Math.min(14, days.length),
+      right: h(TimeSince, { ts: fetchedAt, className: "mono dim", style: { fontSize: "var(--t-2xs)" } })
+    },
+      days.length === 0
+        ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)" } }, "no closed days yet")
+        : h(F, null,
+            h("div", { className: "metric-label" },
+              "14d net · " + (total14 >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(total14))),
+            last14.length > 1
+              ? h("div", { style: { marginTop: 6, marginBottom: 8 } },
+                  h(Sparkline, { data: last14, color: "var(--accent)", fill: false, height: 32 }))
+              : null,
+            h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, fontSize: "var(--t-xs)" } },
+              last5.map(d => {
+                const v = Number(hist[d] || 0);
+                const cls = v > 0 ? "up" : v < 0 ? "down" : "";
+                return h(F, { key: d },
+                  h("span", { className: "dim mono" }, d.slice(5)),
+                  h("span", { className: "num " + cls, style: { textAlign: "right" } },
+                    (v >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(v)))
+                );
+              })
+            )
           )
     );
   }
