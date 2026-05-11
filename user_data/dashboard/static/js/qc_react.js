@@ -332,30 +332,31 @@
     const [hover, setHover] = useState(null);
     const viewRef = useRef({ start: 0, end: (candles || []).length });
     const dragRef = useRef(null);
+    const drawRef = useRef(null);
+    const candlesRef = useRef(candles);
     const [, force] = useState(0);
     const rerender = () => force((n) => n + 1);
 
     useEffect(() => {
       viewRef.current = { start: 0, end: (candles || []).length };
+      candlesRef.current = candles;
       rerender();
     }, [candles]);
 
+    // Redraw effect — recomputes layout/scales/renders whenever any of
+    // {candles, markers, showVolume, overlays} change. Also installs the
+    // latest draw closure into drawRef so the listener effect (attach-once)
+    // can invoke it without re-attaching.
     useEffect(() => {
       const cv = ref.current, wrap = wrapRef.current;
-      if (!cv || !candles || !candles.length) return;
+      if (!cv || !wrap || !candles || !candles.length) return;
+      candlesRef.current = candles;
       const dpr = window.devicePixelRatio || 1;
       const cs = getComputedStyle(document.documentElement);
       const cUp = cs.getPropertyValue("--up").trim();
       const cDn = cs.getPropertyValue("--down").trim();
       const cFg4 = cs.getPropertyValue("--fg-3").trim() || "#9a9aa6";
       const cAccent = cs.getPropertyValue("--accent").trim();
-
-      const resize = () => {
-        const w = wrap.clientWidth, hH = wrap.clientHeight;
-        cv.width = w * dpr; cv.height = hH * dpr;
-        cv.style.width = w + "px"; cv.style.height = hH + "px";
-        draw();
-      };
 
       const draw = (hi) => {
         if (hi === undefined) hi = null;
@@ -521,7 +522,36 @@
         }
       };
 
-      resize();
+      const sizeAndDraw = () => {
+        const w = wrap.clientWidth, hH = wrap.clientHeight;
+        cv.width = w * dpr; cv.height = hH * dpr;
+        cv.style.width = w + "px"; cv.style.height = hH + "px";
+        draw();
+      };
+      drawRef.current = draw;
+      sizeAndDraw();
+      return () => { drawRef.current = null; };
+    }, [candles, markers, showVolume, overlays]);
+
+    // Listener-attach effect — attaches mousemove / mouseleave / wheel /
+    // mousedown / mouseup / dblclick / ResizeObserver ONCE on mount, cleans
+    // up on unmount. Handlers read the latest candles via candlesRef and
+    // invoke the latest draw via drawRef so listeners never need to be
+    // re-attached when parent re-renders. Before this split, the listeners
+    // re-attached on every render because `markers` was in deps and
+    // dashboard_spa.js rebuilds the markers array each fetch tick.
+    useEffect(() => {
+      const cv = ref.current, wrap = wrapRef.current;
+      if (!cv || !wrap) return;
+      const dpr = window.devicePixelRatio || 1;
+
+      const callDraw = (hi) => { if (drawRef.current) drawRef.current(hi); };
+      const resize = () => {
+        const w = wrap.clientWidth, hH = wrap.clientHeight;
+        cv.width = w * dpr; cv.height = hH * dpr;
+        cv.style.width = w + "px"; cv.style.height = hH + "px";
+        callDraw();
+      };
       const ro = new ResizeObserver(resize); ro.observe(wrap);
 
       const xToSliceIdx = (clientX) => {
@@ -537,6 +567,7 @@
       };
 
       const onMove = (e) => {
+        const candlesNow = candlesRef.current || [];
         if (dragRef.current) {
           const dx = e.clientX - dragRef.current.startX;
           const r = cv.getBoundingClientRect();
@@ -546,41 +577,45 @@
           const shift = -(dx / w) * range;
           let s = view0.start + shift, en = view0.end + shift;
           if (s < 0) { en -= s; s = 0; }
-          if (en > candles.length) { s -= (en - candles.length); en = candles.length; }
-          viewRef.current = { start: Math.max(0, s), end: Math.min(candles.length, en) };
-          draw();
+          if (en > candlesNow.length) { s -= (en - candlesNow.length); en = candlesNow.length; }
+          viewRef.current = { start: Math.max(0, s), end: Math.min(candlesNow.length, en) };
+          callDraw();
           return;
         }
         const r = xToSliceIdx(e.clientX);
         const view = viewRef.current;
         const globalIdx = Math.floor(view.start) + r.li;
-        setHover({ i: globalIdx, c: candles[globalIdx], li: r.li });
-        draw(r.li);
+        setHover({ i: globalIdx, c: candlesNow[globalIdx], li: r.li });
+        callDraw(r.li);
       };
-      const onLeave = () => { setHover(null); draw(); };
+      const onLeave = () => { setHover(null); callDraw(); };
       const onWheel = (e) => {
         e.preventDefault();
+        const candlesNow = candlesRef.current || [];
         const r = xToSliceIdx(e.clientX);
         const view = viewRef.current;
         const range = view.end - view.start;
         const factor = e.deltaY > 0 ? 1.18 : 1 / 1.18;
-        let newRange = Math.max(8, Math.min(candles.length, range * factor));
-        // zoom around the cursor position
+        let newRange = Math.max(8, Math.min(candlesNow.length, range * factor));
         const anchor = view.start + r.li;
         const leftFrac = r.li / Math.max(1, range);
         let s = anchor - newRange * leftFrac;
         let en = s + newRange;
         if (s < 0) { en -= s; s = 0; }
-        if (en > candles.length) { s -= (en - candles.length); en = candles.length; }
-        viewRef.current = { start: Math.max(0, s), end: Math.min(candles.length, en) };
-        draw();
+        if (en > candlesNow.length) { s -= (en - candlesNow.length); en = candlesNow.length; }
+        viewRef.current = { start: Math.max(0, s), end: Math.min(candlesNow.length, en) };
+        callDraw();
       };
       const onDown = (e) => {
         dragRef.current = { startX: e.clientX, view0: Object.assign({}, viewRef.current) };
         cv.style.cursor = "grabbing";
       };
       const onUp = () => { dragRef.current = null; cv.style.cursor = "crosshair"; };
-      const onDbl = () => { viewRef.current = { start: 0, end: candles.length }; draw(); };
+      const onDbl = () => {
+        const candlesNow = candlesRef.current || [];
+        viewRef.current = { start: 0, end: candlesNow.length };
+        callDraw();
+      };
 
       cv.style.cursor = "crosshair";
       cv.addEventListener("mousemove", onMove);
@@ -598,7 +633,7 @@
         window.removeEventListener("mouseup", onUp);
         cv.removeEventListener("dblclick", onDbl);
       };
-    }, [candles, markers, showVolume]);
+    }, []);
 
     const view = viewRef.current;
     const visible = Math.round(view.end - view.start);
