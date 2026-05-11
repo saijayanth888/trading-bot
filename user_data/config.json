@@ -196,7 +196,7 @@
             "mean_reverting": -0.1,
             "trending_up": 0.05,
             "high_volatility": 0,
-            "trending_down": -0.2,
+            "trending_down": -0.05,
             "unknown": 0
         },
         "high_vol_stake_factor": 0.7,
