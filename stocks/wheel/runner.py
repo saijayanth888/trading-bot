@@ -56,11 +56,34 @@ from .strategy import (
 logger = logging.getLogger(__name__)
 
 
+def _fetch_spy_regime(timeout_s: float = 2.0) -> str:
+    """Pull the current SPY regime from the dashboard ops API.
+
+    Returns "unknown" on any error so the regime_gating defaults
+    (which treat unknown as a no-op) keep entries flowing safely.
+    Used by sell_csps() to apply the WheelConfig.regime_gating policy.
+    """
+    import os, urllib.request, json as _json
+    base = os.environ.get("DASHBOARD_INTERNAL_URL", "http://localhost:8081")
+    try:
+        with urllib.request.urlopen(f"{base}/api/ops/stock_regime", timeout=timeout_s) as r:
+            d = _json.loads(r.read().decode()).get("data") or {}
+            return str(d.get("current") or "unknown")
+    except Exception as exc:
+        logger.warning("wheel: SPY regime fetch failed (%s) — defaulting to 'unknown'", exc)
+        return "unknown"
+
+
 # ── Entry: sell_csps ────────────────────────────────────────────────────────
 
 
 def sell_csps(symbols_override: Optional[List[str]] = None) -> dict:
     """Sell cash-secured puts for each allowed ticker. One-shot.
+
+    Applies the configured regime_gating policy: SPY regime is fetched
+    from the dashboard and used to either hard-block new CSPs (e.g. in
+    trending_down) or shift the delta band (e.g. tighter in high_volatility).
+    See WheelConfig.regime_gating for the default policy.
 
     Returns a summary dict suitable for Telegram delivery.
     """
@@ -71,6 +94,31 @@ def sell_csps(symbols_override: Optional[List[str]] = None) -> dict:
         logger.warning("Shark kill switch active — sell_csps() aborted")
         summary["errors"].append("shark kill switch active")
         return summary
+
+    # Regime gate — hard-block whole-cycle entries if SPY says risk-off.
+    regime = _fetch_spy_regime()
+    rg_policy = (cfg.regime_gating or {}).get(regime, {})
+    if rg_policy.get("block"):
+        logger.warning("wheel: SPY regime=%s blocks new CSP entries (policy)", regime)
+        summary["skipped"].append(f"regime_gate: SPY={regime} blocks new CSPs")
+        summary["regime"] = regime
+        summary["regime_blocked"] = True
+        return summary
+    summary["regime"] = regime
+    summary["delta_max_shift"] = float(rg_policy.get("delta_max_shift", 0.0))
+
+    # Apply per-regime delta shift to the cfg used by the selector below.
+    # Negative shift = tighter / further-OTM; positive = looser.
+    if summary["delta_max_shift"] != 0.0:
+        from dataclasses import replace
+        cfg = replace(cfg, delta_max=max(
+            cfg.delta_min + 0.01,
+            min(0.99, cfg.delta_max + summary["delta_max_shift"]),
+        ))
+        logger.info(
+            "wheel: regime=%s — delta_max adjusted %+.2f → %.2f",
+            regime, summary["delta_max_shift"], cfg.delta_max,
+        )
 
     broker = from_env()
     acct = broker.get_account()

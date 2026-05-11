@@ -61,6 +61,26 @@ class WheelConfig:
     # Mode.
     paper: bool = True
 
+    # ── Regime gating ───────────────────────────────────────────────────
+    # Per-SPY-regime tuning of CSP entry. Mirrors the crypto strategy's
+    # regime_gating block (config.json) — keeps the wheel risk-aware
+    # without per-trade discretionary decisions.
+    #
+    #   delta_max_shift   added to cfg.delta_max for this regime
+    #                     (negative = tighter, further OTM, safer)
+    #   block             hard-block new CSP entries in this regime
+    #
+    # Operator can override via WHEEL_REGIME_GATING env var (JSON string).
+    # Default policy: skip CSPs in trending_down + high_volatility; loosen
+    # slightly in trending_up; default in mean_reverting / unknown.
+    regime_gating: dict = field(default_factory=lambda: {
+        "trending_up":     {"delta_max_shift": +0.05, "block": False},
+        "trending_down":   {"delta_max_shift":  0.00, "block": True},
+        "high_volatility": {"delta_max_shift":  0.00, "block": True},
+        "mean_reverting":  {"delta_max_shift":  0.00, "block": False},
+        "unknown":         {"delta_max_shift":  0.00, "block": False},
+    })
+
     def assert_valid(self) -> None:
         if not self.symbols:
             raise ValueError("WHEEL_SYMBOLS must contain at least one ticker")
@@ -109,10 +129,39 @@ def _env_bool(key: str, default: bool) -> bool:
     return raw in ("1", "true", "yes", "y")
 
 
+def _env_regime_gating() -> dict | None:
+    """Optional JSON override for the regime_gating defaults.
+
+        WHEEL_REGIME_GATING='{"trending_down": {"block": false}}'
+    """
+    import json as _json
+    raw = (os.environ.get("WHEEL_REGIME_GATING") or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = _json.loads(raw)
+        return parsed if isinstance(parsed, dict) else None
+    except _json.JSONDecodeError:
+        return None
+
+
 def load_config() -> WheelConfig:
     """Build a WheelConfig from env vars + sane defaults."""
     symbols_raw = _env_str("WHEEL_SYMBOLS", "SOFI")
     symbols = tuple(s.strip().upper() for s in symbols_raw.split(",") if s.strip())
+
+    # Merge env override (if any) on top of the dataclass default. Build a
+    # WheelConfig with no override first to capture the field's factory
+    # defaults, then deep-merge the override.
+    rg_override = _env_regime_gating()
+    rg_kwargs: dict = {}
+    if rg_override is not None:
+        merged = dict(WheelConfig().regime_gating)  # start from defaults
+        for regime, policy in rg_override.items():
+            base = dict(merged.get(regime, {}))
+            base.update(policy if isinstance(policy, dict) else {})
+            merged[regime] = base
+        rg_kwargs = {"regime_gating": merged}
 
     cfg = WheelConfig(
         symbols=symbols,
@@ -129,6 +178,7 @@ def load_config() -> WheelConfig:
         earnings_blackout_days=_env_int("WHEEL_EARNINGS_BLACKOUT_DAYS", 3),
         kill_loss_per_cycle_usd=_env_float("WHEEL_KILL_LOSS_PER_CYCLE", 500.0),
         paper=_env_bool("WHEEL_PAPER", _env_str("TRADING_MODE", "paper") == "paper"),
+        **rg_kwargs,
     )
     cfg.assert_valid()
     return cfg

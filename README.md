@@ -950,22 +950,22 @@ held-out NLL, ~20 LOC in a new `shark/ml/calibration.py` or
 `freqaimodels/temperature.py`). Then re-derive `tft_min_confidence`
 from the 70th percentile of post-calibration empirical confidence.
 
-### 14.3 Stocks venue — per-regime entry/exit deltas
+### 14.3 Stocks venue — per-regime entry/exit deltas ✅ FIXED
 
-**Current state.** Stocks regime is detected (`/api/ops/stock_regime`,
-SPY MA cross / golden-cross structure / 20d realised vol) and visible
-on `/ops`. Wheel cron jobs respect a global "no entries when SPY
-regime=trending_down" check.
+**Fix.** `WheelConfig.regime_gating` is a per-regime policy dict:
+`{regime: {delta_max_shift: float, block: bool}}`. `sell_csps()` now
+fetches the SPY regime from `/api/ops/stock_regime` before any broker
+call and either hard-blocks (`block: True`) or shifts the short-put
+delta band (`delta_max_shift`, negative = further OTM = safer).
 
-**What's missing.** Per-regime *tuning* of CSP / covered-call selection
-the way crypto has `regime_gating.entry_delta` / `exit_delta`. Today
-the wheel uses the same delta thresholds in `trending_up` and
-`mean_reverting` — the strategy doesn't yet tighten in choppy markets.
+Default policy: block in `trending_down` + `high_volatility`; widen
+the delta band by +0.05 in `trending_up`; default elsewhere.
+Operator override via `WHEEL_REGIME_GATING` env var (JSON merge —
+specifying one regime does NOT nuke the others).
 
-**Unblock when.** Add `stocks_regime_gating` block to `config.json`
-mirroring the crypto schema, plumb it through `stocks/shark/signals/`
-wheel selectors, and surface in the regime-config UI form
-(`/api/ops/regime_config` already validates ranges generically).
+Tests: `stocks/tests/test_wheel_regime_gating.py` covers the default
+policy, env-merge behaviour, invalid-JSON fallback, delta-band
+clamp, and end-to-end short-circuit in `sell_csps`.
 
 ### 14.4 Position markers on candlestick charts
 
@@ -1004,21 +1004,19 @@ as the primary correlation key, with the legacy `pair@rate` /
 manually backfilled from freqtrade's authoritative `/api/v1/trades`
 into trade_journal so dashboard + post-mortem see them.
 
-### 14.6 EPT cron: drop the LLM wrapper
+### 14.6 EPT cron: drop the LLM wrapper ✅ FIXED
 
-**Current state.** The `ept_training_daily` Hermes cron prompts the
-Hermes-3 70B agent to "call `trigger_evolution_cycle` MCP tool and
-report the fitness scores". Pre-tonight, the MCP tool didn't actually
-run anything and the LLM was hallucinating numbers. After tonight's
-fix, the tool returns a real JSON summary — but the LLM is still in
-the loop, adding latency and a small hallucination surface for the
-report wording.
+**Fix.** Converted `ept_training_daily` (Hermes cron id `0ef7e5d701df`)
+from agent-driven to `script: ept_training_daily.sh` with
+`--no-agent`. The script runs `run_ept_generation.py --mode mock`,
+parses the JSON summary, formats a clean monospaced Slack table
+(action / mode / generation / champion / fitness / sharpe /
+leaderboard) and posts via webhook. Zero LLM hallucination
+surface; deterministic + reproducible.
 
-**Unblock when.** Convert the cron from agent-driven to
-`script`-driven (`deliver: telegram`, `script: ept_run.sh` that calls
-`run_ept_generation.py --mode mock` and pipes the JSON into a
-formatted message). Hermes Gateway supports this — see other
-`*.sh` script entries in `~/.hermes/cron/jobs.json`.
+Manually triggered after rewiring — slack post returned 200, real
+champion (`gen0-011`, fitness 0.7540, sharpe 0.884) reported with
+top-5 leaderboard. Next scheduled fire: 02:00 ET tomorrow.
 
 ---
 
