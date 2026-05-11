@@ -1774,14 +1774,19 @@ async def stocks_status():
 
 # Whitelist of stock symbols the dashboard chart page is allowed to query.
 # Keeps `/api/ops/stock_candles/{sym}` from being a generic Alpaca proxy.
-_STOCK_SYMBOL_WHITELIST = {"SOFI", "AAPL", "TSLA", "NVDA", "META", "MSFT", "GOOGL", "AMZN", "MARA", "F", "PLTR", "AMD", "SPY"}
+_STOCK_SYMBOL_WHITELIST = {"SOFI", "AAPL", "TSLA", "NVDA", "META", "MSFT", "GOOGL", "AMZN", "MARA", "F", "PLTR", "AMD", "SPY", "MSTR", "COIN", "QQQ", "IWM", "HOOD"}
 
 # Default basket for /api/ops/stocks_sparklines. Operator can override via the
 # DASHBOARD_STOCK_SYMBOLS env var (comma-separated). Each symbol must also
 # appear in _STOCK_SYMBOL_WHITELIST or it is filtered out at request time.
 DEFAULT_STOCK_SYMBOLS = [
     s.strip().upper() for s in os.environ.get(
-        "DASHBOARD_STOCK_SYMBOLS", "SOFI,PLTR,NVDA,AMD,SPY",
+        # Operator-tuned default: 10 high-liquidity options-traded names so the
+        # wheel/sparklines basket isn't fenced into one stock. Override via
+        # DASHBOARD_STOCK_SYMBOLS in .env. Index: SPY. AI/tech: NVDA, AMD,
+        # GOOGL, AAPL, TSLA. Fintech: SOFI, COIN. AI plays: PLTR, MSTR.
+        "DASHBOARD_STOCK_SYMBOLS",
+        "SOFI,PLTR,NVDA,AMD,SPY,TSLA,AAPL,GOOGL,MSTR,COIN",
     ).split(",") if s.strip()
 ]
 
