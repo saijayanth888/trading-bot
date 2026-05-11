@@ -127,6 +127,77 @@ services:
       --config /freqtrade/user_data/config-private.json
       --strategy FreqAIMeanRevV1
 
+  # ── NostalgiaForInfinity X6 (PROFILED OFF) ────────────────────────────
+  # Second freqtrade container running NFI X6 alongside the main strategy.
+  # OFF by default — `docker compose up` will NOT start this. Activate
+  # with:
+  #     docker compose --profile nfi up -d freqtrade-nfi
+  #
+  # Activation gates (see docs/NFI_X6_ACTIVATION_2026-05-11.md):
+  #   1. Strategy file byte-identical to upstream iterativv/NostalgiaForInfinity
+  #   2. rapidjson + pandas_ta importable in the freqtrade image
+  #   3. 2-year backtest passes Sharpe > 1.4 / DD < 12% / PF > 1.4
+  #   4. Paper-soak 7 days with ≥1 trade/day
+  #   5. Operator verbal "GO" → flip dry_run=false and remove profile gate
+  #
+  # Shares the same Dockerfile.freqtrade as the main service. Uses a
+  # separate sqlite trade DB (tradesv3_nfi.sqlite) and a separate
+  # dry_run_wallet so paper P&L stays isolated. Listens on host 8090
+  # to avoid colliding with the main freqtrade REST API on 8080.
+  # ──────────────────────────────────────────────────────────────────────
+  freqtrade-nfi:
+    profiles: ["nfi"]
+    build:
+      context: .
+      dockerfile: Dockerfile.freqtrade
+    image: trading-bot/freqtrade:local
+    container_name: freqtrade-nfi
+    restart: unless-stopped
+    mem_limit: 8g
+    memswap_limit: 8g
+    shm_size: 512m
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./user_data:/freqtrade/user_data
+      - ./scripts:/freqtrade/scripts:ro
+      - ./secrets:/run/secrets/trading-bot:ro
+    # Loopback only — same convention as the main freqtrade.
+    ports:
+      - "127.0.0.1:8090:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # NFI X6 is CPU-bound (pandas_ta / talib); GPU not required.
+      - COINBASE_KEY_FILE=${COINBASE_KEY_FILE:-/run/secrets/trading-bot/coinbase.json}
+      - COINBASE_API_KEY=${COINBASE_API_KEY:-}
+      - COINBASE_API_SECRET=${COINBASE_API_SECRET:-}
+      - FREQTRADE__API_SERVER__USERNAME=${FREQTRADE_API_USER:-freqtrader}
+      - FREQTRADE__API_SERVER__PASSWORD=${FREQTRADE_API_PASS:?FREQTRADE_API_PASS required}
+      - FREQTRADE__API_SERVER__JWT_SECRET_KEY=${FREQTRADE_JWT_SECRET:?FREQTRADE_JWT_SECRET required}
+      - FREQTRADE__API_SERVER__WS_TOKEN=${FREQTRADE_WS_TOKEN:?FREQTRADE_WS_TOKEN required}
+      # POSTGRES_* are inert here (the NFI scaffold uses sqlite via db_url)
+      # but the entrypoint references them — pass them through harmlessly.
+      - POSTGRES_USER=${POSTGRES_USER:-tradebot}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
+      - POSTGRES_DB=${POSTGRES_DB:-tradebot}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:8080/api/v1/ping || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    entrypoint: ["python3", "/freqtrade/scripts/freqtrade_entrypoint.py"]
+    command: >
+      trade
+      --logfile /freqtrade/user_data/logs/freqtrade-nfi.log
+      --config /freqtrade/user_data/strategies/nfi_x6_config.json
+      --strategy NostalgiaForInfinityX6
+
   # ── DEPRECATION NOTICE ────────────────────────────────────────────────
   # InfluxDB is scheduled for removal once Grafana dashboards are migrated
   # to query TimescaleDB directly. Until then, both run in parallel.
