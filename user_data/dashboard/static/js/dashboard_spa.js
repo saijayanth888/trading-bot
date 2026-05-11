@@ -322,21 +322,30 @@
     // Build dataset for hero strip
     const pairState = (state && state.pair_state) || (meta && meta.pair_state) || (state || {});
     const px = (meta.last_close != null) ? meta.last_close : (state && state.last_close) || 0;
-    // Day delta on the hero strip is the COMBINED portfolio drawdown vs
-    // peak — same source as the topbar (item 10 fix). Previously this read
-    // `state.daily_pnl` (USD) and rendered it as a percent, which produced
-    // "-23.37% · day" on a $80k BTC chart. Now: `combined_drawdown_pct` from
-    // /api/ops/combined_portfolio, signed so below-peak = negative.
+    // Venue-aware day-delta: when on stocks, surface stocks_drawdown_pct +
+    // (stocks_equity − stocks_peak_equity); when on crypto, the crypto
+    // drawdown + state.daily_pnl (freqtrade-only). Bleeding crypto numbers
+    // into the stocks view was misleading (operator saw "Crypto day P&L:
+    // −$23.37" while looking at SOFI).
     const cpData = envelopeData(combined) || {};
-    const ddPct = cpData.combined_drawdown_pct != null
-      ? Number(cpData.combined_drawdown_pct)
-      : null;
+    const ddSrc = venue === "stocks" ? cpData.stocks_drawdown_pct : cpData.crypto_drawdown_pct;
+    const ddPct = ddSrc != null ? Number(ddSrc) : null;
     const dayPct = ddPct != null ? -ddPct : 0;
     const recent = (state && state.recent_trades) || [];
-    const dayPnlUsd = state ? Number(state.daily_pnl || 0) : 0;
+    const dayPnlUsd = venue === "stocks"
+      ? ((cpData.stocks_equity != null && cpData.stocks_peak_equity != null)
+          ? Number(cpData.stocks_equity) - Number(cpData.stocks_peak_equity)
+          : 0)
+      : (state ? Number(state.daily_pnl || 0) : 0);
+    const dayPnlLabel = venue === "stocks" ? "Stocks day P&L: " : "Crypto day P&L: ";
     const regime = state && state.regime;
     const regimeConf = state && state.regime_confidence;
-    const gateState = "PASS";  // we don't have a per-pair gate state in /api/state; default
+    // Per-pair gate state: crypto pairs are hard-blocked when regime is
+    // trending_down (see FreqAIMeanRevV1 regime gate). Stocks route through
+    // the wheel runner — gate state isn't surfaced on /api/state yet.
+    const gateState = venue === "crypto"
+      ? (regime === "trending_down" ? "BLOCK" : "PASS")
+      : "PASS";
 
     return h(F, null,
       h("div", { className: "app" },
@@ -381,7 +390,7 @@
                     fmtPct(dayPct) + " · day")
                 ),
                 dayPnlUsd !== 0 && h("div", { className: "mono dim", style: { fontSize: "var(--t-2xs)", marginTop: 2 } },
-                  "Crypto day P&L: " + (dayPnlUsd >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(dayPnlUsd)))
+                  dayPnlLabel + (dayPnlUsd >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(dayPnlUsd)))
               ),
               h("div", { className: "vr" }),
               h(Mini2, { lbl: "SOURCE", v: meta.source || "—" }),
