@@ -32,6 +32,7 @@ from alpaca.trading.enums import (
     OrderSide,
     OrderType,
     PositionIntent,
+    QueryOrderStatus,
     TimeInForce,
 )
 from alpaca.trading.requests import (
@@ -352,7 +353,12 @@ class Broker:
     # ── Order maintenance ──────────────────────────────────────────────────
 
     def list_open_orders(self, symbol: Optional[str] = None) -> list:
-        req = GetOrdersRequest(status="open", symbols=[symbol] if symbol else None)
+        # Use the SDK enum (P1-S6). String "open" worked because QueryOrderStatus
+        # is a str-enum, but future SDK versions may tighten validation.
+        req = GetOrdersRequest(
+            status=QueryOrderStatus.OPEN,
+            symbols=[symbol] if symbol else None,
+        )
         return self.trading.get_orders(req)
 
     def cancel_stale_orders(self, max_age_minutes: int = 240) -> int:
