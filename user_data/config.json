@@ -125,7 +125,7 @@
             "n_epochs": 25,
             "batch_size": 256,
             "quantile_loss_weight": 0.3,
-            "early_stopping_patience": 5,
+            "early_stopping_patience": 0,
             "use_amp": true,
             "use_compile": true,
             "warmup_pct": 0.05
