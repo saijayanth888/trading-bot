@@ -8,7 +8,7 @@
   <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='6' fill='%237c5cff'/></svg>" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="/static/css/app.css?v=20260512-10" />
+  <link rel="stylesheet" href="/static/css/app.css?v=20260512-11" />
   <style>
     /* ── Page grid ────────────────────────────────────────────────── */
     .ops-grid {
@@ -2187,11 +2187,14 @@
           const cryptoBlocked = (regR && regR.data && String(regR.data.current || "").toLowerCase() === "trending_down");
           const openCount = (portR && portR.data) ? ((portR.data.crypto_open_positions || 0) + (portR.data.stocks_open_positions || 0)) : 0;
           const dotCls = isPaused ? "warn" : isHealthy ? "up" : "down";
+          // Pill has a fixed max-width; keep labels short (~18 chars) or
+          // they truncate to "(D..." mid-word. Operator caught this in the
+          // 8:24 AM screenshot. Shorter phrasing keeps the posture clear.
           let label;
           if (isHealthy) {
-            if (openCount > 0)       label = "ENGINE ACTIVE · IN TRADE";
-            else if (cryptoBlocked)  label = "ENGINE ACTIVE · HOLDING (DOWNTREND)";
-            else                     label = "ENGINE ACTIVE · READY";
+            if (openCount > 0)       label = "ACTIVE · IN TRADE";
+            else if (cryptoBlocked)  label = "ACTIVE · HOLD (DOWN)";
+            else                     label = "ACTIVE · READY";
           } else if (isPaused) {
             label = "PAUSED";
           } else {
@@ -2272,10 +2275,10 @@
   })();
   </script>
 
-  {% if effects_enabled %}<script src="/static/js/effects.js?v=20260512-10" defer></script>{% endif %}
-  <script src="/static/js/utils.js?v=20260512-10"></script>
-  <script src="/static/js/components.js?v=20260512-10"></script>
-  <script src="/static/js/ops.js?v=20260512-10" defer></script>
+  {% if effects_enabled %}<script src="/static/js/effects.js?v=20260512-11" defer></script>{% endif %}
+  <script src="/static/js/utils.js?v=20260512-11"></script>
+  <script src="/static/js/components.js?v=20260512-11"></script>
+  <script src="/static/js/ops.js?v=20260512-11" defer></script>
 
   <!-- NumberRoll upgrade for topbar + hero equity (prototype primitive) -->
   <script>

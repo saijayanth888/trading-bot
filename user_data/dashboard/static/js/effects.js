@@ -280,9 +280,9 @@
           const openCount = Number(open) || 0;
           let label;
           if (runState === "running") {
-            if (openCount > 0)       label = "ENGINE ACTIVE · IN TRADE";
-            else if (cryptoBlocked)  label = "ENGINE ACTIVE · HOLDING (DOWNTREND)";
-            else                     label = "ENGINE ACTIVE · READY";
+            if (openCount > 0)       label = "ACTIVE · IN TRADE";
+            else if (cryptoBlocked)  label = "ACTIVE · HOLD (DOWN)";
+            else                     label = "ACTIVE · READY";
           } else {
             label = runState === "reload_config" ? "RELOADING"
               : runState === "starting" ? "STARTING"

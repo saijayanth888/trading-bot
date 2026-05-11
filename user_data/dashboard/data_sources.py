@@ -111,27 +111,57 @@ async def _ensure_jwt(client: httpx.AsyncClient) -> str | None:
 async def fetch_freqtrade_candles(
     pair: str, timeframe: str = "5m", limit: int = 500,
 ) -> pd.DataFrame | None:
-    """Pull pair_candles (candles + analyzed columns) from freqtrade."""
+    """Pull pair_candles (candles + analyzed columns) from freqtrade.
+
+    Retry-with-smaller-limit: freqtrade's pair_candles still 500s on some
+    older candles for the newer alts (ADA/XRP/DOGE/AVAX/LINK) due to a
+    deep numpy.int64 serialization issue we can't fully scrub from the
+    strategy side (only newer candles get the int promotion; the cached
+    frame's older rows from before the fix landed are stuck). If a fetch
+    fails, we step down to a smaller limit so we at least return SOMETHING
+    for telemetry rather than 0 rows.
+    """
     async with httpx.AsyncClient() as client:
         token = await _ensure_jwt(client)
         if token is None:
             return None
-        try:
-            resp = await client.get(
-                f"{FREQTRADE_API}/api/v1/pair_candles",
-                params={"pair": pair, "timeframe": timeframe, "limit": limit},
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=10.0,
-            )
-            if resp.status_code != 200:
-                logger.warning(
-                    "pair_candles %s status=%s body=%s",
-                    pair, resp.status_code, resp.text[:200],
+
+        # Try the requested limit first, then progressively smaller windows
+        # that strip away the int64-tainted older rows.
+        ladder: list[int] = [limit]
+        for step in (50, 30, 20, 10):
+            if step < limit and step not in ladder:
+                ladder.append(step)
+
+        payload: dict[str, Any] | None = None
+        for try_limit in ladder:
+            try:
+                resp = await client.get(
+                    f"{FREQTRADE_API}/api/v1/pair_candles",
+                    params={"pair": pair, "timeframe": timeframe, "limit": try_limit},
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=10.0,
                 )
-                return None
-            payload = resp.json()
-        except Exception as exc:
-            logger.warning("pair_candles fetch failed: %s", exc)
+                if resp.status_code == 200:
+                    payload = resp.json()
+                    if try_limit != limit:
+                        logger.info(
+                            "pair_candles %s: served limit=%d (asked %d) — older rows tainted",
+                            pair, try_limit, limit,
+                        )
+                    break
+                if resp.status_code != 500:
+                    logger.warning(
+                        "pair_candles %s status=%s body=%s",
+                        pair, resp.status_code, resp.text[:200],
+                    )
+                    return None
+            except Exception as exc:
+                logger.warning("pair_candles fetch %s limit=%d: %s", pair, try_limit, exc)
+                continue
+
+        if payload is None:
+            logger.warning("pair_candles %s: all retries failed", pair)
             return None
 
     cols = payload.get("columns") or []

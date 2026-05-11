@@ -875,6 +875,30 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
                     f32_cols.append(col)
         for col in f32_cols:
             dataframe[col] = pd.to_numeric(dataframe[col], errors="coerce").astype("float64")
+        # Same pydantic-v2 rejection hits numpy.int64. We see this on the
+        # newer alts (ADA/XRP/DOGE/AVAX/LINK) when /api/v1/pair_candles is
+        # asked for limit≥60: meta_signal lands as int64 (or int32 on some
+        # builds), date-derived helpers like __date_ts are int64 ms-since-
+        # epoch, and any window past ~20 candles back tends to include at
+        # least one int64-typed cell. Promote every int-flavored column to
+        # plain Python int via pd.Int64Dtype()→object→int round-trip is
+        # heavy; the cheapest fix that satisfies the serializer is to
+        # cast int8/16/32/64/uint variants to a plain `int` dtype that
+        # pydantic recognises as Python-compatible.
+        int_cols = list(dataframe.select_dtypes(
+            include=["int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64"]
+        ).columns)
+        for col in int_cols:
+            # CRITICAL: dtype=object is required. Without it pandas auto-detects
+            # int values and coerces the Series back to int64, defeating the
+            # whole exercise. With dtype=object explicitly set, each cell stays
+            # as a plain Python int and the pydantic-v2 serializer in
+            # /api/v1/pair_candles accepts them.
+            dataframe[col] = pd.Series(
+                [int(v) for v in dataframe[col].to_numpy()],
+                index=dataframe.index,
+                dtype=object,
+            )
         return dataframe
 
     # ------------------------------------------------------------------
