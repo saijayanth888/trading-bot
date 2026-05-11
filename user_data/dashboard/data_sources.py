@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -168,6 +169,17 @@ async def ft_authed_get(
     return await client.get(url, params=params, headers=headers, timeout=timeout)
 
 
+# Tiny in-process TTL cache for pair_candles. The dashboard's gates,
+# sparklines and pair-telemetry endpoints all hit freqtrade for the same
+# (pair, timeframe, limit) triple every 10s. Without caching, 8 crypto
+# pairs × 3 endpoints × 6 calls/min = 144 freqtrade hits/min, which
+# trickled through to Coinbase REST and produced the 429 Too Many Requests
+# bursts on 2026-05-11 17:59 / 18:28. 30s TTL dedupes within a single
+# polling sweep without staling beyond a 5m-candle's resolution.
+_CANDLE_CACHE: dict[tuple, tuple[float, "pd.DataFrame | None"]] = {}
+_CANDLE_CACHE_TTL_S = float(os.environ.get("DASHBOARD_CANDLE_CACHE_TTL_S", "30"))
+
+
 async def fetch_freqtrade_candles(
     pair: str, timeframe: str = "5m", limit: int = 500,
 ) -> pd.DataFrame | None:
@@ -180,7 +192,17 @@ async def fetch_freqtrade_candles(
     frame's older rows from before the fix landed are stuck). If a fetch
     fails, we step down to a smaller limit so we at least return SOMETHING
     for telemetry rather than 0 rows.
+
+    Cache: 30s TTL per (pair, timeframe, limit) — Coinbase 429 mitigation.
     """
+    cache_key = (pair, timeframe, limit)
+    now = time.monotonic()
+    cached = _CANDLE_CACHE.get(cache_key)
+    if cached is not None and (now - cached[0]) < _CANDLE_CACHE_TTL_S:
+        # Return a shallow copy so callers that mutate the df don't poison
+        # the cache. pandas DataFrame copy is cheap for the ≤500-row frames
+        # we deal with here.
+        return cached[1].copy() if cached[1] is not None else None
     async with httpx.AsyncClient() as client:
         # Use ft_authed_get so a 401 (e.g. freqtrade restart rotated its
         # signing key) triggers exactly one transparent re-login instead of
@@ -233,6 +255,13 @@ async def fetch_freqtrade_candles(
     df = pd.DataFrame(rows, columns=cols)
     if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
+    _CANDLE_CACHE[cache_key] = (now, df)
+    # Bound the cache so it can't grow unbounded if the operator scans
+    # many pairs. Drop entries older than 2× TTL.
+    if len(_CANDLE_CACHE) > 64:
+        stale_cutoff = now - (2 * _CANDLE_CACHE_TTL_S)
+        for k in [k for k, v in _CANDLE_CACHE.items() if v[0] < stale_cutoff]:
+            _CANDLE_CACHE.pop(k, None)
     return df
 
 

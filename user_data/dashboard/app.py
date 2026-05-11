@@ -49,6 +49,12 @@ logging.basicConfig(
     level=os.environ.get("DASHBOARD_LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
+# Silence httpx per-request INFO logs. ft_authed_get already handles 401s
+# transparently (invalidate cache → re-auth → retry once) — the httpx
+# library was double-logging both the 401 AND the retry's 200, creating
+# 798 lines/hour of noise during the regime_config + freqtrade reload
+# bursts. We still see WARN/ERROR for genuine connection failures.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 HERE = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(HERE / "templates"))
