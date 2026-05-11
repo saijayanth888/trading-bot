@@ -765,12 +765,19 @@ function renderGatesSection(host, kind, rows, title) {
       const g = row.gates.find(x => x.gate === gname);
       const td = document.createElement("td");
       td.style.textAlign = "center";
-      const cell = document.createElement("span");
-      cell.className = "gate-cell";
-      cell.dataset.pass = String(g?.pass);
-      cell.textContent = g?.pass === true ? "✓" : g?.pass === false ? "✗" : "—";
-      cell.title = g?.detail || "";
-      td.appendChild(cell);
+      // Use the new GateBadge primitive — proper PASS/BLOCK/N/A chips.
+      const passState = g?.pass === true ? "pass" : g?.pass === false ? "block" : "na";
+      const label = g?.pass === true ? "✓" : g?.pass === false ? "✗" : "—";
+      const badge = window.QC && window.QC.gateBadge
+        ? window.QC.gateBadge(passState, label)
+        : (function () {
+            const sp = document.createElement("span");
+            sp.className = "gate " + passState;
+            sp.textContent = label;
+            return sp;
+          })();
+      badge.title = g?.detail || "";
+      td.appendChild(badge);
       tr.appendChild(td);
     }
 
