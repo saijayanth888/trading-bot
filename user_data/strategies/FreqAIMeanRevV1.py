@@ -212,10 +212,25 @@ def _attach_sentiment(dataframe: DataFrame, pair: str) -> DataFrame:
     return merged
 
 
+#: Sentinel for `regime_confidence` meaning "regime source unreachable"
+#: (e.g. Postgres blip, module import failure). Distinct from 0.0 which
+#: means "regime determined but the model is uncertain". Downstream gating
+#: MUST treat <0 as halt-trading (data hole) and ==0 as block-trading
+#: (uncertain but operational). See `_attach_regime` and entry-trend gates.
+REGIME_CONFIDENCE_DB_DOWN: float = -1.0
+
+
 def _attach_regime(dataframe: DataFrame, pair: str) -> DataFrame:
     """
     Merge regime features (1h cadence) and the non-feature `regime_label` /
     `regime_confidence` columns used by gating logic.
+
+    regime_confidence sentinel values:
+      -1.0  → regime source unreachable (DB down, module missing). Treat as
+              halt: do NOT trade.
+       0.0  → regime determined but model uncertain. Block entries, allow
+              exits to run normally.
+      >0.0  → real probability from HMM.
     """
     regime = None
     if _REGIME_AVAILABLE and get_regime_features is not None:
@@ -229,7 +244,9 @@ def _attach_regime(dataframe: DataFrame, pair: str) -> DataFrame:
         for col, default in _REGIME_NEUTRAL.items():
             dataframe[col] = default
         dataframe["regime_label"] = "unknown"
-        dataframe["regime_confidence"] = 0.0
+        # -1 sentinel: regime DB / module unreachable. Downstream gating
+        # halts trading rather than mistaking this for an uncertain regime.
+        dataframe["regime_confidence"] = REGIME_CONFIDENCE_DB_DOWN
         return dataframe
 
     df_sorted = _normalize_dt_column(dataframe.sort_values("date").reset_index(drop=True))
@@ -249,9 +266,14 @@ def _attach_regime(dataframe: DataFrame, pair: str) -> DataFrame:
     else:
         merged["regime_label"] = merged["regime_label"].fillna("unknown")
     if "regime_confidence" not in merged.columns:
-        merged["regime_confidence"] = 0.0
+        # Column missing from upstream feed: DB-down equivalent.
+        merged["regime_confidence"] = REGIME_CONFIDENCE_DB_DOWN
     else:
-        merged["regime_confidence"] = merged["regime_confidence"].fillna(0.0)
+        # merge_asof can leave NaN for rows whose candle timestamp predates
+        # the first regime row — that's a data-hole, treat as DB-down.
+        merged["regime_confidence"] = merged["regime_confidence"].fillna(
+            REGIME_CONFIDENCE_DB_DOWN
+        )
     return merged
 
 
@@ -301,6 +323,13 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         "trending_up_trail_distance": -0.025,
         "tft_min_confidence": 0.40,
         "meta_min_confidence": 0.40,
+        # Trending-down is no longer a categorical block — it's a
+        # probability-weighted entry. Require the model's `up` prob (or
+        # meta_confidence on long signals, when the meta-agent is active)
+        # to be >= this floor before going long against the trend. Default
+        # 0.70 picks up the rare strong-reversal candle while still
+        # excluding the bulk of choppy down-trend noise.
+        "trending_down_min_confidence": 0.70,
     }
 
     @property
@@ -331,6 +360,13 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         return float(self._regime_gating["high_vol_min_confidence"])
 
     @property
+    def TRENDING_DOWN_MIN_CONFIDENCE(self) -> float:
+        """TFT `up` (or meta_confidence when active) floor for long entries
+        while regime_label == 'trending_down'. Replaces the prior hard block;
+        see populate_entry_trend for usage."""
+        return float(self._regime_gating["trending_down_min_confidence"])
+
+    @property
     def MEAN_REV_TAKE_PROFIT(self) -> float:
         return float(self._regime_gating["mean_rev_take_profit"])
 
@@ -350,6 +386,16 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
     def META_MIN_CONFIDENCE(self) -> float:
         return float(self._regime_gating["meta_min_confidence"])
     # Cache loaded ensembles per save_dir so we don't re-deserialize each candle.
+    # 3-state cache semantics:
+    #   - key absent              → never attempted, try to load
+    #   - cache value is _DRL_LOAD_FAILED  → load failed permanently, skip
+    #   - cache value is DRLEnsemble instance → loaded, use it
+    # A previous design stored `None` for "load failed" but also treated an
+    # absent key as `None` (via .get default), which caused the strategy to
+    # re-attempt the load on every candle AND defeat the once-only warning
+    # log — spamming the journal and adding pointless disk I/O. The sentinel
+    # makes "failed-and-cached" distinguishable from "not yet attempted".
+    _DRL_LOAD_FAILED: object = object()
     _DRL_CACHE: "dict[str, object]" = {}
 
     # Risk governor instance — populated in bot_start. Gates every entry.
@@ -1000,22 +1046,40 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
     # ------------------------------------------------------------------
 
     def _load_drl_ensemble(self):
-        """Lazy, cached load of the DRL ensemble. Returns None on miss."""
+        """Lazy, cached load of the DRL ensemble. Returns None on miss.
+
+        Uses a 3-state cache to avoid retrying the load on every candle when
+        the weights aren't present. We log exactly one warning per save_dir
+        on the first failure, then short-circuit silently thereafter.
+        """
         if not _DRL_AVAILABLE or DRLEnsemble is None:
             return None
         save_dir = str(DRL_SAVE_DIR)
-        cached = self._DRL_CACHE.get(save_dir)
-        if cached is not None:
+        # Distinguish "not yet attempted" (key absent) from "loaded a real
+        # ensemble" (truthy instance) from "failed, don't retry" (sentinel).
+        if save_dir in self._DRL_CACHE:
+            cached = self._DRL_CACHE[save_dir]
+            if cached is self._DRL_LOAD_FAILED:
+                return None
             return cached
         try:
             ensemble = DRLEnsemble(save_dir=DRL_SAVE_DIR, device="cpu")
             ensemble.load()
         except FileNotFoundError:
-            self._DRL_CACHE[save_dir] = None
+            logger.warning(
+                "DRL ensemble: not available at %s, meta-agent will fall back "
+                "to TFT-only (this message logs once per process)",
+                save_dir,
+            )
+            self._DRL_CACHE[save_dir] = self._DRL_LOAD_FAILED
             return None
         except Exception as exc:
-            logger.warning("DRL ensemble failed to load (%s); falling back to TFT", exc)
-            self._DRL_CACHE[save_dir] = None
+            logger.warning(
+                "DRL ensemble failed to load (%s); meta-agent will fall back "
+                "to TFT-only (this message logs once per process)",
+                exc,
+            )
+            self._DRL_CACHE[save_dir] = self._DRL_LOAD_FAILED
             return None
         self._DRL_CACHE[save_dir] = ensemble
         return ensemble
@@ -1179,6 +1243,21 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
                 dataframe["enter_long"] = 0
                 return dataframe
 
+        # Regime-source health gate. regime_confidence < 0 is the DB-down /
+        # module-missing sentinel set by `_attach_regime`. Treat as halt:
+        # we'd rather skip the candle than make a regime-blind decision.
+        # A value of exactly 0.0 means the HMM ran but is uncertain — that
+        # case is handled later by the regime_label-specific gates (see
+        # trending_down / high_volatility checks below).
+        if "regime_confidence" in dataframe.columns:
+            db_down = dataframe["regime_confidence"] < 0
+            if db_down.any():
+                # Only the affected rows are halted; if the DB came back
+                # mid-window the more recent rows are still tradable.
+                dataframe.loc[db_down, "enter_long"] = 0
+                if db_down.all():
+                    return dataframe
+
         # Per-pair entry-threshold tweak: stronger live Sharpe lowers the bar,
         # weaker raises it. base is the strategy's hyperopt-tunable default.
         base = self._entry_threshold_adjust(pair, float(self.entry_threshold.value))
@@ -1189,9 +1268,25 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
             dataframe["up"] >= threshold,
             dataframe["volume"] > 0,
         ]
-        # In trending_down: hard block long entries.
+        # Belt-and-braces: also enforce the regime-source health gate inside
+        # long_conditions so any subsequent `dataframe.loc[...] = (1, tag)`
+        # write cannot accidentally resurrect entries on DB-down rows.
+        if "regime_confidence" in dataframe.columns:
+            long_conditions.append(dataframe["regime_confidence"] >= 0)
+        # In trending_down: probability-weighted entry, NOT a categorical
+        # block. The HMM sits in trending_down ~30-50% of the time and the
+        # old hard block left us dormant for entire sessions. Allow entry
+        # against the trend only when the model is exceptionally confident
+        # (TFT up >= TRENDING_DOWN_MIN_CONFIDENCE, default 0.70). The
+        # per-row threshold already adds a +0.20 regime delta on top of the
+        # base entry_threshold; this knob is a separate hard floor so the
+        # tuner can lift the trending_down bar without disturbing the
+        # base-threshold sweep.
         if "regime_label" in dataframe.columns:
-            long_conditions.append(dataframe["regime_label"] != "trending_down")
+            long_conditions.append(
+                (dataframe["regime_label"] != "trending_down")
+                | (dataframe["up"] >= self.TRENDING_DOWN_MIN_CONFIDENCE)
+            )
         # In high_volatility: require very high model confidence on top.
         if "regime_label" in dataframe.columns:
             long_conditions.append(
@@ -1204,11 +1299,26 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
 
         # Meta-agent gate: when the DRL ensemble is loaded, require
         # meta_signal == +1 AND meta_confidence ≥ threshold. We still keep
-        # the TFT-based conditions above as a hard floor.
+        # the TFT-based conditions above as a hard floor. In trending_down
+        # the meta-confidence floor is lifted to TRENDING_DOWN_MIN_CONFIDENCE
+        # (default 0.70) so the relaxation isn't an open back-door for the
+        # meta-agent to enter at 0.40 against the trend.
         meta_active = self._meta_active(dataframe)
         if meta_active:
             long_conditions.append(dataframe["meta_signal"] == 1)
-            long_conditions.append(dataframe["meta_confidence"] >= self.META_MIN_CONFIDENCE)
+            if "regime_label" in dataframe.columns:
+                trend_down_mask = dataframe["regime_label"] == "trending_down"
+                # Per-row min confidence: 0.70 in trending_down, 0.40 elsewhere.
+                meta_floor = np.where(
+                    trend_down_mask.to_numpy(),
+                    self.TRENDING_DOWN_MIN_CONFIDENCE,
+                    self.META_MIN_CONFIDENCE,
+                )
+                long_conditions.append(
+                    dataframe["meta_confidence"] >= pd.Series(meta_floor, index=dataframe.index)
+                )
+            else:
+                long_conditions.append(dataframe["meta_confidence"] >= self.META_MIN_CONFIDENCE)
 
         tag = "meta_up_regime" if meta_active else "freqai_up_regime"
         dataframe.loc[

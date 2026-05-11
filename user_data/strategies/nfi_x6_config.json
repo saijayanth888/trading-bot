@@ -1,0 +1,140 @@
+{
+    "_doc_": [
+        "Scaffold-only config for NostalgiaForInfinity X6 dry-run backtest.",
+        "DO NOT replace user_data/config.json with this file. This config",
+        "lives next to the strategy module so it can be invoked explicitly:",
+        "  freqtrade backtesting --strategy NostalgiaForInfinityX6 \\",
+        "      --config user_data/strategies/nfi_x6_config.json \\",
+        "      --timerange 20240101-20260501",
+        "Whitelist is a Coinbase Advanced USD subset of the main bot's pairs.",
+        "All safety knobs mirror user_data/config.json. dry_run is hard-true."
+    ],
+    "strategy": "NostalgiaForInfinityX6",
+    "max_open_trades": 6,
+    "stake_currency": "USD",
+    "stake_amount": "unlimited",
+    "tradable_balance_ratio": 0.99,
+    "fiat_display_currency": "USD",
+    "dry_run": true,
+    "dry_run_wallet": 19000,
+    "fee": 0.0025,
+    "cancel_open_orders_on_exit": false,
+    "trading_mode": "spot",
+    "margin_mode": "",
+    "timeframe": "5m",
+    "bot_name": "freqtrade-nfi-x6-scaffold",
+    "initial_state": "stopped",
+    "force_entry_enable": false,
+    "minimal_roi": {
+        "0": 100
+    },
+    "unfilledtimeout": {
+        "entry": 60,
+        "exit": 60,
+        "exit_timeout_count": 0,
+        "unit": "seconds"
+    },
+    "order_types": {
+        "entry": "limit",
+        "exit": "limit",
+        "emergency_exit": "limit",
+        "force_entry": "limit",
+        "force_exit": "limit",
+        "stoploss": "limit",
+        "stoploss_on_exchange": false,
+        "stoploss_on_exchange_interval": 60
+    },
+    "order_time_in_force": {
+        "entry": "GTC",
+        "exit": "GTC"
+    },
+    "entry_pricing": {
+        "price_side": "same",
+        "use_order_book": false,
+        "price_last_balance": 0.0,
+        "check_depth_of_market": {
+            "enabled": false,
+            "bids_to_ask_delta": 1
+        }
+    },
+    "exit_pricing": {
+        "price_side": "same",
+        "use_order_book": false
+    },
+    "exchange": {
+        "name": "coinbase",
+        "key": "__OVERRIDDEN_BY__FREQTRADE__EXCHANGE__KEY__",
+        "secret": "__OVERRIDDEN_BY__FREQTRADE__EXCHANGE__SECRET__",
+        "ccxt_config": {},
+        "ccxt_async_config": {},
+        "pair_whitelist": [
+            "BTC/USD",
+            "ETH/USD",
+            "SOL/USD",
+            "ADA/USD",
+            "XRP/USD",
+            "DOGE/USD",
+            "AVAX/USD",
+            "LINK/USD",
+            "MATIC/USD",
+            "DOT/USD",
+            "LTC/USD",
+            "BCH/USD"
+        ],
+        "pair_blacklist": []
+    },
+    "pairlists": [
+        {
+            "method": "StaticPairList"
+        }
+    ],
+    "telegram": {
+        "enabled": false,
+        "token": "",
+        "chat_id": ""
+    },
+    "api_server": {
+        "enabled": false,
+        "listen_ip_address": "127.0.0.1",
+        "listen_port": 8081,
+        "verbosity": "error",
+        "enable_openapi": false,
+        "CORS_origins": [],
+        "username": "scaffold",
+        "password": "scaffold"
+    },
+    "internals": {
+        "process_throttle_secs": 5
+    },
+    "risk_management": {
+        "_doc": "Mirrors main config so a live-paper-trial would inherit the same governor floors. risk_governor still gates every order.",
+        "max_portfolio_drawdown_pct": 0.08,
+        "daily_loss_limit_pct": 0.03,
+        "max_position_size_pct": 0.1,
+        "max_concurrent_positions": 6,
+        "correlation_threshold": 0.7,
+        "correlation_lookback_days": 30,
+        "correlation_min_overlap": 50,
+        "circuit_breaker_consecutive_losses": 5,
+        "circuit_breaker_cooldown_hours": 4.0,
+        "kelly_enabled": true,
+        "kelly_lookback_trades": 100,
+        "kelly_safety_factor": 0.5,
+        "kelly_max_fraction": 0.25,
+        "kelly_min_trades": 10
+    },
+    "execution": {
+        "slippage_pct": 0.003,
+        "retry_attempts": 3,
+        "retry_backoff_initial_sec": 1.0,
+        "retry_backoff_factor": 2.0,
+        "order_timeout_sec": 60,
+        "poll_interval_sec": 1.0,
+        "log_path": "user_data/logs/execution-nfi-x6.log",
+        "dry_run": true,
+        "api_key_env": "COINBASE_API_KEY",
+        "api_secret_env": "COINBASE_API_SECRET"
+    },
+    "logfile": "user_data/logs/freqtrade-nfi-x6.log",
+    "db_url": "sqlite:///user_data/tradesv3-nfi-x6.sqlite"
+}
