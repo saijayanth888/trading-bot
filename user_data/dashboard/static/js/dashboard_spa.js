@@ -114,8 +114,10 @@
   // only exist as emergency seeds. Operator can't be left with a dropdown
   // that omits tickers they're actively trading — kept in sync with the
   // 8-pair freqtrade whitelist + 10-symbol wheel/dashboard basket.
-  const FALLBACK_CRYPTO_PAIRS = ["BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD", "XRP/USD", "DOGE/USD", "AVAX/USD", "LINK/USD", "DOT/USD", "ATOM/USD", "LTC/USD", "BCH/USD"];
-  const FALLBACK_STOCK_SYMBOLS = ["SOFI", "PLTR", "NVDA", "AMD", "SPY", "TSLA", "AAPL", "GOOGL", "MSTR", "COIN", "MARA", "F", "QQQ", "IWM", "HOOD"];
+  // Minimal emergency seeds — used only if BOTH /api/universe AND /api/pairs
+  // are unreachable on mount. Universe.json is the source of truth.
+  const FALLBACK_CRYPTO_PAIRS = ["BTC/USD"];
+  const FALLBACK_STOCK_SYMBOLS = ["SPY"];
 
   // ─────────────── TopbarLive ───────────────
   // Replaces the prototype's hardcoded Topbar ($119,842.42 + 1.84%). Wires
@@ -243,24 +245,29 @@
     // if the endpoint is unreachable on boot.
     const [stockSymbols, setStockSymbols] = useState(FALLBACK_STOCK_SYMBOLS);
     useEffect(() => {
-      fetch("/api/pairs")
+      // Primary: /api/universe — single source of truth (user_data/universe.json).
+      // Falls back to /api/pairs + /api/ops/stocks_sparklines if universe.json
+      // is unreachable.
+      fetch("/api/universe")
         .then(r => r.json())
-        .then(d => {
-          const arr = Array.isArray(d && d.pairs) ? d.pairs : [];
-          if (arr.length) setCryptoPairs(arr);
+        .then(uni => {
+          const cp = (uni && uni.crypto && uni.crypto.pairs) || [];
+          const sb = (uni && uni.stocks && uni.stocks.dashboard_basket) || [];
+          if (Array.isArray(cp) && cp.length) setCryptoPairs(cp);
+          if (Array.isArray(sb) && sb.length) setStockSymbols(sb);
         })
-        .catch(() => { /* keep fallback */ });
-      // Stocks basket lives at /api/ops/stocks_sparklines.data.basket
-      // (config-driven by DASHBOARD_STOCK_SYMBOLS env). Operator added
-      // TSLA / AAPL / GOOGL / MSTR / COIN to the basket and complained the
-      // dropdown still only listed 5 — the SPA had a hardcoded array.
-      fetch("/api/ops/stocks_sparklines")
-        .then(r => r.json())
-        .then(env => {
-          const basket = (env && env.data && env.data.basket) || [];
-          if (Array.isArray(basket) && basket.length) setStockSymbols(basket);
-        })
-        .catch(() => { /* keep fallback */ });
+        .catch(() => {
+          // Fallback 1: /api/pairs for crypto
+          fetch("/api/pairs").then(r => r.json()).then(d => {
+            const arr = Array.isArray(d && d.pairs) ? d.pairs : [];
+            if (arr.length) setCryptoPairs(arr);
+          }).catch(() => {});
+          // Fallback 2: stocks_sparklines basket
+          fetch("/api/ops/stocks_sparklines").then(r => r.json()).then(env => {
+            const basket = (env && env.data && env.data.basket) || [];
+            if (Array.isArray(basket) && basket.length) setStockSymbols(basket);
+          }).catch(() => {});
+        });
     }, []);
 
     // URL params on mount

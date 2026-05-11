@@ -156,6 +156,10 @@
     regime_config: "/api/ops/regime_config",
     slack_preview: "/api/ops/slack_preview",
     tools: "/api/ops/tools",
+    // Single source of truth for the trading universe — backed by
+    // user_data/universe.json. Frontend reads this so the Hero strip
+    // RegimeCellLive grids reflect whatever's currently configured.
+    universe: "/api/universe",
   };
 
   function useOpsData() {
@@ -372,17 +376,13 @@
               venue: "CRYPTO", sym: "BTC",
               env: data.regime, fetchedAt: data.regime_fetched_at,
               sparksData: envelopeData(data.sparklines),
-              symbols: ["BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD",
-                        "XRP/USD", "DOGE/USD", "AVAX/USD", "LINK/USD",
-                        "DOT/USD", "ATOM/USD", "LTC/USD", "BCH/USD"],
+              symbols: (data.universe && data.universe.crypto && data.universe.crypto.pairs) || [],
             }),
             h(RegimeCellLive, {
               venue: "STOCKS", sym: "SPY",
               env: data.stock_regime, fetchedAt: data.stock_regime_fetched_at,
               sparksData: envelopeData(data.stocks_sparklines),
-              symbols: ["SPY", "SOFI", "NVDA", "AMD", "PLTR",
-                        "TSLA", "AAPL", "GOOGL", "MSTR", "COIN",
-                        "MARA", "F", "QQQ", "IWM", "HOOD"],
+              symbols: (data.universe && data.universe.stocks && data.universe.stocks.dashboard_basket) || [],
             })
           ),
           h("div", { className: "grid g-2", style: { gap: "var(--gap-grid)" } },

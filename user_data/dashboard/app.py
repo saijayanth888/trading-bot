@@ -16,6 +16,7 @@ Run from the repo root:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import os
@@ -113,6 +114,24 @@ async def docs_page(request: Request) -> HTMLResponse:
 @app.get("/api/pairs")
 async def api_pairs() -> dict:
     return {"pairs": DEFAULT_PAIRS, "timeframe": DEFAULT_TIMEFRAME}
+
+
+@app.get("/api/universe")
+async def api_universe() -> dict[str, Any]:
+    """Single source of truth for all symbols the bot tracks.
+
+    Reads user_data/universe.json. Frontend SPAs hit this on mount so
+    the hero strip + dropdowns reflect whatever's currently configured
+    without hardcoded fallback lists drifting out of sync.
+    """
+    try:
+        path = HERE.parent / "universe.json"
+        if not path.exists():
+            return {"error": "universe.json not found", "crypto": {"pairs": []}, "stocks": {"wheel_universe": [], "dashboard_basket": []}}
+        return json.loads(path.read_text())
+    except Exception as exc:
+        logger.warning("api_universe failed: %s", exc)
+        return {"error": str(exc), "crypto": {"pairs": []}, "stocks": {"wheel_universe": [], "dashboard_basket": []}}
 
 
 @app.get("/api/mode")
