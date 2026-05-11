@@ -85,15 +85,17 @@ def _require_auth() -> dict | None:
 
 
 async def _ft_get(path: str) -> Any:
+    """Authenticated freqtrade GET with transparent 401 → re-login retry.
+
+    Wraps ``data_sources.ft_authed_get`` to keep this module's public surface
+    unchanged (callers still receive parsed JSON-or-None).
+    """
+    from .data_sources import ft_authed_get
     async with httpx.AsyncClient(timeout=4.0) as client:
-        token = await _ensure_jwt(client)
-        if token is None:
-            return None
         try:
-            r = await client.get(
-                f"{FREQTRADE_API}{path}",
-                headers={"Authorization": f"Bearer {token}"},
-            )
+            r = await ft_authed_get(client, path, timeout=4.0)
+            if r is None:
+                return None
             return r.json() if r.status_code == 200 else None
         except Exception as exc:
             logger.debug("ft_get %s failed: %s", path, exc)
