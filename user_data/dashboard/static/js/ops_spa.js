@@ -1184,14 +1184,6 @@
         .catch(e => toast("RESUME error · " + e.message, "warn"));
     };
 
-    const doReload = () => postJSON("/api/v1/reload_config", {})
-      .then(r => {
-        if (r.ok) return toast("freqtrade reload_config OK", "ok");
-        if (r.status === 404) return toast("RELOAD CONFIG: backend proxy missing · regime_config POST already reloads on each write", "warn");
-        return toast("reload_config failed · HTTP " + r.status, "warn");
-      })
-      .catch(e => toast("reload_config error · " + e.message, "warn"));
-
     const doEvolve = () => postJSON("/api/ops/mcp/trigger_evolution_cycle", {})
       .then(r => r.ok ? toast("Evolution cycle kicked off · check EPT card", "ok") : toast("evolution trigger failed · HTTP " + r.status, "warn"))
       .catch(e => toast("evolution trigger error · " + e.message, "warn"));
@@ -1220,7 +1212,6 @@
       h("div", { className: "grid g-2", style: { gap: "var(--s-3)" } },
         h("button", { className: "btn", onClick: doPause }, "⏸ PAUSE TRADING"),
         h("button", { className: "btn", onClick: doResume }, "▶ RESUME"),
-        h("button", { className: "btn", onClick: doReload }, "↻ RELOAD CONFIG"),
         h("button", { className: "btn warn", onClick: doEvolve }, "⚡ TRIGGER EVOLUTION"),
         h("button", { className: "btn", onClick: doRebalance }, "⚖ REBALANCE WEIGHTS"),
         h("button", { className: "btn", onClick: doSlackBrief }, "⇣ DAILY SLACK BRIEF")
