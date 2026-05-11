@@ -7,6 +7,11 @@ Each function returns a dict ready for the typed envelope.
 
 All SELECTs are bounded — LIMIT clauses or time windows — so no query can
 fan out unbounded rows.
+
+Convention: every ``_pct`` field returned by functions in this module is a
+**fraction** (e.g. ``-0.0123`` = -1.23%). Callers must multiply by 100 at
+the display boundary — never inside this module. The /api/ops/* envelopes
+and the dashboard JS each do their own × 100 at the render edge.
 """
 
 from __future__ import annotations

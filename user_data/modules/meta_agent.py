@@ -4,7 +4,9 @@ Meta-agent: combines the TFT classifier output with the DRL ensemble vote.
 Inputs:
     - tft_probs: {"down": p, "flat": p, "up": p}     OR  {"down": p, "up": p}
     - tft_confidence: in [0, 1] (from quantile spread)
-    - drl_vote: ensemble_voter.VoteResult
+    - drl_vote: ensemble_voter.VoteResult, or None when DRL weights are
+      absent — in which case the function runs in TFT-only mode (weights
+      1.0/0.0, lower confidence floor TFT_ONLY_MIN_CONFIDENCE).
     - regime: str — one of trending_up, trending_down, mean_reverting,
       high_volatility, unknown
     - regime_confidence: in [0, 1]
@@ -51,6 +53,14 @@ MIN_TRADE_CONFIDENCE: float = 0.4
 # least this fraction of base stake.
 HIGH_VOL_MIN_SIZE: float = 0.25
 
+# TFT-only mode threshold (DRL absent). DRL has never been trained; the
+# strategy falls back to TFT alone. Lower than MIN_TRADE_CONFIDENCE
+# because losing the DRL co-signer cuts the blended confidence by ~40%
+# in trending regimes — without this drop the floor effectively becomes
+# unreachable. 0.40 keeps signal quality close to the original blend's
+# 0.4 × 0.6 = 0.24 minimum tft_conf threshold.
+TFT_ONLY_MIN_CONFIDENCE: float = 0.4
+
 
 @dataclass
 class MetaSignal:
@@ -69,7 +79,7 @@ class MetaSignal:
 def compute_signal(
     tft_probs: Mapping[str, float],
     tft_confidence: float,
-    drl_vote: VoteResult,
+    drl_vote: VoteResult | None,
     regime: str,
     regime_confidence: float = 1.0,
     *,
@@ -77,13 +87,28 @@ def compute_signal(
     min_trade_confidence: float = MIN_TRADE_CONFIDENCE,
     high_vol_size_factor: float = HIGH_VOL_SIZE_FACTOR,
     high_vol_min_size: float = HIGH_VOL_MIN_SIZE,
+    tft_only_min_confidence: float = TFT_ONLY_MIN_CONFIDENCE,
 ) -> MetaSignal:
-    """Combine TFT + DRL into a final trading signal."""
+    """Combine TFT + DRL into a final trading signal.
+
+    If ``drl_vote`` is None, run TFT-only: full TFT weight (1.0/0.0), the
+    lower ``tft_only_min_confidence`` floor, and the high-vol gate
+    degrades to a TFT-only block (no DRL co-signer to agree with).
+    """
     weights = (regime_weights or DEFAULT_REGIME_WEIGHTS).get(
         regime, DEFAULT_REGIME_WEIGHTS["unknown"]
     )
 
     tft_signal, tft_strength = _tft_to_signal(tft_probs)
+
+    # ----- DRL absent → TFT-only path ---------------------------------
+    if drl_vote is None:
+        return _tft_only_signal(
+            tft_signal, tft_strength, tft_confidence,
+            regime, regime_confidence,
+            min_confidence=tft_only_min_confidence,
+        )
+
     drl_signal = drl_vote.direction
     drl_conf = drl_vote.confidence
     drl_mag = drl_vote.magnitude
@@ -217,4 +242,36 @@ def _block(
         regime=regime,
         weights=weights,
         blocked_reason=reason,
+    )
+
+
+def _tft_only_signal(
+    tft_signal: int,
+    tft_strength: float,
+    tft_confidence: float,
+    regime: str,
+    regime_confidence: float,
+    *,
+    min_confidence: float,
+) -> MetaSignal:
+    """TFT-only fallback (DRL absent). Full TFT weight, no DRL blend."""
+    weights = (1.0, 0.0)
+    if tft_signal == 0 or tft_confidence < min_confidence:
+        return _block(
+            tft_signal, tft_confidence, 0, 0.0,
+            regime, weights, "tft_only_low_confidence",
+        )
+    # No DRL magnitude to scale by; fall back to TFT strength (max-prob
+    # margin) so a sharp class peak still sizes larger than a noisy one.
+    size = tft_confidence * (0.5 + 0.5 * tft_strength) * regime_confidence
+    return MetaSignal(
+        final_signal=tft_signal,
+        final_confidence=tft_confidence,
+        position_size_pct=float(_clip01(size)),
+        tft_signal=tft_signal,
+        tft_confidence=tft_confidence,
+        drl_signal=0,
+        drl_confidence=0.0,
+        regime=regime,
+        weights=weights,
     )

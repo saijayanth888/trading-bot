@@ -837,11 +837,14 @@ async def resume(request: Request):
         raise HTTPException(status_code=400, detail="confirm=true required")
 
     # Pre-flight: refuse if drawdown > 6% or circuit breaker active.
+    # ops_db.trades_risk_summary returns drawdown_pct_30d as a fraction
+    # (e.g. -0.012 = -1.2%); convert to percent for the threshold check
+    # and the human-readable error string.
     loop = asyncio.get_running_loop()
     risk = await loop.run_in_executor(None, ops_db.trades_risk_summary)
-    dd = risk.get("drawdown_pct_30d") or 0
-    if dd < -6.0:
-        raise HTTPException(status_code=409, detail=f"resume refused: 30d max drawdown {dd:.1f}% (limit -6%)")
+    dd_pct = (risk.get("drawdown_pct_30d") or 0) * 100
+    if dd_pct < -6.0:
+        raise HTTPException(status_code=409, detail=f"resume refused: 30d max drawdown {dd_pct:.1f}% (limit -6%)")
     if risk.get("circuit_breaker", {}).get("active"):
         raise HTTPException(status_code=409, detail="resume refused: circuit breaker active")
 
@@ -1033,7 +1036,10 @@ def _evaluate_readiness_inline(mode: str = "standard") -> dict:
     wr = len(wins) / n
     pf = (sum(wins) / abs(sum(losses))) if losses else float("inf")
 
-    # Daily P&L pct buckets → annualised Sharpe (× √365)
+    # Daily P&L pct buckets → annualised Sharpe (× √365). pnl_pct is
+    # fractional (-0.0123 = -1.23%); Sharpe = mean/std is scale-invariant
+    # so the result is the same whether we feed fractions or percents.
+    # Thresholds in _READINESS_MODES mirror scripts/validate_readiness.py.
     daily: dict[str, float] = {}
     for r in rows:
         day = r["closed_at"].astimezone(timezone.utc).strftime("%Y-%m-%d")
@@ -1142,6 +1148,10 @@ def _compute_rebalance(
         )
         rows = cur.fetchall()
 
+    # Per-pair daily PnL buckets → annualised rolling Sharpe. pnl_pct is
+    # fractional; Sharpe is scale-invariant in pnl_pct units, so the
+    # config-level threshold (capital_allocation.min_sharpe_for_trading,
+    # currently 0.7) compares apples-to-apples regardless of unit choice.
     daily: dict[str, dict[str, float]] = {}
     for r in rows:
         pair = r["pair"]
