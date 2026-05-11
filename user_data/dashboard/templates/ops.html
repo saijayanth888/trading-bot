@@ -8,7 +8,7 @@
   <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='6' fill='%237c5cff'/></svg>" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="/static/css/app.css?v=20260511-1" />
+  <link rel="stylesheet" href="/static/css/app.css?v=20260511-3" />
   <style>
     /* ── Page grid ────────────────────────────────────────────────── */
     .ops-grid {
@@ -601,18 +601,41 @@
     .mcp-history-row .muted { color: var(--text-muted); margin-left: 6px; }
   </style>
 </head>
-<body>
+<body class="js-on">
+<div class="app">
+  <!-- ═══════════════════════ TOPBAR ═══════════════════════ -->
   <header class="topbar">
     <div class="brand">
-      <span class="brand-mark" aria-hidden="true"></span>
-      <span><em>Quanta</em></span>
-      <span class="brand-sub">Ops</span>
+      <span class="brand-mark" aria-hidden="true">Q</span>
+      <span class="brand-text">QUANTA</span>
+      <span class="brand-version">v2.6</span>
     </div>
-    <div class="controls">
-      <a href="/" class="mode-pill" style="text-decoration:none;">Charts</a>
-      <label class="refresh-control" title="Auto-refresh interval">
-        <span class="refresh-eyebrow">refresh</span>
-        <select id="refresh-interval-select" class="refresh-select">
+    <div class="tb-group">
+      <span id="topbar-mode-pill" class="pill warn" title="Trading mode">PAPER · DRY-RUN</span>
+      <span id="topbar-service-pill" class="pill"><span class="dot up"></span>freqtrade OK</span>
+    </div>
+    <span class="tb-divider"></span>
+    <div class="tb-group">
+      <span class="metric-label" style="letter-spacing:.14em;">UPTIME</span>
+      <span id="topbar-uptime" class="num" style="font-size:var(--t-sm);color:var(--fg-1);">—</span>
+    </div>
+    <span class="tb-divider"></span>
+    <div class="tb-group">
+      <span class="metric-label" style="letter-spacing:.14em;">EQUITY</span>
+      <span id="topbar-equity" class="num" style="font-size:var(--t-md);color:var(--fg-1);font-weight:500;">$—</span>
+      <span id="topbar-equity-delta" class="pill up" style="display:none;">+0.00%</span>
+    </div>
+    <span class="tb-spacer"></span>
+    <div class="tb-group">
+      <span id="topbar-clock" class="num" style="font-size:var(--t-sm);color:var(--fg-2);">— UTC</span>
+    </div>
+    <span class="tb-divider"></span>
+    <div class="tb-group">
+      <label class="refresh-control" title="Auto-refresh interval"
+             style="display:inline-flex;align-items:center;gap:4px;padding:2px 6px;border-radius:var(--r-base);border:1px solid var(--line-2);background:var(--bg-card);height:28px;">
+        <span class="metric-label" style="font-size:9px;letter-spacing:.10em;padding:0 2px;">REFRESH</span>
+        <select id="refresh-interval-select" class="refresh-select"
+                style="background:transparent;border:none;outline:none;font-family:var(--mono);font-size:var(--t-xs);padding:0 2px;cursor:pointer;color:var(--fg-1);height:auto;">
           <option value="5000">5s</option>
           <option value="10000" selected>10s</option>
           <option value="30000">30s</option>
@@ -620,12 +643,46 @@
           <option value="0">Off</option>
         </select>
       </label>
-      <button id="refresh-now-btn" class="mode-pill"
-              style="background:none;cursor:pointer;border:1px solid var(--border-default);"
-              title="Force refresh now">↻</button>
-      <span id="last-refresh" class="mode-pill" title="Last refresh">— —</span>
+      <button id="refresh-now-btn" class="icon-btn" title="Force refresh now">↻</button>
+      <span id="last-refresh" class="pill" title="Last refresh">— —</span>
+    </div>
+    <span class="tb-divider"></span>
+    <!-- Kill switch — hold to confirm -->
+    <div id="kill-wrap" class="kill-wrap">
+      <span class="kill-label"><span class="dot down pulse"></span>KILL</span>
+      <button id="kill-arm-btn" class="kill-btn" title="Arm the kill switch — then hold to confirm">ARM</button>
     </div>
   </header>
+
+  <!-- ═══════════════════════ SIDEBAR ═══════════════════════ -->
+  <aside class="sidebar">
+    <div class="nav-section">Monitor</div>
+    <a href="/ops"  class="nav-item active"><span class="label">Ops console</span><span class="nav-key">1</span></a>
+    <a href="/"     class="nav-item"><span class="label">Pair dashboard</span><span class="nav-key">2</span></a>
+
+    <div class="nav-section">Analysis</div>
+    <a href="#card-trades"   class="nav-item"><span class="label">Trades &amp; risk</span><span class="nav-key">3</span></a>
+    <a href="#card-gates"    class="nav-item"><span class="label">Risk &amp; gates</span><span class="nav-key">4</span></a>
+    <a href="#card-stocks-ml" class="nav-item"><span class="label">Stocks ML</span><span class="nav-key">5</span></a>
+
+    <div class="nav-section">System</div>
+    <a href="#card-cb"     class="nav-item"><span class="label">LLM providers</span><span class="nav-key">6</span></a>
+    <a href="#card-services" class="nav-item"><span class="label">Services</span><span class="nav-key">7</span></a>
+    <a href="#card-regime-params" class="nav-item"><span class="label">Config</span><span class="nav-key">8</span></a>
+
+    <div class="sidebar-foot">
+      <div class="label">Operator</div>
+      <div class="row">quant@quanta · root</div>
+      <div class="row">local · :8081</div>
+    </div>
+  </aside>
+
+  <!-- ═══════════════════════ MAIN ═══════════════════════ -->
+  <main class="main">
+    <div class="page-title">
+      <h1>Operations console</h1>
+      <span class="breadcrumb">/ ops</span>
+    </div>
   <style>
     .refresh-control {
       display: inline-flex; align-items: center; gap: 4px;
@@ -732,7 +789,7 @@
     </div>
   </section>
 
-  <main>
+  <section class="ops-grid-wrap" aria-label="Cards grid">
     <div class="ops-grid">
 
       <!-- ── HERO STRIP — Crypto regime · Stocks regime · Bot · Clock ──── -->
@@ -1149,9 +1206,28 @@
       </section>
 
     </div>
-  </main>
+  </section>
+  </main><!-- /.main -->
+</div><!-- /.app -->
 
-  <footer class="ticker" aria-hidden="true">
+  <!-- ───── Tweaks panel · theme + density ───── -->
+  <button id="tweaks-fab" class="tweaks-fab" title="Theme &amp; density">⌥</button>
+  <div id="tweaks-panel" class="tweaks-panel">
+    <h4>Theme</h4>
+    <div class="tweaks-row" data-tweak="theme">
+      <button class="tweaks-opt active" data-value="control">Control</button>
+      <button class="tweaks-opt"        data-value="geist">Geist</button>
+      <button class="tweaks-opt"        data-value="bloomberg">Bloomberg</button>
+    </div>
+    <h4>Density</h4>
+    <div class="tweaks-row" data-tweak="density">
+      <button class="tweaks-opt"        data-value="compact">Compact</button>
+      <button class="tweaks-opt active" data-value="default">Default</button>
+      <button class="tweaks-opt"        data-value="roomy">Roomy</button>
+    </div>
+  </div>
+
+  <footer class="ticker" aria-hidden="true" style="display:none;">
     <div class="ticker-track"></div>
   </footer>
 
@@ -1177,7 +1253,208 @@
       tick(); setInterval(tick, 1000);
     })();
   </script>
-  {% if effects_enabled %}<script src="/static/js/effects.js?v=20260511-1" defer></script>{% endif %}
-  <script src="/static/js/ops.js?v=20260511-1" defer></script>
+
+  <!-- Tweaks panel — theme & density, persisted in localStorage -->
+  <script>
+    (function () {
+      const root = document.documentElement;
+      const THEME_KEY = "quanta.theme";
+      const DENSITY_KEY = "quanta.density";
+      const savedTheme = localStorage.getItem(THEME_KEY) || "control";
+      const savedDensity = localStorage.getItem(DENSITY_KEY) || "default";
+      root.dataset.theme = savedTheme;
+      root.dataset.density = savedDensity;
+      function syncActive(tweak, value) {
+        document.querySelectorAll(`.tweaks-row[data-tweak="${tweak}"] .tweaks-opt`).forEach(b => {
+          b.classList.toggle("active", b.dataset.value === value);
+        });
+      }
+      syncActive("theme", savedTheme);
+      syncActive("density", savedDensity);
+      document.querySelectorAll(".tweaks-row").forEach(row => {
+        const tweak = row.dataset.tweak;
+        const key = tweak === "theme" ? THEME_KEY : DENSITY_KEY;
+        row.addEventListener("click", e => {
+          const btn = e.target.closest(".tweaks-opt");
+          if (!btn) return;
+          const v = btn.dataset.value;
+          root.dataset[tweak] = v;
+          localStorage.setItem(key, v);
+          syncActive(tweak, v);
+        });
+      });
+      const fab = document.getElementById("tweaks-fab");
+      const panel = document.getElementById("tweaks-panel");
+      if (fab && panel) {
+        fab.addEventListener("click", () => panel.classList.toggle("open"));
+        document.addEventListener("click", e => {
+          if (!panel.contains(e.target) && e.target !== fab) panel.classList.remove("open");
+        });
+      }
+    })();
+  </script>
+
+  <!-- Topbar metrics — equity, clock, uptime, service health -->
+  <script>
+    (function () {
+      const fmtUsdPrec = n => "$" + Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      const eqEl = document.getElementById("topbar-equity");
+      const eqDelta = document.getElementById("topbar-equity-delta");
+      const clockEl = document.getElementById("topbar-clock");
+      const uptimeEl = document.getElementById("topbar-uptime");
+      const modePill = document.getElementById("topbar-mode-pill");
+      const svcPill = document.getElementById("topbar-service-pill");
+      function tickClock() {
+        const now = new Date();
+        const hh = String(now.getUTCHours()).padStart(2, "0");
+        const mm = String(now.getUTCMinutes()).padStart(2, "0");
+        const ss = String(now.getUTCSeconds()).padStart(2, "0");
+        if (clockEl) clockEl.textContent = `${hh}:${mm}:${ss} UTC`;
+      }
+      tickClock(); setInterval(tickClock, 1000);
+      function setSvcPill(ok) {
+        if (!svcPill) return;
+        while (svcPill.firstChild) svcPill.removeChild(svcPill.firstChild);
+        const dot = document.createElement("span");
+        dot.className = "dot " + (ok ? "up" : "down");
+        svcPill.appendChild(dot);
+        svcPill.appendChild(document.createTextNode(" freqtrade " + (ok ? "OK" : "DOWN")));
+        svcPill.className = "pill " + (ok ? "up" : "down");
+      }
+      async function refreshTopbar() {
+        try {
+          const [modeR, portR, svcR] = await Promise.all([
+            fetch("/api/mode").then(r => r.json()).catch(() => null),
+            fetch("/api/ops/combined_portfolio").then(r => r.json()).catch(() => null),
+            fetch("/api/ops/services").then(r => r.json()).catch(() => null),
+          ]);
+          if (modeR && modePill) {
+            const m = (modeR.mode || "?").toLowerCase();
+            const dry = modeR.dry_run;
+            modePill.textContent = (m === "paper" || dry) ? "PAPER · DRY-RUN" : "LIVE";
+            modePill.className = "pill " + ((m === "paper" || dry) ? "warn" : "down");
+          }
+          if (portR && portR.data && eqEl) {
+            const te = portR.data.total_equity || 0;
+            eqEl.textContent = fmtUsdPrec(te);
+            const dd = portR.data.combined_drawdown_pct;
+            if (eqDelta && dd != null) {
+              eqDelta.style.display = "inline-flex";
+              eqDelta.textContent = (dd >= 0 ? "+" : "") + dd.toFixed(2) + "%";
+              eqDelta.className = "pill " + (dd >= 0 ? "up" : "down");
+            }
+          }
+          if (svcR && svcR.data) {
+            const ft = svcR.data.freqtrade;
+            setSvcPill(!!(ft && ft.up));
+          }
+        } catch (_) {}
+      }
+      refreshTopbar();
+      setInterval(refreshTopbar, 10000);
+      const t0 = Date.now();
+      function tickUptime() {
+        if (!uptimeEl) return;
+        const s = Math.floor((Date.now() - t0) / 1000);
+        const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+        uptimeEl.textContent = `${h}h ${String(m).padStart(2,"0")}m`;
+      }
+      tickUptime(); setInterval(tickUptime, 5000);
+    })();
+  </script>
+
+  <!-- Kill switch — hold-to-confirm (1500ms) -->
+  <script>
+    (function () {
+      const wrap = document.getElementById("kill-wrap");
+      const btn = document.getElementById("kill-arm-btn");
+      if (!wrap || !btn) return;
+      let armed = false, holding = false, holdT0 = 0, raf = null;
+      let fillEl = null;
+      const HOLD_MS = 1500;
+
+      function setArmed(v) {
+        armed = v;
+        wrap.classList.toggle("armed", v);
+        btn.textContent = v ? "HOLD" : "ARM";
+        btn.classList.toggle("confirm", v);
+        if (!v && fillEl) { fillEl.style.width = "0%"; }
+      }
+      function startHold(e) {
+        if (!armed) return;
+        e.preventDefault();
+        holding = true; holdT0 = performance.now();
+        if (!fillEl) {
+          fillEl = document.createElement("span");
+          fillEl.className = "kill-hold-fill";
+          btn.classList.add("kill-hold");
+          btn.insertBefore(fillEl, btn.firstChild);
+        }
+        function step() {
+          if (!holding) return;
+          const t = performance.now() - holdT0;
+          const pct = Math.min(100, (t / HOLD_MS) * 100);
+          fillEl.style.width = pct + "%";
+          if (pct >= 100) { confirmKill(); }
+          else raf = requestAnimationFrame(step);
+        }
+        raf = requestAnimationFrame(step);
+      }
+      function endHold() {
+        holding = false; cancelAnimationFrame(raf);
+        if (fillEl) fillEl.style.width = "0%";
+      }
+      async function confirmKill() {
+        holding = false; cancelAnimationFrame(raf);
+        try {
+          const r = await fetch("/api/ops/pause", { method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reason: "operator killswitch via topbar" }) });
+          if (r.ok) {
+            btn.textContent = "KILLED";
+            btn.style.background = "var(--down)";
+            btn.style.color = "#000";
+            setTimeout(() => { setArmed(false); btn.style.background = ""; btn.style.color = ""; }, 2400);
+          }
+        } catch (e) { console.error("kill:", e); }
+      }
+      btn.addEventListener("click", () => { if (!armed) setArmed(true); });
+      btn.addEventListener("mousedown", startHold);
+      btn.addEventListener("touchstart", startHold);
+      ["mouseup", "mouseleave", "touchend", "touchcancel"].forEach(ev =>
+        btn.addEventListener(ev, endHold)
+      );
+      document.addEventListener("click", e => {
+        if (armed && !wrap.contains(e.target)) setArmed(false);
+      });
+    })();
+  </script>
+
+  <!-- Sidebar keyboard nav — 1-8 jumps to sections -->
+  <script>
+    (function () {
+      document.addEventListener("keydown", e => {
+        const tag = (e.target.tagName || "").toUpperCase();
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+        const n = parseInt(e.key, 10);
+        if (n >= 1 && n <= 8) {
+          const items = document.querySelectorAll(".sidebar .nav-item");
+          const target = items[n - 1];
+          if (target) {
+            const href = target.getAttribute("href");
+            if (href && href.startsWith("#")) {
+              const el = document.querySelector(href);
+              if (el) { el.scrollIntoView({ behavior: "smooth", block: "start" }); e.preventDefault(); }
+            } else if (href) {
+              window.location.href = href;
+            }
+          }
+        }
+      });
+    })();
+  </script>
+
+  {% if effects_enabled %}<script src="/static/js/effects.js?v=20260511-3" defer></script>{% endif %}
+  <script src="/static/js/ops.js?v=20260511-3" defer></script>
 </body>
 </html>
