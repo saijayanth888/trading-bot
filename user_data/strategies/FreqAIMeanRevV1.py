@@ -979,6 +979,17 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         # Belt-and-braces: ensure gating columns survive the FreqAI pipeline
         if "regime_label" not in dataframe.columns:
             dataframe = _attach_regime(dataframe, metadata.get("pair", ""))
+        # Raw indicator columns (no `%-` prefix → excluded from FreqAI training)
+        # used by the BB-oversold mean-reversion entry path and its BB-bounce
+        # exit branch. Computed on the 5m close so the strategy can reference
+        # them in populate_entry_trend / custom_exit without re-deriving.
+        bb_raw = qtpylib.bollinger_bands(
+            qtpylib.typical_price(dataframe), window=20, stds=2.0,
+        )
+        dataframe["bb_lower"] = bb_raw["lower"]
+        dataframe["bb_middle"] = bb_raw["mid"]
+        dataframe["bb_upper"] = bb_raw["upper"]
+        dataframe["rsi_14"] = ta.RSI(dataframe, timeperiod=14)
         # Compute meta-agent (TFT + DRL ensemble) signal columns. No-op
         # when the DRL weights aren't loadable yet (cold start).
         dataframe = self._compute_meta_signals(dataframe)
@@ -1344,6 +1355,30 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
             reduce(lambda a, b: a & b, long_conditions),
             ["enter_long", "enter_tag"],
         ] = (1, tag)
+
+        # Second entry path: BB-oversold mean-reversion for bear/chop regimes.
+        # The TFT path above requires `up >= threshold + regime_delta`, which
+        # in trending_down resolves to ~0.77 — unreachable on most candles —
+        # leaving the bot idle for multi-hour bearish stretches. This path
+        # buys statistical dips (close ≤ BB_lower AND RSI ≤ 30) when on-chain
+        # flow is not panicking, targeting a revert to BB_middle (see
+        # custom_exit). Degrades to no-op if any required column is missing.
+        required = ("bb_lower", "rsi_14", "do_predict", "regime_label", "volume")
+        if all(c in dataframe.columns for c in required):
+            mr_regimes = {"trending_down", "mean_reverting", "high_volatility"}
+            mr_conditions = [
+                dataframe["do_predict"] == 1,
+                dataframe["close"] <= dataframe["bb_lower"],
+                dataframe["rsi_14"] <= 30.0,
+                dataframe["regime_label"].isin(mr_regimes),
+                dataframe["volume"] > 0,
+            ]
+            if "regime_confidence" in dataframe.columns:
+                mr_conditions.append(dataframe["regime_confidence"] >= 0)
+            if "%-onchain_netflow_z" in dataframe.columns:
+                mr_conditions.append(dataframe["%-onchain_netflow_z"] > -1.0)
+            mr_mask = reduce(lambda a, b: a & b, mr_conditions)
+            dataframe.loc[mr_mask, ["enter_long", "enter_tag"]] = (1, "bb_oversold_revert")
         return dataframe
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
@@ -1487,6 +1522,18 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         current_profit: float, **kwargs,
     ) -> str | None:
         regime, _ = self._current_regime(pair)
+        # BB-bounce target for the mean-reversion entry path: once price
+        # reverts to the 20-period BB middle, cash out — that's the stated
+        # thesis and holding past it gives up the edge to vanilla noise.
+        if getattr(trade, "enter_tag", None) == "bb_oversold_revert":
+            try:
+                df, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+                if df is not None and not df.empty and "bb_middle" in df.columns:
+                    bb_mid = float(df.iloc[-1].get("bb_middle", float("nan")))
+                    if np.isfinite(bb_mid) and current_rate >= bb_mid:
+                        return "bb_bounce_target"
+            except Exception:
+                pass
         # In mean_reverting: take quick profits at +1.5%.
         if regime == "mean_reverting" and current_profit >= self.MEAN_REV_TAKE_PROFIT:
             return "regime_mean_rev_tp"
