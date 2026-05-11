@@ -11,17 +11,47 @@ bind-mounted at runtime).
 
 ## PROMPT BEGINS
 
-You are redesigning the frontend of a self-hosted algorithmic trading
-dashboard. Single-operator console; the operator monitors a bot that
-paper-trades crypto on Coinbase ($19 k) and options on Alpaca (SOFI
-wheel, $100 k). Tone: **institutional, monospaced, dense, fast** — closer
-to Bloomberg/dYdX than a consumer SaaS. Reference aesthetic: dYdX trading
-interface × Geist design language. Avoid: gradients, drop-shadows,
-glass-morphism, serif italics, pill-rounded chrome, light themes.
+You are leading a **production-grade redesign** of a self-hosted
+algorithmic trading dashboard. The codebase below is a **working
+prototype** — every data path is wired and the bot is paper-trading
+live, but the UI was built feature-by-feature without a unifying design
+strategy. Your job is to propose and implement a **radical,
+opinionated, production-ready redesign**: information architecture,
+component library, interaction patterns, and visuals. This is **not**
+a paint-job. You may rework layout, restructure cards, introduce new
+component primitives, change groupings, kill duplicate functionality,
+and propose new UX flows. Behavior changes are welcome when they make
+the operator faster.
+
+**The operator** is a single technical user monitoring a bot that
+paper-trades crypto on Coinbase ($19 k starting equity) and options on
+Alpaca (SOFI wheel, $100 k). The console is the **only** view into a
+live trading system; clarity, speed, and trustworthiness beat novelty.
+
+**Reference tone**: institutional, monospaced, dense, fast — closer to
+Bloomberg / dYdX / Linear / Vercel-internal-tools than a consumer SaaS.
+Reference aesthetic: dYdX trading interface × Geist design language.
+
+**What you should deliver, conceptually**:
+1. A short **design strategy** — what you're solving for, what you're
+   killing, what you're keeping, the one mental model the operator will
+   carry away from the redesigned console.
+2. A new **component primitive set** (cards, metric tiles, status
+   rows, action buttons, gate matrices, etc.) — define them once, apply
+   everywhere.
+3. A new **information architecture** for `/ops` — what belongs
+   above-the-fold, what becomes secondary, what gets absorbed into other
+   cards or removed.
+4. **The actual code** — patches to CSS / templates / JS that ship the
+   redesign, not mockups. Treat the listed file paths as the work surface.
 
 ## 0 · Where everything lives — exact paths
 
-Repo root: **`/home/saijayanthai/Documents/trading-bot/`**
+**All paths in this prompt are relative to the repository root** (the
+directory containing this `docs/` folder, `user_data/`, `stocks/`,
+`docker-compose.yml`, etc.). Claude Code's working directory should
+already be the repo root; just `Read user_data/dashboard/app.py`
+directly. No need for absolute paths.
 
 ### Dashboard source (all under `user_data/dashboard/`)
 
@@ -67,9 +97,9 @@ under `/app/dashboard/`**, not the host files.
 To ship CSS / JS / template changes:
 
 ```bash
-cd /home/saijayanthai/Documents/trading-bot
+# Run from the repo root (your current working dir).
 docker compose up -d --build dashboard      # rebuild + recreate
-# OR for css/js only, the same command — there is no incremental hot reload
+# CSS / JS / template changes all use the same command — no hot reload.
 ```
 
 **Cache-busting**: the templates include `?v=<timestamp>` on static asset
@@ -325,39 +355,92 @@ Right sidebar cards (`templates/index.html:186-264`):
 - The venue-tab segmented control replacing the old optgroup dropdown
 - Live-trades horizontal strip at the top of /ops
 
-## 11 · Deliverables — what I want from you
+## 11 · Deliverables — production-grade, in this order
 
-1. **Refactored CSS palette** in `static/css/app.css` — keep the `--up`
-   `--down` `--warning` `--accent` semantic anchors, but propose 1–2
-   alternative bg/surface palettes (e.g. "control room" darker, "trading
-   floor" warmer). Show diffs.
-2. **Redesigned /ops grid** — edit `templates/ops.html` so the most-
-   critical 8 cards fit above-fold on 1440×900: hero strip, live-trades
-   strip, **#12 Combined portfolio**, **#06 Entry gates**, **#14 LLM
-   health**, **#01 Services**, **#15 Stocks ML**, **#07 Quick actions**.
-   The rest go below the fold.
-3. **Explicit typography scale**: introduce `--text-xs / sm / base / lg
-   / xl / 2xl` tokens and apply them so we stop hand-picking sizes.
-4. **Polished Quick Actions card (#07)** — `templates/ops.html` near
-   line 888. Currently a row of plain buttons; redesign as a "control
-   panel" with the kill switch visually separated and confirmation
-   dialogs for destructive actions (Pause, Kill switch, Trigger evo).
-5. **Better Entry Gates card (#06)** — currently a dense table at
-   `templates/ops.html` near line 819 fed by `refreshGates`
-   (`ops.js:774`). Sketch a version that surfaces the **single most-
-   blocking gate per pair** at-a-glance, with drill-down for the full
-   10-gate detail.
-6. **Mockup of refreshed top-bar** — both pages. Cover venue tabs,
-   refresh dropdown, mode pill, OPS↗ link. Match between pages so the
-   operator's eye doesn't have to relocate controls.
-7. **Cache-bust the version stamps**: search `?v=` in both templates
-   and bump (e.g. `v=20260512-01`) so the operator's browser refetches
-   after deploy.
+### A · Strategy doc (write this first, before any code)
+
+Create `docs/DASHBOARD_REDESIGN.md` answering, in <= 600 words:
+
+1. **What is the operator's mental model after the redesign?** One
+   sentence. (e.g. *"At a glance: is the bot trading, is it safe, what
+   changed since I last looked?"*).
+2. **Above-the-fold hierarchy** — what the operator sees in the first
+   second on 1440×900. Pick at most 5 things. Justify each.
+3. **What gets killed / merged.** Today there are 15 cards + a hero
+   strip + a live-trades strip. Several overlap (e.g. #14 LLM health
+   and #13 LLM cost saved; #12 Combined portfolio and #05 Trades & risk).
+   Propose merges. Be opinionated — if a card serves no critical use,
+   say "delete" and we'll delete.
+4. **Component primitives** — name them, define them, show one example
+   each. Suggestions: `MetricTile` (single big number + Δ + sparkline),
+   `StatusRow` (status-before-label pattern), `GateBadge` (PASS / BLOCK
+   / N/A pill), `ActionButton` (with severity variants), `DataTable`
+   (the gate matrix's eventual home), `Toast` (top-right, dismissable).
+5. **Interaction patterns** — destructive-action confirmation flow,
+   in-place edit pattern (regime config), drill-down pattern (entry
+   gates summary → full matrix), refresh state indication.
+
+### B · Design system — the new `static/css/app.css`
+
+A rewritten stylesheet, not a patch:
+
+- Explicit typography scale: `--text-2xs / xs / sm / base / lg / xl / 2xl / 3xl`
+- Explicit spacing scale: `--space-1 ... --space-12` (4 px grid)
+- Explicit radius scale: `--radius-sm / base / lg`, max 6 px
+- Refined surface palette — propose **two** options:
+  - **"Control room"** — even darker, more contrast (for the operator's
+    primary monitor)
+  - **"Trading floor"** — slightly warmer, easier on eyes for long sessions
+  Default to control-room; trading-floor selectable via a data-attribute.
+- A **state token layer** above the raw colors — `--state-success`,
+  `--state-danger`, `--state-warning`, `--state-info`, `--state-neutral`
+  — so cards don't reference raw `--up` / `--down` directly.
+- Component classes for every primitive in (A.4). One source of truth.
+
+### C · Redesigned `/ops` — `templates/ops.html` + `static/js/ops.js`
+
+- New information architecture matching the strategy doc.
+- Hero strip + a chosen above-the-fold set; everything else below or
+  collapsed into expandable sections.
+- Renumber cards so every `data-num` is unique (currently `06` is
+  duplicated — Entry gates AND Regime parameters share it).
+- The Quick Actions card becomes a real **control panel**: pause /
+  resume / reload / kill switch / trigger evolution, with the kill
+  switch visually severed from the rest and **two-step confirmation**
+  on every destructive verb.
+- Entry Gates card surfaces the **single most-blocking gate per pair**
+  at glance + click-to-expand for the full 10-gate matrix.
+- Live-trades strip becomes the operator's primary scan line — make it
+  feel inevitable, like the top of a Bloomberg.
+
+### D · Redesigned `/charts` — `templates/index.html` + `static/js/app.js`
+
+- The sidebar today is 8 stacked cards. Consolidate into 3-4 modules
+  with clearer purpose (e.g. *"Model view"*, *"Market context"*,
+  *"Trade lineage"*).
+- The TradingView chart must remain the dominant element — do not
+  let the sidebar grow.
+- Add entry/exit markers prominence — the operator should see at a
+  glance "I bought here, exited here, why".
+- Topbar matches `/ops` exactly — venue tabs, refresh dropdown, mode
+  pill, OPS↗ — same positions, same hotkeys (if any).
+
+### E · Cache-bust + ship
+
+- Bump every `?v=…` static-asset version stamp in both templates.
+- Ship via the §12 build command. Verify in-container before reporting
+  done (the §12 grep step is mandatory — host edits don't auto-deploy).
+
+### F · A short "what I didn't do" section in `DASHBOARD_REDESIGN.md`
+
+Out-of-scope items you considered and explicitly punted (e.g. a real
+component library extraction, light-theme support, mobile breakpoints).
+Lets the operator decide whether to chase them next.
 
 ## 12 · How to ship
 
 ```bash
-# from /home/saijayanthai/Documents/trading-bot/
+# All commands run from the repo root (Claude Code's CWD).
 
 # 1) make your edits to user_data/dashboard/static/css/app.css and templates
 # 2) rebuild + recreate
