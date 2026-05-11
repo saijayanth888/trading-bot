@@ -588,28 +588,27 @@
   // (killState, setKillState, active, density) used by the prototype itself.
   function Topbar({ killState, setKillState, active, density }) {
     const [clock, setClock] = useState(fmtClock());
-    // Real uptime — poll /api/ops/services every 30s and read the
-    // hermes-gateway heartbeat age as a uptime proxy (freqtrade's start time
-    // isn't exposed via the public API). Format as "Nh Mm" / "Nd Hh".
+    // Real uptime — poll /api/ops/uptime every 30s for freqtrade's actual
+    // start time. Earlier this was page-load time, which made the pill
+    // read "0h 0m" every refresh — not useful.
     const [uptime, setUptime] = useState("—");
     const [equity, setEquity] = useState({ value: null, deltaPct: null });
     useEffect(() => {
       const t = setInterval(() => setClock(fmtClock()), 1000);
-      // First load + 30s refresh for the topbar metrics
-      const loadStart = Date.now();
       const refresh = async () => {
         try {
-          const r = await fetch("/api/ops/services", { cache: "no-store" });
+          const r = await fetch("/api/ops/uptime", { cache: "no-store" });
           const j = await r.json().catch(() => ({}));
-          // freqtrade `up` since the page loaded — that's good enough.
-          // For a better number we'd need a /uptime endpoint; this is
-          // a placeholder that's at least non-fake.
-          const elapsedMs = Date.now() - loadStart;
-          const totalSec = Math.floor(elapsedMs / 1000);
-          const d = Math.floor(totalSec / 86400);
-          const h = Math.floor((totalSec % 86400) / 3600);
-          const m = Math.floor((totalSec % 3600) / 60);
-          setUptime(d > 0 ? `${d}d ${h}h ${m}m` : `${h}h ${m}m`);
+          const ft = (j && j.data && j.data.freqtrade) || {};
+          if (typeof ft.uptime_s === "number") {
+            const s = ft.uptime_s;
+            const d = Math.floor(s / 86400);
+            const h = Math.floor((s % 86400) / 3600);
+            const m = Math.floor((s % 3600) / 60);
+            setUptime(d > 0 ? `${d}d ${h}h ${m}m` : (h > 0 ? `${h}h ${m}m` : `${m}m`));
+          } else {
+            setUptime("—");
+          }
         } catch (_) { /* ignore */ }
         try {
           const r = await fetch("/api/ops/combined_portfolio", { cache: "no-store" });
@@ -663,7 +662,7 @@
         h(
           "span",
           { className: "dim2 mono", style: { fontSize: "var(--t-xs)", letterSpacing: ".08em" } },
-          "SESSION"
+          "BOT UP"
         ),
         h("span", { className: "num" }, uptime)
       ),

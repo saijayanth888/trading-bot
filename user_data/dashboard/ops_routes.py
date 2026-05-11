@@ -106,6 +106,89 @@ async def services():
 
 
 # --------------------------------------------------------------------------
+# /api/ops/uptime — real freqtrade + dashboard uptime for the SPA topbar
+# --------------------------------------------------------------------------
+# Replaces the hardcoded "14d 06:42:18" mock that previously sat in the
+# topbar. Reads freqtrade's first "Bot heartbeat" log line for its actual
+# start time; dashboard tracks its own start via _DASHBOARD_START_TS at
+# module import. Both values are seconds since UTC epoch.
+
+import time as _uptime_time
+_DASHBOARD_START_TS = _uptime_time.time()
+
+
+def _freqtrade_started_at() -> int | None:
+    """Approximate freqtrade's startup time as the earliest heartbeat across
+    rotated logs.
+
+    The traceback flood (numpy.int64 serialization errors) pushes the real
+    startup messages out of even the oldest rotated log. Using the EARLIEST
+    "Bot heartbeat" line across freqtrade.log + freqtrade.log.1..N gives us
+    a tight lower bound on actual startup (heartbeats fire every 60s after
+    boot, so we under-report by at most ~60s — acceptable for a topbar pill).
+
+    Returns Unix timestamp (seconds, UTC) or None if unreadable.
+    """
+    from datetime import datetime, timezone
+    log_dir = Path("/freqtrade/user_data/logs")
+    if not log_dir.exists():
+        return None
+    # Sort by numeric suffix DESC so oldest rotation is first (the .10 file
+    # is older than .1; .log is newest).
+    def _sort_key(name: str) -> int:
+        suffix = name.split(".")[-1]
+        return -int(suffix) if suffix.isdigit() else 0
+    files = sorted(
+        [f for f in os.listdir(log_dir) if f.startswith("freqtrade.log")],
+        key=_sort_key,
+    )
+    for name in files:
+        log = log_dir / name
+        try:
+            with log.open("r", errors="replace") as f:
+                for _ in range(50000):
+                    line = f.readline()
+                    if not line:
+                        break
+                    if "Bot heartbeat" in line:
+                        try:
+                            ts_part = line.split(" - ")[0]
+                            dt = datetime.strptime(ts_part, "%Y-%m-%d %H:%M:%S,%f")
+                            return int(dt.replace(tzinfo=timezone.utc).timestamp())
+                        except Exception:
+                            continue
+        except Exception as exc:
+            logger.debug("uptime: log %s parse failed: %s", log, exc)
+    return None
+
+
+@router.get("/uptime")
+async def uptime():
+    """Per-service start timestamps + computed uptime seconds.
+
+    Used by the SPA topbar's "BOT UP" / "DASH UP" pills so we stop showing
+    page-load time (which restarts every refresh) and instead show real
+    freqtrade process age.
+    """
+    now = int(_uptime_time.time())
+    out: dict[str, Any] = {
+        "now": now,
+        "dashboard": {
+            "started_at": int(_DASHBOARD_START_TS),
+            "uptime_s": now - int(_DASHBOARD_START_TS),
+        },
+        "freqtrade": {"started_at": None, "uptime_s": None},
+    }
+    ft_started = _freqtrade_started_at()
+    if ft_started:
+        out["freqtrade"] = {
+            "started_at": ft_started,
+            "uptime_s": now - ft_started,
+        }
+    return _envelope("ok", data=out)
+
+
+# --------------------------------------------------------------------------
 # /api/ops/training
 # --------------------------------------------------------------------------
 

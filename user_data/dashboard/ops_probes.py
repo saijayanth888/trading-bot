@@ -76,14 +76,27 @@ async def http_probe(url: str, expect_codes: tuple[int, ...] = (200, 204, 401, 4
 
 
 def heartbeat_probe(path: Path = HEARTBEAT_FILE, max_age_s: float = HEARTBEAT_MAX_AGE_S) -> dict[str, Any]:
-    """Up if file exists, mtime within max_age_s, content == 'active'."""
+    """Up if file exists, mtime within max_age_s, content is a healthy systemd state.
+
+    The heartbeat writer pipes `systemctl is-active <svc>` output into these
+    .alive files. systemd's state vocabulary includes:
+      * `active`     — running
+      * `activating` — starting (transitional, can last ~5s during restarts)
+      * `reloading`  — handling SIGHUP (transitional)
+      * `deactivating`/`inactive`/`failed`/`unknown` — not up
+
+    Originally this probe only accepted `active`, which flagged a healthy
+    gateway as DOWN during every restart window. Accept the transitional
+    states too — they're not failures.
+    """
+    HEALTHY_STATES = {"active", "activating", "reloading"}
     try:
         if not path.exists():
             return {"up": False, "via": "heartbeat", "endpoint": str(path), "error": "missing"}
         mtime = path.stat().st_mtime
         age_s = time.time() - mtime
         content = path.read_text(errors="replace").strip()
-        ok = age_s <= max_age_s and content == "active"
+        ok = age_s <= max_age_s and content in HEALTHY_STATES
         return {
             "up": ok,
             "via": "heartbeat",
