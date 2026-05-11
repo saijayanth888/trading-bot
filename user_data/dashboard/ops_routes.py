@@ -95,17 +95,19 @@ _DASHBOARD_MCP_KEY = os.environ.get("HERMES_MCP_KEY", "").strip()
 def _client_host_is_trusted(client_host: str) -> bool:
     """Trusted peer for the same-origin exemption.
 
-    Loopback is the obvious case (process bound to 127.0.0.1, peer is 127.0.0.1).
-    Docker port-forwarding is the non-obvious case: the host binds the
-    dashboard to 127.0.0.1:8081 (P0-V), but inside the container the
-    connection's peer is the docker bridge gateway — e.g. 172.19.0.1. The
-    container only sees that traffic because P0-V's host-side bind already
-    refused anything that wasn't 127.0.0.1 on the host. So in practice,
-    "loopback OR private RFC1918" is the right trust boundary.
+    Three trust tiers, all on private/non-routable address space:
+      1. Loopback (127.0.0.1, ::1) — same machine
+      2. RFC1918 private (10/8, 172.16/12, 192.168/16) — operator's LAN
+         + docker bridge gateways. Operator binds 0.0.0.0:8081 so the
+         home LAN can reach the dashboard; the LAN router is the auth
+         perimeter here.
+      3. Tailscale CGNAT (100.64.0.0/10, RFC6598) — operator's tailnet.
+         Tailscale's WireGuard control plane is the auth perimeter; only
+         devices the operator added to their tailnet can present these
+         addresses to us.
 
-    NOT trusted: public addresses. If the dashboard ever sits behind a
-    reverse proxy on a public interface, the proxy's connection-source
-    won't match RFC1918 and we'll correctly require the Bearer token.
+    NOT trusted: public addresses. A reverse proxy on a public interface
+    would NOT match any of the three ranges → bearer required, correctly.
     """
     if not client_host:
         return False
@@ -115,6 +117,10 @@ def _client_host_is_trusted(client_host: str) -> bool:
         import ipaddress
         addr_str = client_host[7:] if client_host.startswith("::ffff:") else client_host
         addr = ipaddress.ip_address(addr_str)
+        # Tailscale CGNAT range — not RFC1918 so ipaddress.is_private returns
+        # False, but trust-equivalent to RFC1918 for a private mesh network.
+        if addr in ipaddress.ip_network("100.64.0.0/10"):
+            return True
         return addr.is_private and not addr.is_link_local
     except (ValueError, ImportError):
         return False

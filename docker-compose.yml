@@ -240,10 +240,14 @@ services:
         condition: service_healthy
       freqtrade:
         condition: service_started
-    # P0-V: dashboard reachable only on the operator host. Use an SSH tunnel
-    # or reverse proxy with auth if you need remote access.
+    # Bind all interfaces — operator wants LAN (192.168.x) and Tailscale
+    # (100.x CGNAT) access from other devices on their tailnet. The
+    # require_mcp_key auth dependency still gates mutating endpoints
+    # against non-trusted peers (defense-in-depth trusts loopback +
+    # RFC1918 + Tailscale CGNAT). Previously P0-V loopback-only; operator
+    # acknowledged the broader binding on 2026-05-11.
     ports:
-      - "127.0.0.1:8081:8081"
+      - "0.0.0.0:8081:8081"
     extra_hosts:
       # Lets the Ops tab probe host services (ollama 11434, hermes-mcp 8089,
       # hermes-dashboard 9119) from inside the container.
