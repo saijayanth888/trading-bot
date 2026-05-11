@@ -103,19 +103,32 @@ def _crypto_starting_equity() -> float:
 
 
 def _crypto_realised_pnl_usd() -> float:
-    """Sum of closed-trade pnl in USD from trade_journal."""
-    if ops_db is None or not getattr(ops_db, "_HAVE_PG", False):
-        return 0.0
+    """Sum of closed-trade PnL in USD.
+
+    Source of truth: freqtrade's own `/api/v1/profit` endpoint — the same
+    endpoint the freqtrade UI uses. We previously read from our local
+    `trade_journal` Postgres table, but the strategy's close-side hook
+    that's supposed to write `closed_at`+`pnl` to that row isn't firing
+    (open rows accumulate, close updates never happen). Until that hook
+    is fixed (see README §14 — tomorrow's bug list), the freqtrade API
+    is the only correct source. This is symmetric with how
+    `_crypto_unrealised_pnl_usd()` already reads from `/api/v1/status`.
+    """
     try:
-        with ops_db._connect() as conn, conn.cursor() as cur:  # noqa: SLF001
-            cur.execute(
-                "SELECT COALESCE(SUM(pnl), 0) AS pnl "
-                "FROM trade_journal WHERE closed_at IS NOT NULL"
-            )
-            row = cur.fetchone() or {}
-            return float(row.get("pnl") or 0.0)
-    except Exception as exc:  # pragma: no cover — DB connectivity
-        logger.warning("unified_risk: realised pnl query failed: %s", exc)
+        import httpx
+    except ImportError:
+        return 0.0
+    base = os.environ.get("FREQTRADE_API_URL", "http://freqtrade:8080")
+    user = os.environ.get("FREQTRADE_API_USER")
+    pw = os.environ.get("FREQTRADE_API_PASS")
+    try:
+        with httpx.Client(timeout=3.0, auth=(user, pw) if user and pw else None) as c:
+            r = c.get(f"{base}/api/v1/profit")
+        if r.status_code != 200:
+            return 0.0
+        return float((r.json() or {}).get("profit_closed_coin") or 0.0)
+    except Exception as exc:
+        logger.debug("unified_risk: realised pnl probe failed: %s", exc)
         return 0.0
 
 

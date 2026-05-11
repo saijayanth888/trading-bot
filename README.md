@@ -978,7 +978,29 @@ selected pair, render `Marker` objects on the candle series with
 shape=entry-arrow-up / exit-arrow-down. Small JS change in
 `static/js/app.js`; trade-journal query already exists.
 
-### 14.5 EPT cron: drop the LLM wrapper
+### 14.5 trade_journal — close-side hook never fires
+
+**Current state.** The strategy writes a row to `trade_journal`
+(TimescaleDB) when a position **opens** but never updates `closed_at`
+or `pnl` when it **closes**. Closed rows pile up with `closed_at=NULL`,
+which made `_crypto_realised_pnl_usd()` always return 0 — the
+dashboard's combined-portfolio card showed starting equity even after
+realised losses.
+
+**Tonight's interim fix.** `_crypto_realised_pnl_usd()` now reads
+freqtrade's own `/api/v1/profit` endpoint (symmetric with how
+unrealised PnL reads `/api/v1/status`). Dashboard is now correct.
+
+**What's still broken.** `trade_journal` is also consumed by the
+weekly post-mortem cron, the EPT live-mode scorer, and the
+explainability replay view. All three currently see "no closed
+trades" and degrade gracefully (post-mortem skips, EPT falls back
+to mock surrogate, replay shows open-only). Real fix:
+locate the strategy's `custom_exit` / `confirm_trade_exit` /
+`order_filled` hook and add the close-side `UPDATE trade_journal
+SET closed_at=…, pnl=…, exit_reason=… WHERE id=…`.
+
+### 14.6 EPT cron: drop the LLM wrapper
 
 **Current state.** The `ept_training_daily` Hermes cron prompts the
 Hermes-3 70B agent to "call `trigger_evolution_cycle` MCP tool and

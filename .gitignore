@@ -101,6 +101,22 @@ user_data/config-private.json
 user_data/config.json.bak-*
 user_data/config.json.tmp
 
+# Private config backups contain LIVE credentials (Telegram tokens, Slack
+# webhooks, exchange API keys). NEVER commit. Rotate immediately if leaked.
+user_data/config-private.json.bak*
+user_data/config-private.json.tmp
+*.credentials.bak
+# Belt-and-suspenders against any *.bak file ending in a numeric suffix
+*.bak-[0-9]*
+
+# Debug screenshots from Playwright sessions — large binaries, not source.
+.tmp_screens/
+*.screenshot.png
+
+# Hermes-generated cron scripts — regenerated from cron registry and
+# contain absolute paths specific to one machine.
+.hermes/scripts/
+
 # Unified risk peak — runtime state, regenerates on first call
 user_data/data/unified_risk_peak.json
 user_data/data/unified_risk_peak.json.tmp
