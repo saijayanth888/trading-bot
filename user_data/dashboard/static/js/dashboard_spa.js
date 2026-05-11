@@ -213,8 +213,8 @@
     }, []);
 
     useEffect(() => {
-      document.documentElement.setAttribute("data-theme", "control");
-      document.documentElement.setAttribute("data-density", "default");
+      // Theme + density are now seeded from localStorage by an inline boot
+      // script in templates/dashboard_spa.html before React mounts (B-5).
       document.documentElement.style.setProperty("--accent", "#7c5cff");
     }, []);
 
