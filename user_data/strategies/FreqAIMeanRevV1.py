@@ -899,6 +899,26 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
                 index=dataframe.index,
                 dtype=object,
             )
+        # Belt-and-braces: object-dtype columns can ALSO contain numpy.int64
+        # cells (e.g. enter_long/exit_long get mixed None+1 which lands as
+        # object dtype, but the 1 stays a numpy.int64 scalar). The first pass
+        # above misses them because select_dtypes filters on the COLUMN's
+        # declared dtype, not per-cell types. Catch the stragglers by
+        # walking every object-dtype column and unwrapping any np.integer
+        # cells to Python int.
+        for col in dataframe.select_dtypes(include=["object"]).columns:
+            col_vals = dataframe[col].to_numpy()
+            needs_fix = False
+            for v in col_vals:
+                if isinstance(v, np.integer):
+                    needs_fix = True
+                    break
+            if needs_fix:
+                dataframe[col] = pd.Series(
+                    [int(v) if isinstance(v, np.integer) else v for v in col_vals],
+                    index=dataframe.index,
+                    dtype=object,
+                )
         return dataframe
 
     # ------------------------------------------------------------------
