@@ -3796,32 +3796,37 @@ def _first_existing(paths: list[Path]) -> Path | None:
     return None
 
 
-def _next_sunday_0200_et_iso() -> str:
-    """Return ISO-8601 UTC timestamp of the next Sunday 02:00 America/New_York.
+def _next_sunday_training_iso() -> str:
+    """Return ISO-8601 UTC timestamp of the next Sunday 14:00 America/New_York
+    (2 PM ET = the operator's chosen weekly LoRA training window).
 
-    ET = UTC-5 (EST) or UTC-4 (EDT). We approximate via the standard offset
-    of UTC-4 in summer / UTC-5 in winter using a naive month-band switch —
-    the card is only consuming this as a countdown target, so a 1-hour
-    DST-transition wobble twice a year is acceptable.
+    Source of truth: ``~/.hermes/config/gpu_reservation.yaml`` line
+    ``schedule_cron: "0 14 * * 0"``. The dashboard container does NOT
+    mount that file, so we hardcode 14:00 ET here and rely on the
+    operator keeping the two in sync (verified by §D acceptance check).
 
-    Operator-visible only as a countdown; we do not use this to schedule
-    anything (the real Sunday 02:00 ET schedule lives in model-forge's
-    cron).
+    ET = UTC-5 (EST) or UTC-4 (EDT). We approximate via month-band
+    (DST is Mar-Nov in the US); a 1-hour DST-transition wobble twice a
+    year is acceptable for a countdown display.
     """
     now = datetime.now(timezone.utc)
-    # weekday(): Mon=0 … Sun=6
     days_until_sun = (6 - now.weekday()) % 7
-    # If today is Sunday and it's already past 02:00 ET (~07:00 UTC EDT /
-    # 07:00 UTC EST), roll to next Sunday.
     sunday = now + timedelta(days=days_until_sun)
-    # ET 02:00 → 06:00 UTC (EDT) or 07:00 UTC (EST). Use 06:00 UTC for
-    # daylight-savings months (Mar-Nov), 07:00 UTC otherwise.
+    # ET 14:00 → 18:00 UTC (EDT) or 19:00 UTC (EST).
     is_edt = 3 <= sunday.month <= 11
-    target_utc_hour = 6 if is_edt else 7
+    target_utc_hour = 18 if is_edt else 19
     target = sunday.replace(hour=target_utc_hour, minute=0, second=0, microsecond=0)
     if target <= now:
         target = target + timedelta(days=7)
     return target.isoformat()
+
+
+# Backwards-compat alias — the function used to be named
+# `_next_sunday_0200_et_iso` (operator originally said 02:00 ET, then
+# revised to 14:00 ET on 2026-05-12 once the Sunday 2 PM ET GPU reservation
+# went in). Keep the old name pointing at the new function so any in-flight
+# callers don't break.
+_next_sunday_0200_et_iso = _next_sunday_training_iso
 
 
 def _empty_track_row(track_id: str, role: str, headline_metric: str) -> dict[str, Any]:
@@ -4068,8 +4073,11 @@ async def weekly_training() -> dict[str, Any]:
         env_status = "degraded"
         env_error = mf_err
     elif n_trained == 0:
-        env_status = "degraded"
-        env_error = "training pipeline starting up — 0 of 6 tracks trained yet"
+        # mf-api is reachable, 6 tracks registered, just no LoRA adapter
+        # has been trained yet. NOT a failure state — the operator's
+        # weekly Sunday 14:00 ET window is when training kicks off.
+        env_status = "ready"
+        env_error = f"ready · {len(rows)} tracks registered · awaiting first training cycle"
     else:
         env_status = "ok"
         env_error = None

@@ -500,13 +500,16 @@
     }
 
     // Connectivity pip — green when model-forge is reachable AND at least
-    // one track has a champion; orange when MF is offline; gray when MF
-    // is reachable but pipeline is still starting up.
+    // one track has a champion; orange when MF is offline; soft info when
+    // MF is reachable but no adapters have been trained yet (expected
+    // new-system state, NOT a failure — see ops_routes.py:_envelope at
+    // weekly_training endpoint).
     let pillCls, pillText;
     if (!mfReachable) {
       pillCls = "warn"; pillText = "MODEL-FORGE OFFLINE";
     } else if ((summary.n_tracks_trained || 0) === 0) {
-      pillCls = "info"; pillText = "STARTING UP";
+      pillCls = "info";
+      pillText = (summary.n_tracks_registered || 6) + " TRACKS READY";
     } else if ((summary.n_promoted_this_week || 0) > 0) {
       pillCls = "up"; pillText = (summary.n_promoted_this_week) + " PROMOTED THIS WEEK";
     } else {
@@ -517,7 +520,7 @@
       num: "00c", title: "Weekly training · LoRA adapters",
       sub: mfReachable
         ? ("model-forge @ " + (env.model_forge_url || "—")
-           + " · Sun 02:00 ET refresh")
+           + " · Sun 14:00 ET refresh")
         : "model-forge offline — local-only metrics shown",
       right: cardRight(slot.fetchedAt,
         h("span", { className: "pill " + pillCls, style: { height: 18 } },
@@ -581,7 +584,7 @@
   }
 
   function WeeklyTrainingSummary({ reflections, lessons, nextTrainingTs, nTrained, nRegistered, mfReachable, mfError }) {
-    // Countdown to next Sunday 02:00 ET (recomputed on each render via the
+    // Countdown to next Sunday 14:00 ET (recomputed on each render via the
     // 1s-tick from RetryCountdown sibling — we use a similar interval here
     // so the "Next training" cell stays live).
     const [, force] = useState(0);
@@ -643,7 +646,7 @@
       stat("Next training",
            countdown,
            "info",
-           "Sunday 02:00 ET")
+           "Sunday 14:00 ET")
     );
   }
 
