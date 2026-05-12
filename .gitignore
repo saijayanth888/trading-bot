@@ -127,6 +127,9 @@ user_data/config-private.json.tmp
 # Operator-local screenshots (typo-spelled folder kept for compat; both forms ignored).
 Screenshots/
 Schreenshots/
+# V3 redesign audit evidence is intentionally committed — exception below.
+!docs/V3_AUDIT_EVIDENCE/screenshots/
+!docs/V3_AUDIT_EVIDENCE/screenshots/**
 
 # Operator's private review notes — kept out-of-tree by intent. Anything
 # you want preserved across machines goes in docs/ instead.

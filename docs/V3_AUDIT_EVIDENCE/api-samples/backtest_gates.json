@@ -1,0 +1,1 @@
+{"status":"degraded","data":{"strategies":[],"summary":{"n_strategies":0,"n_eligible":0,"n_stale":0},"any_eligible":false,"any_stale":false,"results_dir":"/freqtrade/user_data/backtest_results"},"error":"no gates_report_*_latest.json files yet — cron has not run, or wrong results dir","checked_at":"2026-05-12T18:59:53.774946+00:00"}
