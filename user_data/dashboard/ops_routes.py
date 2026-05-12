@@ -835,6 +835,167 @@ async def regime_config_post(request: Request):
 
 
 # --------------------------------------------------------------------------
+# Risk gates editor: GET / POST /api/ops/risk_gates
+# --------------------------------------------------------------------------
+#
+# Mirrors the regime_config pattern above. Defaults live in
+# ``user_data/modules/unified_risk.py:_RISK_GATE_DEFAULTS`` and are also the
+# baked-in fallback when the block is absent from config.json.
+#
+# The allowlist below is the operator-approved set (2026-05-11). The ranges
+# bracket each key's defensible bounds — pick a tight band, the operator can
+# loosen it later with a code change if a real use case appears.
+
+_RISK_GATE_RANGES = {
+    "daily_loss_halt_pct":      (0.0, 0.20),   # 0% – 20% daily DD halt
+    "weekly_loss_size_cut_pct": (0.0, 0.30),   # 0% – 30% weekly DD trigger
+    "weekly_loss_size_factor":  (0.0, 1.0),    # 0× (halt) – 1× (no cut)
+    "single_name_cap_pct":      (0.0, 0.50),   # 0% – 50% of equity
+    "correlation_cap":          (0.0, 1.0),    # corr is bounded [-1,1]; we
+                                               # only block when too-similar
+    "vix_high_multiplier":      (1.0, 5.0),    # 1× – 5× historical VIX
+    "vix_high_min_size_factor": (0.0, 1.0),    # min size when VIX is hot
+}
+
+
+@router.get("/risk_gates")
+def risk_gates_get():
+    """Return the current risk_gates block + the schema (ranges) for the UI."""
+    try:
+        cfg = json.loads(CONFIG_PATH.read_text())
+        rg = cfg.get("risk_gates") or {}
+    except Exception as exc:
+        return _envelope("down", error=str(exc))
+
+    # Live-resolved values (defaults overlaid with whatever's in config.json).
+    # Lets the UI distinguish between "operator set this" and "fallback default".
+    try:
+        from user_data.modules.unified_risk import _load_risk_gates, _RISK_GATE_DEFAULTS
+        resolved = _load_risk_gates()
+        defaults = dict(_RISK_GATE_DEFAULTS)
+    except Exception as exc:
+        logger.warning("risk_gates_get: unified_risk import failed: %s", exc)
+        resolved = {k: v for k, v in rg.items() if not k.startswith("_")}
+        defaults = {}
+
+    return _envelope("ok", data={
+        "risk_gates": {k: v for k, v in rg.items() if not k.startswith("_")},
+        "resolved": resolved,
+        "defaults": defaults,
+        "schema": {
+            "ranges": {k: list(v) for k, v in _RISK_GATE_RANGES.items()},
+        },
+        "config_path": str(CONFIG_PATH),
+    })
+
+
+@router.post("/risk_gates", dependencies=[Depends(require_mcp_key)])
+async def risk_gates_post(request: Request):
+    """Validate + atomically write the new risk_gates block.
+
+    Body must be ``{"risk_gates": {...}}`` matching the existing shape.
+    We:
+      1. Accept only known keys; reject extras.
+      2. Validate each value against its sanity range.
+      3. Snapshot the old config to ``user_data/data/config-backup-<ts>.json``.
+      4. Atomic-write the new config (tmp + rename) — rolls back to the
+         snapshot if validation throws after the snapshot is taken.
+      5. Best-effort POST freqtrade ``/api/v1/reload_config`` so it picks up.
+
+    Returns the diff in the envelope so the frontend can confirm.
+    """
+    body = await request.json() if request.headers.get("content-length") else {}
+    new_rg = body.get("risk_gates")
+    if not isinstance(new_rg, dict):
+        raise HTTPException(status_code=400, detail="body.risk_gates must be a dict")
+
+    # Load current config + the existing risk_gates
+    try:
+        cfg_text = CONFIG_PATH.read_text()
+        cfg = json.loads(cfg_text)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"could not read {CONFIG_PATH}: {exc}")
+    current = cfg.get("risk_gates") or {}
+
+    # Validate every submitted key/value against the allowlist.
+    diffs: list[str] = []
+    for key, value in new_rg.items():
+        if key.startswith("_"):
+            continue  # never overwrite documentation keys
+        if key not in _RISK_GATE_RANGES:
+            raise HTTPException(status_code=400, detail=f"unknown risk_gate: {key}")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise HTTPException(status_code=400, detail=f"{key} must be a number")
+        lo, hi = _RISK_GATE_RANGES[key]
+        if not (lo <= value <= hi):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{key}={value} outside allowed range [{lo}, {hi}]",
+            )
+        old = current.get(key)
+        if old != value:
+            diffs.append(f"{key}: {old} → {value}")
+
+    if not diffs:
+        return _envelope("ok", data={"changes": [], "note": "no-op (values unchanged)"})
+
+    # Build the new config (preserve "_doc" and any extras we didn't touch)
+    merged = dict(current)
+    for k, v in new_rg.items():
+        if k.startswith("_"):
+            continue
+        merged[k] = v
+    cfg["risk_gates"] = merged
+
+    # Snapshot the previous config so the operator can roll back.
+    try:
+        from datetime import datetime as _dt
+        backup_dir = USER_DATA_ROOT_FOR_BACKUPS / "data"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = _dt.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+        backup_path = backup_dir / f"config-backup-{stamp}.json"
+        backup_path.write_text(cfg_text)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"could not snapshot existing config: {exc}")
+
+    # Atomic write: tmp file + rename. If anything between snapshot and
+    # final rename throws, restore the original cfg_text from memory so
+    # config.json never ends up in a half-written state on disk.
+    try:
+        tmp = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".tmp")
+        tmp.write_text(json.dumps(cfg, indent=4))
+        tmp.replace(CONFIG_PATH)
+    except Exception as exc:
+        # Defensive rollback: re-write the pre-edit text we already had in memory.
+        try:
+            CONFIG_PATH.write_text(cfg_text)
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=f"atomic write failed: {exc}")
+
+    # Best-effort freqtrade reload.
+    reload_status = None
+    try:
+        async with httpx.AsyncClient(timeout=ENDPOINT_TIMEOUT_S) as client:
+            token = await _ensure_jwt(client)
+            if token:
+                r = await client.post(f"{FREQTRADE_API_URL}/api/v1/reload_config",
+                                      headers={"Authorization": f"Bearer {token}"})
+                reload_status = r.status_code
+    except Exception as exc:
+        reload_status = f"error: {exc}"
+
+    return _envelope("ok", data={
+        "changes": diffs,
+        "backup": str(backup_path),
+        "freqtrade_reload": reload_status,
+        "note": "Risk gates take effect on the next trading-loop tick — "
+                "unified_risk.py reads config.json on each evaluation, "
+                "no process restart required.",
+    })
+
+
+# --------------------------------------------------------------------------
 # Pause / Resume (continued)
 # --------------------------------------------------------------------------
 
