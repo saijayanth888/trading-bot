@@ -1,20 +1,30 @@
+# Quanta Core V4 — root pyproject.
+#
+# Canonical config for the new ``src/quanta_core/`` tree. The legacy stack
+# (``user_data/``, ``stocks/``) is not affected: ruff and mypy are scoped to
+# ``src/`` + ``tests/`` (the new V4 test tree only — legacy tests live in
+# ``tests/test_*.py`` at root and predate ruff-strict / pytest-config).
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
 name = "quanta-core"
-version = "0.1.0"
-description = "Quanta Core v4 — execution + risk + research stack"
+version = "0.4.0.dev0"
+description = "Quanta Core V4 — direct-to-broker trading + research stack"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Quanta Core" }]
 dependencies = [
+    "anyio>=4.0",
     "pydantic>=2.6,<3",
+    "pydantic-settings>=2.2,<3",
     "sqlalchemy>=2.0,<3",
     "psycopg[binary]>=3.1,<4",
     "structlog>=24.1",
+    "httpx>=0.27",
+    "safetensors>=0.4",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +36,7 @@ dev = [
     "freezegun>=1.5",
     "ruff>=0.5",
     "mypy>=1.10",
+    "vcrpy>=6.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -38,6 +49,14 @@ packages = ["src/quanta_core"]
 line-length = 100
 target-version = "py312"
 src = ["src", "tests"]
+extend-exclude = [
+    "user_data",
+    "stocks",
+    "scripts",
+    "hermes-mcp",
+    "private",
+    "docs",
+]
 
 [tool.ruff.lint]
 select = [
@@ -45,16 +64,22 @@ select = [
     "I",            # isort
     "B",            # bugbear
     "UP",           # pyupgrade
-    "T201",         # print
+    "T20",          # no print
+    "ASYNC",        # async lints
     "RET",          # return
     "SIM",          # simplify
     "PIE",          # pie
     "PERF",         # perflint
+    "C4",           # comprehensions
+    "PT",           # pytest
 ]
-ignore = ["E501"]  # line length handled by formatter
+ignore = [
+    "E501",  # line length handled by formatter
+    "B008",  # function call as default arg — Path.home() etc
+]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]  # assert allowed in tests
+"tests/**" = ["S101", "T20", "PT011", "B"]  # asserts + print + broad raises + bugbear quirks ok in tests
 
 # ---------------------------------------------------------------------------
 # Mypy
@@ -69,16 +94,24 @@ disallow_any_generics = true
 no_implicit_reexport = true
 show_error_codes = true
 files = ["src/quanta_core"]
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = "src"
+# legacy code lives outside src/ — never type-checked from here.
 
 [[tool.mypy.overrides]]
-module = ["sqlalchemy.*", "psycopg.*", "structlog.*"]
+module = ["sqlalchemy.*", "psycopg.*", "structlog.*", "vcr.*", "safetensors.*", "torch.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
 
 # ---------------------------------------------------------------------------
 # Pytest
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["src/quanta_core", "tests"]
 asyncio_mode = "auto"
 addopts = [
     "-ra",
@@ -88,6 +121,7 @@ addopts = [
 markers = [
     "slow: long-running tests (vcr replays, e2e)",
     "integration: tests that require a real Postgres",
+    "anyio: anyio-driven async test (used by live/)",
 ]
 
 # ---------------------------------------------------------------------------

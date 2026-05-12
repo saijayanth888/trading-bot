@@ -1,10 +1,12 @@
-"""Quanta Core — quantitative trading stack.
+"""Quanta Core — V4 quantitative trading stack.
 
-Public package. Only the version string is exported here; sub-packages
-publish their own public surface via per-package ``__all__``.
+Public API is exposed by sub-packages (``live``, ``backtest``, ``strategy``,
+``exchanges``, ``execution``, ``risk``, ``models``). This top-level module
+publishes only the package version; sub-packages declare their own public
+surface via per-package ``__all__``.
 """
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__: str = "0.4.0.dev0"
 __all__ = ["__version__"]
