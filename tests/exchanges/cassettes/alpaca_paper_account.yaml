@@ -1,0 +1,62 @@
+interactions:
+- request:
+    body: null
+    headers:
+      Accept:
+      - '*/*'
+      APCA-API-KEY-ID:
+      - test-key
+      APCA-API-SECRET-KEY:
+      - test-secret
+    method: GET
+    uri: https://paper-api.alpaca.markets/v2/clock
+  response:
+    body:
+      string: '{"timestamp":"2026-05-12T20:00:00.000000-04:00","is_open":true,"next_open":"2026-05-13T09:30:00-04:00","next_close":"2026-05-12T16:00:00-04:00"}'
+    headers:
+      Content-Type:
+      - application/json
+    status:
+      code: 200
+      message: OK
+- request:
+    body: null
+    headers:
+      Accept:
+      - '*/*'
+      APCA-API-KEY-ID:
+      - test-key
+      APCA-API-SECRET-KEY:
+      - test-secret
+    method: GET
+    uri: https://paper-api.alpaca.markets/v2/account
+  response:
+    body:
+      string: '{"id":"904837e3-3b76-47ec-b432-046db621571b","account_number":"PA1234","status":"ACTIVE","currency":"USD","cash":"4000.32","portfolio_value":"4000.32","pattern_day_trader":false,"trading_blocked":false,"transfers_blocked":false,"account_blocked":false,"created_at":"2019-06-12T22:47:07.99564Z","shorting_enabled":true,"long_market_value":"0","short_market_value":"0","equity":"4000.32","last_equity":"4000.32","multiplier":"4","buying_power":"16001.28","initial_margin":"0","maintenance_margin":"0","sma":"0","daytrade_count":0,"last_maintenance_margin":"0","daytrading_buying_power":"0","regt_buying_power":"8000.64"}'
+    headers:
+      Content-Type:
+      - application/json
+    status:
+      code: 200
+      message: OK
+- request:
+    body: null
+    headers:
+      Accept:
+      - '*/*'
+      APCA-API-KEY-ID:
+      - test-key
+      APCA-API-SECRET-KEY:
+      - test-secret
+    method: GET
+    uri: https://paper-api.alpaca.markets/v2/positions
+  response:
+    body:
+      string: '[{"asset_id":"b0b04bdb-d6e6-46d2-9b09-7ab4a4f31aa1","symbol":"AAPL","exchange":"NASDAQ","asset_class":"us_equity","avg_entry_price":"180.50","qty":"10","side":"long","market_value":"1850.00","cost_basis":"1805.00","unrealized_pl":"45.00","unrealized_plpc":"0.0249","unrealized_intraday_pl":"45.00","unrealized_intraday_plpc":"0.0249","current_price":"185.00","lastday_price":"183.00","change_today":"0.0109","qty_available":"10"},{"asset_id":"a2c9a3e1-9f6e-4d2d-8e2d-3a3a3a3a3a3a","symbol":"AAPL250620C00150000","exchange":"","asset_class":"us_option","avg_entry_price":"3.50","qty":"-1","side":"short","market_value":"-275.00","cost_basis":"-350.00","unrealized_pl":"75.00","unrealized_plpc":"0.2143","unrealized_intraday_pl":"75.00","unrealized_intraday_plpc":"0.2143","current_price":"2.75","lastday_price":"3.00","change_today":"-0.0833","qty_available":"-1"}]'
+    headers:
+      Content-Type:
+      - application/json
+    status:
+      code: 200
+      message: OK
+version: 1

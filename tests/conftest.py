@@ -21,12 +21,19 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 USER_DATA_SRC = REPO_ROOT / "user_data"
+
+# Ensure the v4 ``src/`` layout is on the import path so
+# ``from quanta_core.exchanges import ...`` resolves without an editable install.
+_SRC = REPO_ROOT / "src"
+if _SRC.is_dir() and str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 
 @pytest.fixture
