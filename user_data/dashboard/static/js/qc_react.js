@@ -184,14 +184,34 @@
       const px = (i) => (i / (data.length - 1)) * (w - 2) + 1;
       const py = (v) => hH - 2 - ((v - mn) / rng) * (hH - 4);
       let progress = animate ? 0 : 1;
-      const cssVar = color.replace("var(", "").replace(")", "").trim();
-      const _color = getComputedStyle(document.documentElement).getPropertyValue(cssVar) || color;
+      // Resolve color into a value canvas APIs can consume. Accepts
+      //   "#hex" | "rgb(...)" | "hsl(...)" | "var(--name)" | bare "--name"
+      // Falls back to a hard-coded design-token default if the CSS variable
+      // resolves to empty (which happens for --fg-* / --line-* because of
+      // the circular self-reference at quanta.css lines 134-142). Without
+      // this fallback, canvas.addColorStop() throws SyntaxError.
+      const _resolveColor = (c) => {
+        if (!c) return "#888";
+        const first = c.charAt(0);
+        if (first === "#" || c.indexOf("rgb") === 0 || c.indexOf("hsl") === 0) return c;
+        const name = c.replace("var(", "").replace(")", "").trim();
+        if (name.indexOf("--") !== 0) return c;
+        const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+        if (v) return v;
+        const fb = {
+          "--up": "#2ec27e", "--down": "#f04437", "--warn": "#f5a623",
+          "--accent": "#7c5cff", "--info": "#4fbeff",
+          "--fg-1": "#f4f4f6", "--fg-2": "#a1a1a9", "--fg-3": "#6b6b75", "--fg-4": "#3a3a42",
+        };
+        return fb[name] || "#888";
+      };
+      const _color = _resolveColor(color);
 
       const draw = () => {
         ctx.clearRect(0, 0, w, hH);
         const end = Math.max(1, Math.floor((data.length - 1) * progress));
         ctx.lineWidth = 1.4;
-        ctx.strokeStyle = _color.trim() || color;
+        ctx.strokeStyle = _color;
         ctx.beginPath();
         for (let i = 0; i <= end; i++) {
           const x = px(i), y = py(data[i]);
@@ -201,12 +221,12 @@
         if (fill) {
           ctx.lineTo(px(end), hH); ctx.lineTo(px(0), hH); ctx.closePath();
           const g = ctx.createLinearGradient(0, 0, 0, hH);
-          g.addColorStop(0, (_color.trim() || color) + "44");
-          g.addColorStop(1, (_color.trim() || color) + "00");
+          g.addColorStop(0, _color + "44");
+          g.addColorStop(1, _color + "00");
           ctx.fillStyle = g;
           ctx.fill();
         }
-        ctx.fillStyle = _color.trim() || color;
+        ctx.fillStyle = _color;
         const lx = px(end), ly = py(data[end]);
         ctx.beginPath(); ctx.arc(lx, ly, 1.6, 0, Math.PI * 2); ctx.fill();
       };
