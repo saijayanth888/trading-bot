@@ -41,9 +41,15 @@ from dashboard import ops_routes  # noqa: E402
 
 
 def _assert_envelope(env: dict):
-    """Every /api/ops/* endpoint must return this 4-key envelope shape."""
+    """Every /api/ops/* endpoint must return this 4-key envelope shape.
+
+    weekly_training emits a 4th status value ``ready`` for the "registered
+    but no adapter trained yet" case (build-up week before the first Sunday
+    training cycle). It's distinct from ``degraded`` so the card can render
+    a "training pipeline starting up" badge instead of an error chip.
+    """
     assert isinstance(env, dict), f"envelope not a dict: {type(env)}"
-    assert env.get("status") in ("ok", "degraded", "down"), \
+    assert env.get("status") in ("ok", "ready", "degraded", "down"), \
         f"unexpected status: {env.get('status')!r}"
     assert "data" in env
     assert "error" in env
@@ -142,15 +148,18 @@ async def test_envelope_shape_when_modelforge_returns_empty(monkeypatch, tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_status_degraded_when_no_tracks_trained(monkeypatch):
-    """Model-forge reachable but no champions yet → status='degraded' with
-    a descriptive error. The card uses this to show 'starting up'."""
+async def test_status_ready_when_no_tracks_trained(monkeypatch):
+    """Model-forge reachable but no champions yet → status='ready' with a
+    descriptive error noting tracks are registered + awaiting first cycle.
+    'ready' is distinct from 'degraded' so the card can render a build-up
+    badge instead of an error chip during the pre-first-Sunday window."""
     _stub_modelforge_response(monkeypatch, body={"tracks": []})
     _point_paths_at(monkeypatch, decisions=None, llm_calls=None)
 
     env = await ops_routes.weekly_training()
-    assert env["status"] == "degraded"
-    assert "starting up" in (env["error"] or "")
+    assert env["status"] == "ready"
+    assert "tracks registered" in (env["error"] or "")
+    assert "awaiting first training cycle" in (env["error"] or "")
     assert env["data"]["model_forge_reachable"] is True
 
 
