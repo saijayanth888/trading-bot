@@ -21,8 +21,13 @@
 
 set -euo pipefail
 
-HERMES_SCRIPTS=/home/saijayanthai/.hermes/scripts
-LOG=/home/saijayanthai/Documents/trading-bot/stocks/memory/stocks_day_runner.log
+# Hermes installs its scripts under $HOME/.hermes/scripts by default.
+# REPO defaults to one level up from this script; override TRADING_BOT_REPO
+# in cron env if you keep the checkout somewhere else.
+HERMES_SCRIPTS="${HERMES_SCRIPTS:-$HOME/.hermes/scripts}"
+REPO="${TRADING_BOT_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)}"
+[[ -d "$REPO/user_data" ]] || REPO="$HOME/Documents/trading-bot"
+LOG="$REPO/stocks/memory/stocks_day_runner.log"
 
 mkdir -p "$(dirname "$LOG")"
 

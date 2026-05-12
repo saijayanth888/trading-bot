@@ -40,7 +40,9 @@ else
 fi
 
 # 3. Heartbeat file (what dashboard reads)
-HB=/home/saijayanthai/Documents/trading-bot/user_data/state/hermes-gateway.alive
+REPO="${TRADING_BOT_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)}"
+[[ -d "$REPO/user_data" ]] || REPO="$HOME/Documents/trading-bot"
+HB="$REPO/user_data/state/hermes-gateway.alive"
 bold "Heartbeat file"
 if [[ -f "$HB" ]]; then
     age=$(( $(date +%s) - $(stat -c %Y "$HB") ))
@@ -68,7 +70,7 @@ done
 
 # 5. Hermes patches present
 bold "Local patches (lost on \`hermes update\` if not reapplied)"
-HERMES_REPO=/home/saijayanthai/.hermes/hermes-agent
+HERMES_REPO="${HERMES_REPO:-$HOME/.hermes/hermes-agent}"
 SCHED="$HERMES_REPO/cron/scheduler.py"
 GW="$HERMES_REPO/gateway/run.py"
 if grep -q "_workdir_exec_lock" "$SCHED" 2>/dev/null; then
@@ -89,7 +91,7 @@ fi
 
 # 6. Recent Telegram noise
 bold "Telegram shutdown noise (last hour)"
-log=/home/saijayanthai/.hermes/logs/agent.log
+log="${HERMES_AGENT_LOG:-$HOME/.hermes/logs/agent.log}"
 if [[ -f "$log" ]]; then
     since=$(date -d '1 hour ago' '+%Y-%m-%d %H:%M')
     count=$(awk -v cut="$since" '$0 >= cut && /Sent shutdown notification/' "$log" | wc -l)

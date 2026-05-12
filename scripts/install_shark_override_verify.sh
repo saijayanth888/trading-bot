@@ -89,7 +89,10 @@ new_job = {
     "deliver": "local",
     "origin": None,
     "enabled_toolsets": None,
-    "workdir": "/home/saijayanthai/Documents/trading-bot",
+    # Workdir derived at install-time from REPO_ROOT below, so the
+    # installed cron picks up whichever checkout location the operator
+    # uses (replaces the previous hardcoded operator path).
+    "workdir": str(Path("$REPO_ROOT").resolve()),
 }
 data["jobs"].append(new_job)
 data["updated_at"] = datetime.now(timezone.utc).astimezone().isoformat()

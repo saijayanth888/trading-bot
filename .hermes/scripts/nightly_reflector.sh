@@ -23,7 +23,11 @@
 
 set -uo pipefail
 
-REPO=/home/saijayanthai/Documents/trading-bot
+# REPO defaults to two levels up from this script (so installed copies under
+# $HOME/.hermes/scripts/ keep working when REPO is set in cron env). Override
+# with TRADING_BOT_REPO=/abs/path if your checkout isn't at $HOME/.../trading-bot.
+REPO="${TRADING_BOT_REPO:-${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)}}"
+[[ -d "$REPO/user_data" ]] || REPO="$HOME/Documents/trading-bot"
 LOG=$REPO/stocks/memory/cron-reflector.log
 mkdir -p "$(dirname "$LOG")"
 
@@ -41,8 +45,12 @@ cd "$REPO"
 ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 {
     echo "── nightly_reflector $ts ──"
-    /home/saijayanthai/Documents/spark/envs/ml-env/bin/python3 \
-        scripts/nightly_reflector.py "$@"
+    # ML-env python path is operator-specific. Override with
+    # ML_ENV_PYTHON=/abs/path/to/python3 to use a custom interpreter;
+    # default is the operator's "spark/envs/ml-env" tree, fallback python3.
+    "${ML_ENV_PYTHON:-$HOME/Documents/spark/envs/ml-env/bin/python3}" \
+        scripts/nightly_reflector.py "$@" \
+        || python3 scripts/nightly_reflector.py "$@"
     echo "── exit=$? ──"
 } >> "$LOG" 2>&1
 

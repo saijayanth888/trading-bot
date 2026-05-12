@@ -26,9 +26,11 @@ set -euo pipefail
 LOG_PATH="${SHARK_TRACKER_LOG:-}"
 if [[ -z "$LOG_PATH" ]]; then
     # Prefer the worktree's own copy; fall back to the main repo's.
+    # AUDIT 2026-05-12 Critical #1: $HOME-relative fallback replaces
+    # the hardcoded operator path.
     candidates=(
         "$(cd "$(dirname "$0")/.." && pwd)/stocks/memory/llm-calls.jsonl"
-        "/home/saijayanthai/Documents/trading-bot/stocks/memory/llm-calls.jsonl"
+        "$HOME/Documents/trading-bot/stocks/memory/llm-calls.jsonl"
         "/freqtrade/stocks/memory/llm-calls.jsonl"
     )
     for c in "${candidates[@]}"; do
@@ -77,7 +79,7 @@ if [[ -z "$LOG_PATH" || ! -f "$LOG_PATH" ]]; then
     echo "log not found. Searched:" >&2
     echo "  \$SHARK_TRACKER_LOG=${SHARK_TRACKER_LOG:-<unset>}" >&2
     echo "  $(cd "$(dirname "$0")/.." && pwd)/stocks/memory/llm-calls.jsonl" >&2
-    echo "  /home/saijayanthai/Documents/trading-bot/stocks/memory/llm-calls.jsonl" >&2
+    echo "  $HOME/Documents/trading-bot/stocks/memory/llm-calls.jsonl" >&2
     echo "  /freqtrade/stocks/memory/llm-calls.jsonl" >&2
     exit 1
 fi

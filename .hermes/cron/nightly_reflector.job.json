@@ -1,5 +1,5 @@
 {
-  "_comment": "Append this object to ~/.hermes/cron/jobs.json under the 'jobs' array, then `hermes cron reload` (or `systemctl reload hermes`). Schedule: 21:30 ET on weekdays — after stocks close (16:00 ET), after evening crypto settling, before midnight (and before the 00:00 UTC daily_pnl cron). Concurrent with shark_kb_update at the same minute is acceptable — the two crons touch disjoint files (decisions.md vs the kb/ tree) and neither holds long DB locks.",
+  "_comment": "Append this object to ~/.hermes/cron/jobs.json under the 'jobs' array, then `hermes cron reload` (or `systemctl reload hermes`). Schedule: 21:30 ET on weekdays — after stocks close (16:00 ET), after evening crypto settling, before midnight (and before the 00:00 UTC daily_pnl cron). Concurrent with shark_kb_update at the same minute is acceptable — the two crons touch disjoint files (decisions.md vs the kb/ tree) and neither holds long DB locks. NOTE: replace the workdir below with the absolute path to your trading-bot checkout (e.g. $HOME/Documents/trading-bot) before installing.",
   "id": "nightly_reflector_s12",
   "name": "nightly_reflector",
   "prompt": "",

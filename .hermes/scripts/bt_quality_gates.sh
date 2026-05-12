@@ -4,8 +4,8 @@
 # Schedule: Sunday 4:00 AM ET (after the 11pm Sat/3am Sun TFT retrain) so
 # any new model weights are in play when we backtest. Crontab line:
 #
-#   0 4 * * 0 /home/saijayanthai/.hermes/scripts/bt_quality_gates.sh \
-#       >>/home/saijayanthai/.hermes/logs/bt_quality_gates.log 2>&1
+#   0 4 * * 0 $HOME/.hermes/scripts/bt_quality_gates.sh \
+#       >>$HOME/.hermes/logs/bt_quality_gates.log 2>&1
 #
 # What this does
 # --------------
@@ -34,7 +34,11 @@
 
 set -uo pipefail
 
-REPO=/home/saijayanthai/Documents/trading-bot
+# REPO defaults to two levels up from this script (so installed copies under
+# $HOME/.hermes/scripts/ keep working when REPO is set in cron env). Override
+# with TRADING_BOT_REPO=/abs/path if your checkout isn't at $HOME/.../trading-bot.
+REPO="${TRADING_BOT_REPO:-${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)}}"
+[[ -d "$REPO/user_data" ]] || REPO="$HOME/Documents/trading-bot"
 PY="$REPO/scripts/backtest_with_gates.py"
 RESULTS_DIR="$REPO/user_data/backtest_results"
 STATE_DIR="$HOME/.hermes/state-snapshots"

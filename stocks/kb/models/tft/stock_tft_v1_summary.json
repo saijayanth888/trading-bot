@@ -1,5 +1,5 @@
 {
-  "weights_path": "/home/saijayanthai/Documents/trading-bot/stocks/kb/models/tft/stock_tft_v1.pt",
+  "weights_path": "stocks/kb/models/tft/stock_tft_v1.pt",
   "best_val_acc": 0.3829,
   "best_epoch": 2,
   "n_train": 174402,

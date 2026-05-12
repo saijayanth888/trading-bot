@@ -61,9 +61,11 @@ def _resolve_identifier_dir() -> Path:
     Resolution order:
       1. ``$FREQAI_MODELS_DIR`` override (absolute path to models dir)
       2. ``/freqtrade/user_data/models`` (inside container)
-      3. ``/home/saijayanthai/Documents/trading-bot/user_data/models``
-         (host canonical path — the bind-mount source)
-      4. ``<repo>/user_data/models`` two levels up from this file
+      3. ``<repo>/user_data/models`` two levels up from this file
+      4. ``$HOME/Documents/trading-bot/user_data/models`` (operator default)
+
+    AUDIT 2026-05-12 Critical #1: the third entry previously hardcoded
+    one operator's home path; replaced with a $HOME-relative resolver.
     """
     ident = os.environ.get("FREQAI_IDENTIFIER", "tft_v1")
 
@@ -72,8 +74,8 @@ def _resolve_identifier_dir() -> Path:
         candidates.append(Path(env_path))
     candidates.extend([
         Path("/freqtrade/user_data/models"),
-        Path("/home/saijayanthai/Documents/trading-bot/user_data/models"),
         Path(__file__).resolve().parents[2] / "user_data" / "models",
+        Path(os.environ.get("HOME", "/root")) / "Documents" / "trading-bot" / "user_data" / "models",
     ])
 
     tried: list[Path] = []
