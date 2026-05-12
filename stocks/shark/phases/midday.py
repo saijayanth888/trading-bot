@@ -129,6 +129,21 @@ def run(dry_run: bool = False) -> bool:
         symbol = pos["symbol"]
         if symbol in cut_symbols:
             continue
+
+        # Asset-class gate (Shark/Wheel isolation, 2026-05-12 leak):
+        # This is the loop whose "Midday cut: -7% rule triggered" catalyst
+        # appeared in TRADE-LOG.md against the five Wheel-owned options.
+        # Shark manages stocks only — non-equity rows belong to Wheel.
+        asset_class = pos.get("asset_class", "us_equity")
+        if asset_class != "us_equity":
+            logger.warning(
+                "[shark.midday.phase2] skipping non-equity position %s "
+                "(asset_class=%s) — managed by wheel or other subsystem, "
+                "NOT Shark's concern",
+                symbol, asset_class,
+            )
+            continue
+
         plpc = float(pos.get("unrealized_plpc", 0.0))
 
         if plpc <= HARD_STOP_PCT:
@@ -188,6 +203,20 @@ def run(dry_run: bool = False) -> bool:
     # === PHASE 4: Volatility expansion check (new) ===
     for pos in remaining_positions:
         symbol = pos["symbol"]
+
+        # Asset-class gate (Shark/Wheel isolation, 2026-05-12 leak):
+        # ATR-based vol expansion is computed from stock bars; running it
+        # against an option contract symbol throws confusing errors and is
+        # not Shark's responsibility either way.
+        asset_class = pos.get("asset_class", "us_equity")
+        if asset_class != "us_equity":
+            logger.warning(
+                "[shark.midday.phase4] skipping non-equity position %s "
+                "(asset_class=%s) — vol expansion is for equities only",
+                symbol, asset_class,
+            )
+            continue
+
         try:
             bars = get_bars(symbol, timeframe="1Day", limit=30)
             technicals = compute_indicators(bars)
@@ -205,6 +234,18 @@ def run(dry_run: bool = False) -> bool:
     thesis_break_symbols = set()
     for pos in remaining_positions:
         symbol = pos["symbol"]
+
+        # Asset-class gate (Shark/Wheel isolation, 2026-05-12 leak):
+        # Perplexity intel + close_position() apply to equities only.
+        asset_class = pos.get("asset_class", "us_equity")
+        if asset_class != "us_equity":
+            logger.warning(
+                "[shark.midday.phase5] skipping non-equity position %s "
+                "(asset_class=%s) — thesis-break exits are equity-only",
+                symbol, asset_class,
+            )
+            continue
+
         try:
             intel = fetch_market_intel([symbol])
             sym_intel = intel.get(symbol, {})
