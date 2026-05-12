@@ -138,10 +138,28 @@ def reset_pairs(
 
         # Reset the in-memory entry. We write the whole file back at the
         # end so a single atomic rename promotes all changes.
+        #
+        # Bug 3 (2026-05-12): zeroing only ``trained_timestamp`` left
+        # ``model_filename`` and ``data_path`` pointing at the now-deleted
+        # stub folder. Between this script running and freqai finishing
+        # the new train cycle, freqai's load_data() tries to read the
+        # stale path → FileNotFoundError → the strategy's broad except
+        # in populate_entry_trend masks it but the log becomes noisy
+        # (one ERROR per pair per candle until retrain completes).
+        #
+        # Root-cause fix: also clear model_filename + data_path to match
+        # freqai's own ``empty_pair_dict`` shape from data_drawer.py:
+        #   {"model_filename": "", "trained_timestamp": 0,
+        #    "data_path": "", "extras": {}}
+        # freqai's get_pair_dict_info() treats this as "first ever train"
+        # and skips the load path entirely.
         entry["trained_timestamp"] = 0
+        entry["model_filename"] = ""
+        entry["data_path"] = ""
 
         # Remove the stub zip + sidecars so the next training cycle writes
-        # into a clean folder.
+        # into a clean folder. We resolved data_path / zip_path BEFORE
+        # clearing the entry above so this cleanup still works.
         if remove_stub_artifacts and zip_path and zip_path.exists():
             try:
                 # Only remove sub-train-* folder contents, never the folder itself.
@@ -155,6 +173,8 @@ def reset_pairs(
                 log.warning("could not clean %s: %s", data_path, exc)
 
         action["new_trained_timestamp"] = 0
+        action["model_filename_cleared"] = True
+        action["data_path_cleared"] = True
         result[pair] = action
 
     if not dry_run:
