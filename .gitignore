@@ -157,8 +157,14 @@ stocks/wheel/state/kill_flags.json
 stocks/wheel/state/trades.jsonl
 stocks/wheel/state/candles_*.json
 stocks/wheel/state/.lock
+stocks/wheel/state/owned_symbols.json
 stocks/wheel/__pycache__/
 stocks/wheel/state/__pycache__/
+
+# Shark subsystem ownership — runtime state, rebuilt by bootstrap script
+stocks/shark/state/owned_symbols.json
+stocks/shark/state/.*.owned_symbols.json.*.tmp
+stocks/wheel/state/.*.owned_symbols.json.*.tmp
 
 # LLM call tracker — append-only log, regenerates from runtime
 stocks/memory/llm-calls.jsonl
