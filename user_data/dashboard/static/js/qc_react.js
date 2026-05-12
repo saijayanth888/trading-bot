@@ -90,10 +90,30 @@
     }, [value, decimals]);
     const prev = useRef(value);
     const [flash, setFlash] = useState(null);
+    // Tier C P1-7: flash-overlap fix. Previously rapid value changes
+    // could overlap: A→B starts a 600 ms timer, then B→C fires before
+    // the first timer elapses. The cleanup function returned from the
+    // effect cancels A's timeout when the effect re-runs for C — but
+    // its captured `t` is for A's timeout, not C's, and the new flash
+    // (down) gets immediately cancelled by the old up-timeout's
+    // cleanup. Net: flash sometimes disappears prematurely on quick
+    // back-to-back updates.
+    //
+    // Fix: use a flash-id token; the timeout only clears flash if the
+    // current id matches the one that scheduled it. Old timeouts that
+    // outlive their flash become no-ops.
+    //
+    // INVARIANT: every new value change must own its own token. A
+    // timeout that doesn't own the current token must not mutate state.
+    const flashIdRef = useRef(0);
     useEffect(() => {
       if (prev.current != null && value != null && value !== prev.current) {
+        const myId = ++flashIdRef.current;
         setFlash(value > prev.current ? "up" : "down");
-        const t = setTimeout(() => setFlash(null), 600);
+        const t = setTimeout(() => {
+          // Only clear if no newer flash has overwritten us.
+          if (flashIdRef.current === myId) setFlash(null);
+        }, 600);
         prev.current = value;
         return () => clearTimeout(t);
       }
@@ -111,8 +131,47 @@
   }
 
   // ─────────────── Sparkline ───────────────
+  // Tier C P1-6: parent components pass a fresh array literal each render
+  // (e.g. `data: env.points || []`). React's useEffect compares deps by
+  // reference, so the effect re-ran on every 10-s ops poll even when the
+  // numbers were byte-identical to the previous tick → canvas redraw +
+  // 500 ms intro-animation restart. Sparklines visibly "stuttered" every
+  // tick.
+  //
+  // Fix: derive a stable identity key from data length + first/last/min/
+  // max + a checksum sample. If the key matches the previous render, the
+  // effect skips re-draw entirely. This is a length/content hash, not a
+  // deep compare — N=O(1) instead of O(n) — but tight enough that any
+  // genuine update (new tick, sliced window) produces a different key.
+  //
+  // INVARIANT: the dependency key must change iff the visible plot would
+  // change. Future edits MUST update sparkKey to incorporate any new
+  // distinguishing feature; otherwise spurious skips will hide real
+  // updates. Keep this comment block when editing.
+  function sparkKey(data) {
+    if (!data || !data.length) return "0";
+    const n = data.length;
+    const first = data[0];
+    const last = data[n - 1];
+    // Sample three more positions so a mid-series flip still flips the key.
+    const a = data[(n * 0.25) | 0];
+    const b = data[(n * 0.5) | 0];
+    const c = data[(n * 0.75) | 0];
+    let mn = first, mx = first;
+    for (let i = 1; i < n; i++) {
+      const v = data[i];
+      if (v < mn) mn = v;
+      if (v > mx) mx = v;
+    }
+    return n + ":" + first + ":" + a + ":" + b + ":" + c + ":" + last + ":" + mn + ":" + mx;
+  }
+
   function Sparkline({ data, color = "var(--accent)", fill = true, height = 32, animate = true }) {
     const ref = useRef(null);
+    // Stable hash key — see comment block above sparkKey. data ref changes
+    // on every parent render, but the key only changes when the visible
+    // plot would change.
+    const key = sparkKey(data);
     useEffect(() => {
       const cv = ref.current;
       if (!cv || !data || !data.length) return;
@@ -162,7 +221,8 @@
       };
       raf = requestAnimationFrame(tick);
       return () => cancelAnimationFrame(raf);
-    }, [data, color, fill, animate]);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [key, color, fill, animate]);
     return h("canvas", { ref: ref, className: "spark", style: { height: height } });
   }
 
@@ -716,10 +776,25 @@
   // ─────────────── KillSwitch ───────────────
   // 1500 ms hold-to-confirm. raf-driven fill width. release before 100% -> cancel.
   // pointermove cancel matches prototype's "release on drag-off".
+  //
+  // Tier C P1-5: parity with the DOM version (components.js:killHoldProto)
+  // which already handles pointerleave and touchcancel. The React version
+  // was missing both — touch users could press → drift their finger →
+  // still trigger destructive kill at 1500 ms. Now:
+  //   - onPointerLeave + onPointerCancel reset progress.
+  //   - onTouchMove watches finger displacement; > 20 px drift cancels.
+  //
+  // INVARIANT: the hold-to-confirm progress MUST reset (visual fill →
+  // 0 %, raf cancelled) the moment the user's intent becomes ambiguous —
+  // pointer drift, leaving the button, or a touch-cancel from the OS.
+  // Future edits must not remove any of the four cancel paths (mouseup,
+  // mouseleave, touchend, pointerleave/pointercancel + touchmove-drift).
   function KillSwitch({ state, onArm, onKill, onResume }) {
     const [holding, setHolding] = useState(0);
     const raf = useRef(null);
     const start = useRef(0);
+    const touchStart = useRef(null); // {x, y} when touchstart fires
+    const DRIFT_PX = 20;
     const holdMs = 1500;
 
     const tick = (now) => {
@@ -734,15 +809,37 @@
         raf.current = requestAnimationFrame(tick);
       }
     };
-    const down = () => {
+    const down = (e) => {
       if (state !== "armed") return;
+      // Capture initial touch coordinates so onTouchMove can compute drift.
+      if (e && e.touches && e.touches[0]) {
+        touchStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      } else {
+        touchStart.current = null;
+      }
       start.current = performance.now();
       raf.current = requestAnimationFrame(tick);
     };
     const up = () => {
       if (raf.current) cancelAnimationFrame(raf.current);
       raf.current = null;
+      touchStart.current = null;
       setHolding(0);
+    };
+    // P1-5: pointermove cancel — fires for both mouse and touch (pointer
+    // events are the unified abstraction). Reset progress on drag-off.
+    const onPointerLeave = () => up();
+    const onPointerCancel = () => up();
+    // P1-5: touch-drift cancel — > 20 px movement aborts the hold even if
+    // the finger is still on the button. Prevents accidental kill on
+    // touchscreen drift while operator is reading the screen.
+    const onTouchMove = (e) => {
+      if (!touchStart.current || !raf.current) return;
+      const t = e.touches && e.touches[0];
+      if (!t) return;
+      const dx = t.clientX - touchStart.current.x;
+      const dy = t.clientY - touchStart.current.y;
+      if ((dx * dx + dy * dy) > (DRIFT_PX * DRIFT_PX)) up();
     };
 
     useEffect(() => {
@@ -793,6 +890,15 @@
             onMouseLeave: up,
             onTouchStart: down,
             onTouchEnd: up,
+            onTouchCancel: up,
+            // P1-5: touch + pointer drift cancel paths
+            onPointerLeave: onPointerLeave,
+            onPointerCancel: onPointerCancel,
+            onTouchMove: onTouchMove,
+            // Prevent the long-press context menu on touch screens so the
+            // hold stays a hold; the OS's text-selection magnifier was
+            // also stealing focus on iOS.
+            onContextMenu: (e) => e.preventDefault(),
             "aria-pressed": true,
             "aria-label": "Pause trading (hold to confirm)",
           },
@@ -859,49 +965,110 @@
   // ─────────────── Topbar ───────────────
   // Note: tweaks (theme/density/accent) are NOT ported; only the props
   // (killState, setKillState, active, density) used by the prototype itself.
-  function Topbar({ killState, setKillState, active, density, onRefreshIntervalChange, onRefreshNow }) {
+  //
+  // Tier C P1-1 (2026-05-12): Topbar previously polled /api/ops/uptime,
+  // /api/ops/combined_portfolio, /api/mode, /api/ops/services every 30s on
+  // top of useOpsData's 10s polling of the same three endpoints (combined
+  // portfolio, mode, services). Net: 3 endpoints × 30s + same 3 × 10s = 9
+  // duplicate calls per minute.
+  //
+  // Fix: accept these envelopes as optional props (combinedPortfolio, mode,
+  // services). When provided, Topbar reads from props and skips its own
+  // fetch. When omitted (e.g. on /dashboard pair page where there's no
+  // useOpsData → but note dashboard_spa uses its own TopbarLive instead, so
+  // in practice this fallback path is dead today; it remains defensive in
+  // case a future page mounts Topbar directly). Uptime poll stays because
+  // /api/ops/uptime is NOT in useOpsData's FAST_ENDPOINTS list.
+  //
+  // INVARIANT: when combinedPortfolio/mode/services props are provided, this
+  // component must NOT issue duplicate fetches for those endpoints. Future
+  // edits: do not re-introduce parallel fetch sites here.
+  function Topbar({ killState, setKillState, active, density, onRefreshIntervalChange, onRefreshNow,
+                    combinedPortfolio, mode: modeProp, services: servicesProp }) {
     const [clock, setClock] = useState(fmtClock());
     // Real uptime — poll /api/ops/uptime every 30s for freqtrade's actual
     // start time. Earlier this was page-load time, which made the pill
     // read "0h 0m" every refresh — not useful.
     const [uptime, setUptime] = useState("—");
-    const [equity, setEquity] = useState({ value: null, deltaPct: null });
-    // Live pill state — previously these were hardcoded "PAPER · DRY-RUN" and
-    // "FREQTRADE OK" strings that lied through any incident. mode comes from
-    // /api/mode, ftUp from /api/ops/services.
-    const [mode, setMode] = useState({ label: "—", dry: true, healthy: false });
-    const [ftUp, setFtUp] = useState(null);   // null = unknown, true/false otherwise
+    // Tier C P1-8: track freqtrade up/down + last-good uptime timestamp.
+    // When /api/ops/uptime reports { status: "down" } (freqtrade crashed
+    // or hasn't started yet) we MUST NOT keep rendering the stale
+    // uptime_s — that lies to the operator about service health. Render
+    // an explicit "FT down" pill instead, with a tooltip showing the
+    // last-good timestamp so they know how stale the previous reading is.
+    //
+    // INVARIANT: when ftDown is true, the uptime pill MUST render the
+    // "FT down" affordance — never the cached numeric uptime.
+    const [ftDown, setFtDown] = useState(false);
+    const [uptimeFetchedAt, setUptimeFetchedAt] = useState(null);
+    // Equity/mode/ftUp are derived from props when provided; otherwise
+    // populated by the local-fallback fetch below.
+    const [equityLocal, setEquityLocal] = useState({ value: null, deltaPct: null });
+    const [modeLocal, setModeLocal] = useState({ label: "—", dry: true, healthy: false });
+    const [ftUpLocal, setFtUpLocal] = useState(null);
+
+    // ── Always-on: clock + uptime (uptime not covered by useOpsData) ──
     useEffect(() => {
+      const ctrl = new AbortController();
       const t = setInterval(() => setClock(fmtClock()), 1000);
-      const refresh = async () => {
+      const refreshUptime = async () => {
         try {
-          const r = await fetch("/api/ops/uptime", { cache: "no-store" });
+          const r = await fetch("/api/ops/uptime", { cache: "no-store", signal: ctrl.signal });
+          if (!r.ok) return;
           const j = await r.json().catch(() => ({}));
+          if (ctrl.signal.aborted) return;
           const ft = (j && j.data && j.data.freqtrade) || {};
-          if (typeof ft.uptime_s === "number") {
+          // P1-8: explicit down-state handling. status:"down" OR up:false
+          // means "do not trust uptime_s" — show the down pill instead.
+          const status = String(ft.status || "").toLowerCase();
+          const isDown = status === "down" || ft.up === false;
+          setFtDown(isDown);
+          if (!isDown && typeof ft.uptime_s === "number") {
             const s = ft.uptime_s;
             const d = Math.floor(s / 86400);
-            const h = Math.floor((s % 86400) / 3600);
+            const hh = Math.floor((s % 86400) / 3600);
             const m = Math.floor((s % 3600) / 60);
-            setUptime(d > 0 ? `${d}d ${h}h ${m}m` : (h > 0 ? `${h}h ${m}m` : `${m}m`));
-          } else {
+            setUptime(d > 0 ? `${d}d ${hh}h ${m}m` : (hh > 0 ? `${hh}h ${m}m` : `${m}m`));
+            setUptimeFetchedAt(new Date());
+          } else if (!isDown) {
             setUptime("—");
           }
-        } catch (_) { /* ignore */ }
+          // When isDown we deliberately do NOT clobber the cached uptime
+          // value — uptimeFetchedAt still points at the last clean read
+          // so the tooltip can surface "last good …" for the operator.
+        } catch (e) { if (e && e.name !== "AbortError") { /* ignore */ } }
+      };
+      refreshUptime();
+      const u = setInterval(refreshUptime, 30000);
+      return () => { clearInterval(t); clearInterval(u); ctrl.abort(); };
+    }, []);
+
+    // ── Local fallback poll: only runs when parent did NOT pass envelopes ──
+    // Cadence bumped to 30s (was 30s already) and ONLY active when no prop
+    // is provided. This is the dead-path for now (ops passes props,
+    // dashboard_spa uses TopbarLive) but kept defensive.
+    const haveProps = combinedPortfolio != null || modeProp != null || servicesProp != null;
+    useEffect(() => {
+      if (haveProps) return; // P1-1 invariant: skip fetch when props feed us
+      const ctrl = new AbortController();
+      const refresh = async () => {
         try {
-          const r = await fetch("/api/ops/combined_portfolio", { cache: "no-store" });
+          const r = await fetch("/api/ops/combined_portfolio", { cache: "no-store", signal: ctrl.signal });
+          if (!r.ok) return;
           const j = await r.json().catch(() => ({}));
+          if (ctrl.signal.aborted) return;
           const d = (j && j.data) || {};
           const total = Number(d.total_equity);
           const dd = Number(d.combined_drawdown_pct);
           if (Number.isFinite(total)) {
-            setEquity({ value: total, deltaPct: Number.isFinite(dd) ? -Math.abs(dd) : null });
+            setEquityLocal({ value: total, deltaPct: Number.isFinite(dd) ? -Math.abs(dd) : null });
           }
-        } catch (_) { /* ignore */ }
-        // /api/mode — { mode: "paper"|"live", dry_run: bool, state: "running"|"paused"|... }
+        } catch (e) { if (e && e.name !== "AbortError") { /* ignore */ } }
         try {
-          const r = await fetch("/api/mode", { cache: "no-store" });
+          const r = await fetch("/api/mode", { cache: "no-store", signal: ctrl.signal });
+          if (!r.ok) return;
           const j = await r.json().catch(() => ({}));
+          if (ctrl.signal.aborted) return;
           const m = String(j && j.mode || "").toLowerCase();
           const dry = !!(j && j.dry_run);
           const st = String(j && j.state || "").toLowerCase();
@@ -909,20 +1076,57 @@
           const label = (m === "paper" || dry)
             ? (dry ? "PAPER · DRY-RUN" : "PAPER")
             : "LIVE";
-          setMode({ label, dry, healthy });
-        } catch (_) { /* ignore */ }
-        // /api/ops/services — { data: { freqtrade: { up: bool, ... }, ... } }
+          setModeLocal({ label, dry, healthy });
+        } catch (e) { if (e && e.name !== "AbortError") { /* ignore */ } }
         try {
-          const r = await fetch("/api/ops/services", { cache: "no-store" });
+          const r = await fetch("/api/ops/services", { cache: "no-store", signal: ctrl.signal });
+          if (!r.ok) return;
           const j = await r.json().catch(() => ({}));
+          if (ctrl.signal.aborted) return;
           const ftSvc = (j && j.data && j.data.freqtrade) || {};
-          setFtUp(typeof ftSvc.up === "boolean" ? ftSvc.up : null);
-        } catch (_) { /* ignore */ }
+          setFtUpLocal(typeof ftSvc.up === "boolean" ? ftSvc.up : null);
+        } catch (e) { if (e && e.name !== "AbortError") { /* ignore */ } }
       };
       refresh();
       const u = setInterval(refresh, 30000);
-      return () => { clearInterval(t); clearInterval(u); };
-    }, []);
+      return () => { clearInterval(u); ctrl.abort(); };
+    }, [haveProps]);
+
+    // ── Resolve final values: prefer props, fall back to local poll ──
+    const equity = (() => {
+      if (combinedPortfolio != null) {
+        const d = (combinedPortfolio && combinedPortfolio.data) || combinedPortfolio || {};
+        const total = Number(d.total_equity);
+        const dd = Number(d.combined_drawdown_pct);
+        if (Number.isFinite(total)) {
+          return { value: total, deltaPct: Number.isFinite(dd) ? -Math.abs(dd) : null };
+        }
+        return { value: null, deltaPct: null };
+      }
+      return equityLocal;
+    })();
+    const mode = (() => {
+      if (modeProp != null) {
+        const j = (modeProp && modeProp.data) || modeProp || {};
+        const m = String(j.mode || "").toLowerCase();
+        const dry = !!j.dry_run;
+        const st = String(j.state || "").toLowerCase();
+        const healthy = ["running", "reload_config", "starting", "init"].includes(st);
+        const label = (m === "paper" || dry)
+          ? (dry ? "PAPER · DRY-RUN" : "PAPER")
+          : (m ? "LIVE" : "—");
+        return { label, dry, healthy };
+      }
+      return modeLocal;
+    })();
+    const ftUp = (() => {
+      if (servicesProp != null) {
+        const ftSvc = (servicesProp && servicesProp.data && servicesProp.data.freqtrade) ||
+                       (servicesProp && servicesProp.freqtrade) || {};
+        return typeof ftSvc.up === "boolean" ? ftSvc.up : null;
+      }
+      return ftUpLocal;
+    })();
     return h(
       "header",
       { className: "topbar" },
@@ -960,13 +1164,25 @@
       h("div", { className: "tb-divider" }),
       h(
         "div",
-        { className: "tb-group" },
+        {
+          className: "tb-group",
+          // P1-8: surface last-good uptime timestamp on hover when freqtrade
+          // is down, so operator knows how stale the previous reading is.
+          title: ftDown && uptimeFetchedAt
+            ? ("last good uptime " + uptimeFetchedAt.toLocaleTimeString() + " ET")
+            : undefined,
+        },
         h(
           "span",
           { className: "dim2 mono", style: { fontSize: "var(--t-xs)", letterSpacing: ".08em" } },
           "BOT UP"
         ),
-        h("span", { className: "num" }, uptime)
+        // P1-8: when ftDown, render the explicit down pill. Previously
+        // the stale uptime_s would keep ticking on screen forever.
+        ftDown
+          ? h("span", { className: "pill down", style: { fontFamily: "var(--mono)" } },
+              h("span", { className: "dot down pulse" }), " FT down")
+          : h("span", { className: "num" }, uptime)
       ),
       h("div", { className: "tb-divider" }),
       h(
@@ -1053,10 +1269,36 @@
     ];
     useEffect(() => {
       const navItems = items.filter((it) => !it.sect);
+      // Tier C P1-4: extend the focused-element whitelist so digit 1-9
+      // doesn't yank navigation while a button/link/role=button is the
+      // active focus. Previously only INPUT/TEXTAREA/SELECT/contentEditable
+      // were guarded → pressing "2" with a hold-to-confirm button focused
+      // would nav-jump mid-action. Also honor an explicit opt-in attribute
+      // `data-no-hotkey` so components that WANT to swallow digit keys
+      // (e.g. a numeric-spinner that isn't an <input>) can mark themselves.
+      //
+      // INVARIANT: digit 1-9 must NOT fire navigation when an interactive
+      // control owns focus. Future edits should add new control tag names
+      // to NAV_GUARD_TAGS, never remove members.
+      const NAV_GUARD_TAGS = new Set([
+        "INPUT", "TEXTAREA", "SELECT",
+        "BUTTON", "A",
+      ]);
+      const isHotkeyGuarded = (el) => {
+        if (!el) return false;
+        if (NAV_GUARD_TAGS.has(el.tagName)) return true;
+        if (el.isContentEditable) return true;
+        // Explicit opt-in (data-no-hotkey) bubbles up; e.g. a custom
+        // numeric stepper wrapping a <span> can mark its container.
+        if (typeof el.closest === "function" && el.closest("[data-no-hotkey]")) return true;
+        // ARIA role=button covers div/span widgets acting as buttons.
+        const role = el.getAttribute && el.getAttribute("role");
+        if (role === "button" || role === "textbox" || role === "combobox" ||
+            role === "searchbox" || role === "spinbutton") return true;
+        return false;
+      };
       const onKey = (e) => {
-        const tag = e.target && e.target.tagName;
-        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-        if (e.target && e.target.isContentEditable) return;
+        if (isHotkeyGuarded(e.target)) return;
         if (e.metaKey || e.ctrlKey || e.altKey) return;
         const n = parseInt(e.key, 10);
         if (n >= 1 && n <= navItems.length) {

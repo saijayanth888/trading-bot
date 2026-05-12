@@ -46,6 +46,12 @@
   function safeJsonFetch(url, opts) {
     return fetch(url, opts).then(r => r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)));
   }
+  // Tier C P1-2: AbortError detector. Components that issue fetches inside
+  // useEffect should swallow these silently — they fire on unmount when the
+  // controller is aborted and are EXPECTED, not real errors.
+  function isAbortError(e) {
+    return !!(e && (e.name === "AbortError" || (e.message && e.message.indexOf("aborted") !== -1)));
+  }
   function envelopeData(env) {
     if (env && typeof env === "object" && "data" in env) return env.data;
     return env;
@@ -180,44 +186,104 @@
     const [state, setState] = useState({});
     const stateRef = useRef(state);
     stateRef.current = state;
+    // Tier C P1-2: AbortController per useEffect tick so unmounting the
+    // page or rotating refresh cycles cancels in-flight fetches cleanly.
+    // INVARIANT: every fetch issued from this hook must pass through the
+    // current ctrlRef.current.signal so unmount aborts them. Without this
+    // 22 in-flight fetches leak per unmount (page tab switch, hot reload).
+    const ctrlRef = useRef(null);
 
-    const fetchOne = useCallback((key, urlOrSpec) => {
+    // Tier C P1-3: batch many parallel fetches into one setState per
+    // refresh-cycle. Previously each of the 22 FAST_ENDPOINTS' fetches
+    // resolved at different times and each called setState → 22 ops-page
+    // renders per 10s tick. Now resolves are accumulated in a local object
+    // and flushed in a single setState after Promise.allSettled finishes
+    // for that batch.
+    //
+    // INVARIANT: setState must be called AT MOST ONCE per refetchFast /
+    // refetchSlow call (and at most twice total per tick when both fast +
+    // slow fire on mount). Future edits: do not move setState back inside
+    // the per-fetch then/catch.
+    //
+    // Tier C P1-9: per-endpoint request token (stale-while-revalidate
+    // guard). Two refreshes for the same key can be in-flight at once
+    // (10 s tick fires while a previous tick's call is still pending).
+    // Without a guard, the slower call's result silently overwrites the
+    // faster (and fresher) call's result whenever it happens to land
+    // second. Each call now captures an incrementing per-key token and
+    // its result is dropped during flushBatch if a newer request has
+    // since been issued for the same key.
+    //
+    // INVARIANT: only the latest-token response for a key may write that
+    // key's slot. Future edits MUST keep the token comparison.
+    const tokensRef = useRef({});
+
+    const buildOne = useCallback((key, urlOrSpec, signal) => {
       const isSpec = typeof urlOrSpec === "object";
       const url = isSpec ? urlOrSpec.url : urlOrSpec;
       const opts = isSpec
         ? { method: urlOrSpec.method || "GET",
             headers: { "Content-Type": "application/json" },
-            body: urlOrSpec.method === "POST" ? JSON.stringify(urlOrSpec.body || {}) : undefined }
-        : undefined;
+            body: urlOrSpec.method === "POST" ? JSON.stringify(urlOrSpec.body || {}) : undefined,
+            signal }
+        : { signal };
+      const myToken = (tokensRef.current[key] || 0) + 1;
+      tokensRef.current[key] = myToken;
       return safeJsonFetch(url, opts)
-        .then(env => {
-          setState(s => Object.assign({}, s, {
-            [key]: env,
-            [key + "_fetched_at"]: new Date().toISOString(),
-            [key + "_error"]: null,
-          }));
-        })
-        .catch(err => {
-          setState(s => Object.assign({}, s, {
-            [key + "_fetched_at"]: new Date().toISOString(),
-            [key + "_error"]: String(err && err.message || err),
-          }));
-        });
+        .then(env => ({ key, ok: true, env, token: myToken }))
+        .catch(err => ({ key, ok: false, err, token: myToken }));
+    }, []);
+
+    const flushBatch = useCallback((results) => {
+      const patch = {};
+      const now = new Date().toISOString();
+      let touched = 0;
+      results.forEach(rv => {
+        // Skip the resolved-but-aborted case
+        if (!rv) return;
+        const { key, ok, env, err, token } = rv;
+        // P1-9: drop stale responses — a newer request for this key has
+        // already been issued (and may even have landed first).
+        if (token !== tokensRef.current[key]) return;
+        if (ok) {
+          patch[key] = env;
+          patch[key + "_fetched_at"] = now;
+          patch[key + "_error"] = null;
+          touched++;
+        } else {
+          if (isAbortError(err)) return;
+          patch[key + "_fetched_at"] = now;
+          patch[key + "_error"] = String(err && err.message || err);
+          touched++;
+        }
+      });
+      if (touched === 0) return;
+      setState(s => Object.assign({}, s, patch));
     }, []);
 
     const refetchFast = useCallback(() => {
-      Object.entries(FAST_ENDPOINTS).forEach(([k, u]) => fetchOne(k, u));
-    }, [fetchOne]);
+      const sig = ctrlRef.current && ctrlRef.current.signal;
+      const ps = Object.entries(FAST_ENDPOINTS).map(([k, u]) => buildOne(k, u, sig));
+      return Promise.allSettled(ps).then(arr =>
+        flushBatch(arr.map(s => s.status === "fulfilled" ? s.value : null))
+      );
+    }, [buildOne, flushBatch]);
     const refetchSlow = useCallback(() => {
-      Object.entries(SLOW_ENDPOINTS).forEach(([k, spec]) => fetchOne(k, spec));
-    }, [fetchOne]);
+      const sig = ctrlRef.current && ctrlRef.current.signal;
+      const ps = Object.entries(SLOW_ENDPOINTS).map(([k, spec]) => buildOne(k, spec, sig));
+      return Promise.allSettled(ps).then(arr =>
+        flushBatch(arr.map(s => s.status === "fulfilled" ? s.value : null))
+      );
+    }, [buildOne, flushBatch]);
 
     useEffect(() => {
+      const ctrl = new AbortController();
+      ctrlRef.current = ctrl;
       refetchFast();
       refetchSlow();
       const ifast = setInterval(refetchFast, 10_000);
       const islow = setInterval(refetchSlow, 60_000);
-      return () => { clearInterval(ifast); clearInterval(islow); };
+      return () => { clearInterval(ifast); clearInterval(islow); ctrl.abort(); };
     }, [refetchFast, refetchSlow]);
 
     return { state, refetchFast, refetchSlow };
@@ -3204,6 +3270,10 @@
     const [modalLoading, setModalLoading] = useState(false);
     const [modalError, setModalError] = useState(null);
     const searchRef = useRef(null);
+    // Tier C P1-2: track current in-flight modal fetch so closeModal /
+    // unmount can abort it. ESC also triggers closeModal which now aborts
+    // mid-flight — operator can cancel a slow LLM-call drilldown.
+    const modalCtrlRef = useRef(null);
 
     // Cmd-F / Ctrl-F focuses the search input (within this card only —
     // we don't fight the browser shortcut globally).
@@ -3227,10 +3297,15 @@
     // Click a row → fetch full record (include_text=1) for the modal.
     const openCall = useCallback((rec) => {
       if (!rec || !rec.timestamp) return;
+      // Tier C P1-2: cancel any in-flight previous open so rapid-click on
+      // different rows doesn't race; the latest click always wins.
+      if (modalCtrlRef.current) modalCtrlRef.current.abort();
+      const ctrl = new AbortController();
+      modalCtrlRef.current = ctrl;
       setSelectedTs(rec.timestamp);
       setModalLoading(true); setModalError(null); setModalRec(rec);  // optimistic
       const url = "/api/ops/llm_calls/" + encodeURIComponent(rec.timestamp);
-      fetch(url)
+      fetch(url, { signal: ctrl.signal })
         .then(r => {
           if (r.ok) return r.json();
           if (r.status === 410) {
@@ -3243,11 +3318,13 @@
           throw new Error("HTTP " + r.status);
         })
         .then(env => {
+          if (ctrl.signal.aborted) return;
           const c = (env && env.data && env.data.call) || rec;
           setModalRec(c);
           setModalLoading(false);
         })
         .catch(err => {
+          if (isAbortError(err)) return;
           // Fallback: render the row data we have (metadata-only) and
           // surface the error so operator knows full text isn't available.
           setModalRec(rec);
@@ -3257,9 +3334,19 @@
     }, []);
 
     const closeModal = useCallback(() => {
+      // P1-2: abort any in-flight modal fetch so closing the modal
+      // (including via ESC) cancels the request immediately.
+      if (modalCtrlRef.current) { modalCtrlRef.current.abort(); modalCtrlRef.current = null; }
       setSelectedTs(null);
       setModalRec(null);
       setModalError(null);
+    }, []);
+
+    // P1-2: cleanup any in-flight modal fetch when the card unmounts.
+    useEffect(() => {
+      return () => {
+        if (modalCtrlRef.current) { modalCtrlRef.current.abort(); modalCtrlRef.current = null; }
+      };
     }, []);
 
     // ── Filter rows client-side ──────────────────────────────────
@@ -3646,9 +3733,19 @@
       document.documentElement.style.setProperty("--accent", "#7c5cff");
     }, []);
 
+    // Tier C P1-1: feed Topbar from useOpsData state to eliminate duplicate
+    // polling. Previously Topbar polled mode/services/combined_portfolio
+    // every 30s on top of useOpsData's 10s. With these three envelopes as
+    // props, Topbar's local fetch path is skipped — only /api/ops/uptime
+    // (the one endpoint NOT in FAST_ENDPOINTS) is still polled by Topbar.
     return h(F, null,
       h("div", { className: "app" },
-        h(Topbar, { killState, setKillState, active: "ops" }),
+        h(Topbar, {
+          killState, setKillState, active: "ops",
+          combinedPortfolio: data.combined_portfolio,
+          mode: data.mode,
+          services: data.services,
+        }),
         h(Sidebar, { active: "ops" }),
         h("main", { className: "main" },
           h("div", { className: "page-title" },

@@ -244,30 +244,41 @@
     // via DASHBOARD_STOCK_SYMBOLS env var. Falls back to the 10-symbol seed
     // if the endpoint is unreachable on boot.
     const [stockSymbols, setStockSymbols] = useState(FALLBACK_STOCK_SYMBOLS);
+    // Tier C P1-2: helper to detect AbortError; useEffect-mounted fetches
+    // pass the controller's signal so component unmount aborts in-flight
+    // requests cleanly (no orange "stalled" entries in DevTools Network).
+    const isAbortError = (e) => !!(e && (e.name === "AbortError" || (e.message && e.message.indexOf("aborted") !== -1)));
+
     useEffect(() => {
       // Primary: /api/universe — single source of truth (user_data/universe.json).
       // Falls back to /api/pairs + /api/ops/stocks_sparklines if universe.json
       // is unreachable.
-      fetch("/api/universe")
+      const ctrl = new AbortController();
+      fetch("/api/universe", { signal: ctrl.signal })
         .then(r => r.json())
         .then(uni => {
+          if (ctrl.signal.aborted) return;
           const cp = (uni && uni.crypto && uni.crypto.pairs) || [];
           const sb = (uni && uni.stocks && uni.stocks.dashboard_basket) || [];
           if (Array.isArray(cp) && cp.length) setCryptoPairs(cp);
           if (Array.isArray(sb) && sb.length) setStockSymbols(sb);
         })
-        .catch(() => {
+        .catch((e) => {
+          if (isAbortError(e)) return;
           // Fallback 1: /api/pairs for crypto
-          fetch("/api/pairs").then(r => r.json()).then(d => {
+          fetch("/api/pairs", { signal: ctrl.signal }).then(r => r.json()).then(d => {
+            if (ctrl.signal.aborted) return;
             const arr = Array.isArray(d && d.pairs) ? d.pairs : [];
             if (arr.length) setCryptoPairs(arr);
-          }).catch(() => {});
+          }).catch((e2) => { if (!isAbortError(e2)) { /* ignore */ } });
           // Fallback 2: stocks_sparklines basket
-          fetch("/api/ops/stocks_sparklines").then(r => r.json()).then(env => {
+          fetch("/api/ops/stocks_sparklines", { signal: ctrl.signal }).then(r => r.json()).then(env => {
+            if (ctrl.signal.aborted) return;
             const basket = (env && env.data && env.data.basket) || [];
             if (Array.isArray(basket) && basket.length) setStockSymbols(basket);
-          }).catch(() => {});
+          }).catch((e2) => { if (!isAbortError(e2)) { /* ignore */ } });
         });
+      return () => ctrl.abort();
     }, []);
 
     // URL params on mount
@@ -288,28 +299,43 @@
     // Fetch /api/state (sidebar / pair drill payload). The endpoint is
     // single-pair so it gives best context for whatever pair freqtrade is
     // showing — we surface it as the "model view" payload.
-    const fetchState = useCallback(() => {
-      fetch("/api/state").then(r => r.json()).then(j => {
+    //
+    // Tier C P1-2 INVARIANT: every fetch issued from these callbacks must
+    // pass the externally-supplied signal so the polling useEffect can abort
+    // all in-flight requests on unmount or interval rotation.
+    const fetchState = useCallback((signal) => {
+      fetch("/api/state", { signal }).then(r => r.json()).then(j => {
+        if (signal && signal.aborted) return;
         setState(j);
         setMeta(m => Object.assign({}, m, { state_fetched_at: new Date().toISOString() }));
-      }).catch(() => {});
+      }).catch((e) => { if (!isAbortError(e)) { /* ignore */ } });
     }, []);
 
     // Fetch portfolio + mode + service health for the live topbar.
     // /api/ops/combined_portfolio drives the EQUITY NumberRoll and the
     // day-delta pill (signed -combined_drawdown_pct vs peak). /api/mode and
     // /api/ops/services together replace the prototype's mock PAPER / OK pills.
-    const fetchTopbar = useCallback(() => {
-      fetch("/api/ops/combined_portfolio").then(r => r.json()).then(j => {
+    const fetchTopbar = useCallback((signal) => {
+      fetch("/api/ops/combined_portfolio", { signal }).then(r => r.json()).then(j => {
+        if (signal && signal.aborted) return;
         setCombined(j);
         setMeta(m => Object.assign({}, m, { combined_fetched_at: new Date().toISOString() }));
-      }).catch(() => {});
-      fetch("/api/mode").then(r => r.json()).then(j => setMode(j)).catch(() => {});
-      fetch("/api/ops/services").then(r => r.json()).then(j => setServices(j)).catch(() => {});
+      }).catch((e) => { if (!isAbortError(e)) { /* ignore */ } });
+      fetch("/api/mode", { signal }).then(r => r.json()).then(j => {
+        if (signal && signal.aborted) return;
+        setMode(j);
+      }).catch((e) => { if (!isAbortError(e)) { /* ignore */ } });
+      fetch("/api/ops/services", { signal }).then(r => r.json()).then(j => {
+        if (signal && signal.aborted) return;
+        setServices(j);
+      }).catch((e) => { if (!isAbortError(e)) { /* ignore */ } });
       // Wheel positions (cash, BP, open short puts / covered calls / longs).
       // Polled on the same 10s cadence as the topbar so the per-pair stocks
       // panel reflects today's CSP fires within one tick.
-      fetch("/api/ops/stocks").then(r => r.json()).then(j => setStocksData(j)).catch(() => {});
+      fetch("/api/ops/stocks", { signal }).then(r => r.json()).then(j => {
+        if (signal && signal.aborted) return;
+        setStocksData(j);
+      }).catch((e) => { if (!isAbortError(e)) { /* ignore */ } });
     }, []);
 
     // Fetch candles on pair/tf change. Crypto routes through
@@ -317,13 +343,14 @@
     // base/quote split — they route through `/api/ops/stock_candles/{symbol}`
     // (enveloped, Alpaca-cached on disk). The latter uses Alpaca's timeframe
     // codes (`5Min` / `1Hour` / `1Day`) and exposes `bars[]`, not `candles[]`.
-    const fetchCandles = useCallback(() => {
+    const fetchCandles = useCallback((signal) => {
       const isStock = !pair.includes("/");
       if (isStock) {
         const tfMap = { "1m": "1Min", "5m": "5Min", "15m": "15Min", "1h": "1Hour", "4h": "4Hour", "1d": "1Day" };
         const sym = pair.toUpperCase();
         const url = "/api/ops/stock_candles/" + encodeURIComponent(sym) + "?timeframe=" + encodeURIComponent(tfMap[tf] || "5Min");
-        fetch(url).then(r => r.json()).then(env => {
+        fetch(url, { signal }).then(r => r.json()).then(env => {
+          if (signal && signal.aborted) return;
           const d = envelopeData(env) || {};
           const rawCandles = (d.bars || []).slice(-300);
           const cs = toCandles(rawCandles, tf);
@@ -337,12 +364,16 @@
             source: "alpaca-cache",
             trades_fetched_at: new Date().toISOString(),
           }));
-        }).catch(() => { setCandles([]); setMarkers([]); });
+        }).catch((e) => {
+          if (isAbortError(e)) return;
+          setCandles([]); setMarkers([]);
+        });
         return;
       }
       const [base, quote] = pair.split("/");
       const url = "/api/candles/" + encodeURIComponent(base) + "/" + encodeURIComponent(quote) + "?timeframe=" + encodeURIComponent(tf) + "&limit=300";
-      fetch(url).then(r => r.json()).then(j => {
+      fetch(url, { signal }).then(r => r.json()).then(j => {
+        if (signal && signal.aborted) return;
         const rawCandles = j.candles || [];
         const cs = toCandles(rawCandles, tf);
         setCandles(cs);
@@ -350,25 +381,32 @@
         setMeta(m => Object.assign({}, m, { candles_fetched_at: new Date().toISOString(), pair_state: j.pair_state, last_close: j.last_close, source: j.source }));
         // Pull trade markers after candles so we can align them.
         const turl = "/api/trades/" + encodeURIComponent(base) + "/" + encodeURIComponent(quote);
-        fetch(turl).then(r => r.json()).then(tj => {
+        fetch(turl, { signal }).then(r => r.json()).then(tj => {
+          if (signal && signal.aborted) return;
           setMarkers(toMarkers(tj.markers || [], rawCandles));
           setMeta(m => Object.assign({}, m, { trades_fetched_at: new Date().toISOString() }));
-        }).catch(() => setMarkers([]));
-      }).catch(() => setCandles([]));
+        }).catch((e) => { if (!isAbortError(e)) setMarkers([]); });
+      }).catch((e) => { if (!isAbortError(e)) setCandles([]); });
     }, [pair, tf]);
 
     useEffect(() => {
-      fetchState();
-      fetchCandles();
-      fetchTopbar();
-      const isvc = setInterval(fetchState, 10_000);
-      const itb = setInterval(fetchTopbar, 10_000);
+      // Tier C P1-2: shared AbortController for this polling cluster so
+      // unmount + dependency-change re-mount both abort all in-flight
+      // fetches at once. Previously these calls leaked on tab switch.
+      const ctrl = new AbortController();
+      const sig = ctrl.signal;
+      fetchState(sig);
+      fetchCandles(sig);
+      fetchTopbar(sig);
+      const isvc = setInterval(() => fetchState(sig), 10_000);
+      const itb = setInterval(() => fetchTopbar(sig), 10_000);
       // Candle live-stream — driven by refreshMs + streamPaused so operator
       // can throttle or stop the auto-refresh from the chart card header.
-      const ic = streamPaused ? null : setInterval(fetchCandles, refreshMs);
+      const ic = streamPaused ? null : setInterval(() => fetchCandles(sig), refreshMs);
       return () => {
         clearInterval(isvc); clearInterval(itb);
         if (ic) clearInterval(ic);
+        ctrl.abort();
       };
     }, [fetchState, fetchCandles, fetchTopbar, streamPaused, refreshMs]);
 
