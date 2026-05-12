@@ -864,10 +864,15 @@
         if (eligible <= 0) return null;
         const mult = Math.round((tbf.position_size_multiplier || 0.5) * 100);
         const active = tbf.active_count || 0;
+        // Paper-mode default 2026-05-12+: tft_blind_fallback.enabled is now
+        // ON by default. When ON, banner names how many pairs are actively
+        // trading via the BollingerRSI MR signal — no "DARK" wording. When
+        // OFF (operator override), banner warns that quarantined pairs are
+        // dark until retrain.
         const cls = tbf.enabled ? "warn" : "down";
         const txt = tbf.enabled
-          ? "tft-blind fallback ON · " + active + " pair(s) trading on BollingerRSI MR at " + mult + "% size · auto-disables when TFT retrains clean"
-          : "tft-blind fallback OFF · " + eligible + " eligible pair(s) DARK · set strategy_overrides.tft_blind_fallback.enabled=true to trade them at " + mult + "% size";
+          ? "tft-blind fallback ON · " + active + " pair(s) trading on BollingerRSI MR at " + mult + "% size"
+          : "tft-blind fallback OFF · " + eligible + " eligible pair(s) DARK until next TFT retrain · flip strategy_overrides.tft_blind_fallback.enabled=true to trade them at " + mult + "% size";
         return h("div", {
           className: "mono " + cls,
           style: { fontSize: "var(--t-2xs)", padding: "var(--s-2) 0 0",
@@ -922,7 +927,7 @@
       blindChip = h("span", {
         className: "pill down",
         style: { height: 14, fontSize: "var(--t-2xs)", marginLeft: 4 },
-        title: "Eligible for TFT-blind fallback but operator has not enabled it (strategy_overrides.tft_blind_fallback.enabled = false). Pair is DARK until the next successful TFT retrain."
+        title: "Eligible for TFT-blind fallback but operator has set strategy_overrides.tft_blind_fallback.enabled=false (paper-mode default is true). Pair is DARK until the next successful TFT retrain."
       },
         h("span", { className: "dot down" }),
         " dark"
