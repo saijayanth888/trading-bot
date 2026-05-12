@@ -44,6 +44,7 @@ from .data_sources import (
 )
 from .indicators import attach_all
 from . import ops_routes
+from . import v4_routes
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -89,6 +90,11 @@ app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
 # Ops tab — registers /ops (HTML) + /api/ops/* (REST envelope endpoints)
 ops_routes.make_html_route(app)
 app.include_router(ops_routes.router)
+
+# V4 frontend — mounts /v4/* static SPA (when frontend-v4/dist exists) and
+# /api/v4/* JSON + SSE surfaces for the new debate / Monte Carlo / adapter /
+# weekly / parity / screening pages.
+v4_routes.mount(app)
 
 
 # ---------------------------------------------------------------------------
