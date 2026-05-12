@@ -645,6 +645,17 @@ def _execute(dry_run: bool = False) -> bool:
             logger.error("Failed to place order for %s", symbol, exc_info=True)
             continue
 
+        # Claim ownership (Shark/Wheel isolation, Fix 3). Done AFTER the
+        # bracket order is accepted so a failed entry doesn't leave a
+        # phantom claim. The bracket parent itself is the source of truth;
+        # the owned-symbols set is a fast-lookup mirror Shark's midday
+        # loops consult before touching any position.
+        try:
+            from shared.subsystem_ownership import claim
+            claim("shark", symbol)
+        except Exception as exc:
+            logger.warning("ownership claim failed for %s: %s", symbol, exc)
+
         fill_price = execution.get("fill_price", current_price)
         stop_price = execution.get("stop_price", dec.get("stop_loss", candidate["stop_price"]))
 
@@ -972,6 +983,14 @@ def _run_full(dry_run: bool = False) -> bool:
             bracket_kwargs["take_profit"] = float(llm_target)
 
         execution = place_bracket_order(symbol, qty, **bracket_kwargs)
+
+        # Claim ownership (Shark/Wheel isolation, Fix 3) — see _execute().
+        try:
+            from shared.subsystem_ownership import claim
+            claim("shark", symbol)
+        except Exception as exc:
+            logger.warning("ownership claim failed for %s: %s", symbol, exc)
+
         fill_price = execution.get("fill_price", current_price)
         stop_price = execution.get("stop_price", c["stop_price"])
 

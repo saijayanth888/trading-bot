@@ -75,6 +75,15 @@ def run(dry_run: bool = False) -> bool:
                     fill_price = next((p.get("current_price") for p in positions if p["symbol"] == symbol), 0)
                     qty = qty_to_close
 
+                # Release ownership (Shark/Wheel isolation, Fix 3) — done
+                # AFTER the broker confirms close so a failed close leaves
+                # the claim intact. Idempotent: safe to call on dry_run too.
+                try:
+                    from shared.subsystem_ownership import release
+                    release("shark", symbol)
+                except Exception as exc:
+                    logger.warning("ownership release failed for %s: %s", symbol, exc)
+
                 log_trade({
                     "date": today,
                     "symbol": symbol,
@@ -155,6 +164,13 @@ def run(dry_run: bool = False) -> bool:
                 else:
                     fill_price = pos.get("current_price")
                     qty = pos["qty"]
+
+                # Release ownership (Shark/Wheel isolation, Fix 3).
+                try:
+                    from shared.subsystem_ownership import release
+                    release("shark", symbol)
+                except Exception as exc:
+                    logger.warning("ownership release failed for %s: %s", symbol, exc)
 
                 log_trade({
                     "date": today,
@@ -262,6 +278,13 @@ def run(dry_run: bool = False) -> bool:
                     qty = result.get("qty", qty)
                 else:
                     fill_price = pos.get("current_price")
+
+                # Release ownership (Shark/Wheel isolation, Fix 3).
+                try:
+                    from shared.subsystem_ownership import release
+                    release("shark", symbol)
+                except Exception as exc:
+                    logger.warning("ownership release failed for %s: %s", symbol, exc)
 
                 log_trade({
                     "date": today,
