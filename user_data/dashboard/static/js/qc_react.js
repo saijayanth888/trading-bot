@@ -90,10 +90,30 @@
     }, [value, decimals]);
     const prev = useRef(value);
     const [flash, setFlash] = useState(null);
+    // Tier C P1-7: flash-overlap fix. Previously rapid value changes
+    // could overlap: A→B starts a 600 ms timer, then B→C fires before
+    // the first timer elapses. The cleanup function returned from the
+    // effect cancels A's timeout when the effect re-runs for C — but
+    // its captured `t` is for A's timeout, not C's, and the new flash
+    // (down) gets immediately cancelled by the old up-timeout's
+    // cleanup. Net: flash sometimes disappears prematurely on quick
+    // back-to-back updates.
+    //
+    // Fix: use a flash-id token; the timeout only clears flash if the
+    // current id matches the one that scheduled it. Old timeouts that
+    // outlive their flash become no-ops.
+    //
+    // INVARIANT: every new value change must own its own token. A
+    // timeout that doesn't own the current token must not mutate state.
+    const flashIdRef = useRef(0);
     useEffect(() => {
       if (prev.current != null && value != null && value !== prev.current) {
+        const myId = ++flashIdRef.current;
         setFlash(value > prev.current ? "up" : "down");
-        const t = setTimeout(() => setFlash(null), 600);
+        const t = setTimeout(() => {
+          // Only clear if no newer flash has overwritten us.
+          if (flashIdRef.current === myId) setFlash(null);
+        }, 600);
         prev.current = value;
         return () => clearTimeout(t);
       }
