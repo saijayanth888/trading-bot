@@ -154,6 +154,7 @@
     llm_stats: "/api/ops/llm_stats",
     mcp: "/api/ops/mcp",
     risk_gates: "/api/ops/risk_gates",
+    sentiment: "/api/ops/sentiment",
     // stocks_sentiment endpoint removed 2026-05-11 — see ops_routes.py
     // comment. Shark Briefing card (data-num 13c) is the source of truth
     // for per-symbol stocks sentiment via Shark's analyst pipeline.

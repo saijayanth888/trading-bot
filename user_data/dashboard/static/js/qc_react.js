@@ -935,6 +935,322 @@
     );
   }
 
+  // === V3 Wave 1A primitives ===
+  const V3_HOLD_MS = 1500;
+  const V3_DRIFT_PX = 20;
+
+  function useHoldProgress(onComplete, enabled) {
+    const [holding, setHolding] = useState(0);
+    const raf = useRef(null);
+    const start = useRef(0);
+    const touchStart = useRef(null);
+
+    const up = useCallback(() => {
+      if (raf.current) cancelAnimationFrame(raf.current);
+      raf.current = null;
+      touchStart.current = null;
+      setHolding(0);
+    }, []);
+
+    const tick = useCallback((now) => {
+      const p = Math.min(1, (now - start.current) / V3_HOLD_MS);
+      setHolding(p * 100);
+      if (p >= 1) {
+        if (raf.current) cancelAnimationFrame(raf.current);
+        raf.current = null;
+        setHolding(0);
+        touchStart.current = null;
+        if (typeof onComplete === "function") onComplete();
+      } else {
+        raf.current = requestAnimationFrame(tick);
+      }
+    }, [onComplete]);
+
+    const down = useCallback((e) => {
+      if (enabled === false) return;
+      if (e && e.touches && e.touches[0]) {
+        touchStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      } else {
+        touchStart.current = null;
+      }
+      start.current = performance.now();
+      raf.current = requestAnimationFrame(tick);
+    }, [enabled, tick]);
+
+    const onPointerLeave = useCallback(() => up(), [up]);
+    const onPointerCancel = useCallback(() => up(), [up]);
+    const onTouchMove = useCallback((e) => {
+      if (!touchStart.current || !raf.current) return;
+      const t = e.touches && e.touches[0];
+      if (!t) return;
+      const dx = t.clientX - touchStart.current.x;
+      const dy = t.clientY - touchStart.current.y;
+      if ((dx * dx + dy * dy) > (V3_DRIFT_PX * V3_DRIFT_PX)) up();
+    }, [up]);
+
+    useEffect(() => () => {
+      if (raf.current) cancelAnimationFrame(raf.current);
+      raf.current = null;
+    }, []);
+
+    return { holding, down, up, onPointerLeave, onPointerCancel, onTouchMove };
+  }
+
+  function HoldToConfirmButton({
+    label,
+    className = "",
+    onHoldComplete,
+    disabled = false,
+    danger = false,
+    ariaLabel,
+    variant = "bar",
+  }) {
+    const completeRef = useRef(onHoldComplete);
+    completeRef.current = onHoldComplete;
+    const onDone = useCallback(() => {
+      if (completeRef.current) completeRef.current();
+    }, []);
+    const { holding, down, up, onPointerLeave, onPointerCancel, onTouchMove } = useHoldProgress(onDone, !disabled);
+
+    const sweepStyle = { ["--v3-hold-pct"]: String(holding) };
+
+    const btnClass = cls(
+      "kill-btn",
+      "v3-hold-confirm",
+      danger ? "v3-hold-confirm--danger" : "",
+      variant === "compact" ? "v3-hold-confirm--compact" : "",
+      className
+    );
+
+    return h(
+      "button",
+      {
+        type: "button",
+        className: btnClass,
+        style: sweepStyle,
+        disabled: !!disabled,
+        "aria-label": ariaLabel || label,
+        "aria-pressed": holding > 0 ? "true" : "false",
+        "data-no-hotkey": "1",
+        onMouseDown: down,
+        onMouseUp: up,
+        onMouseLeave: up,
+        onTouchStart: down,
+        onTouchEnd: up,
+        onTouchCancel: up,
+        onPointerLeave: onPointerLeave,
+        onPointerCancel: onPointerCancel,
+        onTouchMove: onTouchMove,
+        onContextMenu: (e) => e.preventDefault(),
+      },
+      h("span", { className: "v3-hold-sweep", "aria-hidden": "true" }),
+      h("span", { className: "v3-hold-label" }, holding > 5 && holding < 100 ? "HOLD…" : label)
+    );
+  }
+
+  function DDRibbon({ dayPct, haltPct, className = "" }) {
+    const halt = Number.isFinite(haltPct) && haltPct > 0 ? haltPct : 0.03;
+    const haltDisplay = halt * 100;
+    const warnDisplay = Math.min(1.5, haltDisplay * 0.5);
+    const maxScale = Math.max(8, haltDisplay * 2.67);
+    const pnl = Number(dayPct);
+    const mag = Number.isFinite(pnl) ? Math.max(0, Math.min(maxScale, Math.abs(pnl < 0 ? pnl : 0))) : 0;
+    const needleLeft = maxScale > 0 ? (mag / maxScale) * 100 : 0;
+    const flare = mag >= haltDisplay ? " v3-dd-ribbon--danger" : (mag >= warnDisplay ? " v3-dd-ribbon--warn" : "");
+    const label = Number.isFinite(pnl) ? (pnl.toFixed(2) + "%") : "—";
+
+    return h(
+      "div",
+      { className: cls("v3-dd-ribbon-wrap", className) },
+      h(
+        "div",
+        { className: "v3-dd-ribbon" + flare, role: "img", "aria-label": "Day P and L versus daily loss halt" },
+        h("div", {
+          className: "v3-dd-needle",
+          style: { left: needleLeft + "%" },
+        }),
+        h("div", { className: "v3-dd-ticks" },
+          h("span", { className: "v3-dd-tick v3-num", style: { left: "0%" } }, "0%"),
+          h("span", {
+            className: "v3-dd-tick v3-num",
+            style: { left: ((warnDisplay / maxScale) * 100) + "%" },
+          }, "−" + warnDisplay.toFixed(1) + "%"),
+          h("span", {
+            className: "v3-dd-tick v3-num",
+            style: { left: ((haltDisplay / maxScale) * 100) + "%" },
+          }, "−" + haltDisplay.toFixed(1) + "%"),
+          h("span", { className: "v3-dd-tick v3-num", style: { right: "0%" } }, "−" + maxScale.toFixed(0) + "%")
+        )
+      ),
+      h("div", { className: "v3-dd-needle-label mono v3-num" }, label)
+    );
+  }
+
+  function HeartbeatDot({ status = "ok", onClick, title }) {
+    const st = status === "warn" || status === "bad" ? status : "ok";
+    return h("button", {
+      type: "button",
+      className: cls("v3-heartbeat", "v3-heartbeat--" + st),
+      onClick: onClick || undefined,
+      title: title || "System health · click for service probes",
+      "aria-label": title || ("System health " + st),
+    });
+  }
+
+  function KillBar({
+    killState,
+    setKillState,
+    forceOpen = false,
+    onPause,
+    onFlatten,
+    onKill,
+    onResume,
+    resumeDisabled,
+  }) {
+    const [hoverOpen, setHoverOpen] = useState(false);
+    const [kbdOpen, setKbdOpen] = useState(false);
+    const [receipt, setReceipt] = useState("");
+    const expanded = !!(forceOpen || hoverOpen || kbdOpen);
+
+    useEffect(() => {
+      const onKey = (e) => {
+        if (e.metaKey && e.shiftKey && String(e.key).toLowerCase() === "k") {
+          e.preventDefault();
+          setKbdOpen((v) => !v);
+        }
+      };
+      document.addEventListener("keydown", onKey);
+      return () => document.removeEventListener("keydown", onKey);
+    }, []);
+
+    useEffect(() => {
+      const onMove = (ev) => {
+        const y = ev.clientY;
+        const hh = window.innerHeight;
+        setHoverOpen(y >= hh - 80);
+      };
+      const onLeave = () => setHoverOpen(false);
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("blur", onLeave);
+      return () => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("blur", onLeave);
+      };
+    }, []);
+
+    useEffect(() => {
+      if (!receipt) return;
+      const t = setTimeout(() => setReceipt(""), 3000);
+      return () => clearTimeout(t);
+    }, [receipt]);
+
+    const showReceipt = (msg) => setReceipt(msg || "");
+
+    return h(
+      "div",
+      { className: cls("v3-kill-bar-zone", expanded ? "v3-kill-bar-zone--open" : "") },
+      h("div", { className: "v3-kill-bar-strip", "aria-hidden": "true" }),
+      h(
+        "div",
+        { className: "v3-kill-bar-drawer" },
+        h("div", { className: "v3-kill-bar-head mono" },
+          h("span", { className: "v3-kill-bar-warn" }, "⚠ DESTRUCTIVE"),
+          h("span", { className: "dim", style: { marginLeft: "auto" } }, "hold to confirm · 1500ms · ⌘⇧K")
+        ),
+        receipt
+          ? h("div", { className: "v3-kill-bar-receipt mono" }, receipt)
+          : null,
+        h(
+          "div",
+          { className: "v3-kill-bar-actions" },
+          h(HoldToConfirmButton, {
+            label: "PAUSE all entries",
+            ariaLabel: "Pause all entries, hold to confirm",
+            variant: "compact",
+            onHoldComplete: () => {
+              if (onPause) {
+                Promise.resolve(onPause()).then((m) => showReceipt(m || "PAUSE sent")).catch(() => showReceipt("PAUSE request failed"));
+              } else showReceipt("PAUSE sent");
+            },
+          }),
+          h(HoldToConfirmButton, {
+            label: "FLATTEN open positions",
+            ariaLabel: "Flatten open positions, hold to confirm",
+            danger: true,
+            variant: "compact",
+            onHoldComplete: () => {
+              if (onFlatten) {
+                Promise.resolve(onFlatten()).then((m) => showReceipt(m || "FLATTEN issued")).catch(() => showReceipt("FLATTEN request failed"));
+              } else showReceipt("FLATTEN issued");
+            },
+          }),
+          h(HoldToConfirmButton, {
+            label: "KILL everything",
+            ariaLabel: "Kill switch, hold to confirm",
+            danger: true,
+            variant: "compact",
+            disabled: killState === "killed",
+            onHoldComplete: () => {
+              if (onKill) onKill();
+              else if (setKillState) setKillState("killed");
+              showReceipt("KILL · halt requested");
+            },
+          }),
+          h(HoldToConfirmButton, {
+            label: "RESUME after review",
+            ariaLabel: "Resume after manual review, hold to confirm",
+            variant: "compact",
+            disabled: !!resumeDisabled,
+            onHoldComplete: () => {
+              if (onResume) {
+                Promise.resolve(onResume()).then((m) => showReceipt(m || "RESUME sent")).catch(() => showReceipt("RESUME failed"));
+              } else if (setKillState) {
+                setKillState("normal");
+                showReceipt("RESUME sent");
+              }
+            },
+          })
+        )
+      )
+    );
+  }
+
+  function deriveHeartbeatStatus({ services, circuitBreakers, mode, weeklyTraining, ollamaHealth, killState }) {
+    if (killState === "killed") return "bad";
+    const svcData = (services && services.data) || services || {};
+    const keys = Object.keys(svcData);
+    let down = 0;
+    let up = 0;
+    for (let i = 0; i < keys.length; i++) {
+      const row = svcData[keys[i]];
+      if (row && typeof row === "object") {
+        if (row.up === true) up++;
+        else if (row.up === false) down++;
+      }
+    }
+    if (down > 0) return "bad";
+
+    const cb = (circuitBreakers && circuitBreakers.data) || circuitBreakers || {};
+    const summ = cb.summary || {};
+    if (summ.open > 0 || summ.half_open > 0) return "bad";
+
+    const m = (mode && mode.data) || mode || {};
+    const st = String(m.state || "").toLowerCase();
+    if (st && st !== "running" && st !== "reload_config" && st !== "starting" && st !== "init") return "bad";
+
+    if (weeklyTraining && String(weeklyTraining.status || "").toLowerCase() === "degraded") return "warn";
+
+    const oh = (ollamaHealth && ollamaHealth.data) || ollamaHealth || {};
+    const p95s = oh.p95_latency_s;
+    const p95ms = oh.last_probe_latency_s != null ? oh.last_probe_latency_s * 1000 : (oh.latency_ms != null ? oh.latency_ms : null);
+    const p95 = p95s != null ? p95s * 1000 : p95ms;
+    if (typeof p95 === "number" && p95 > 30000) return "warn";
+
+    if (keys.length && up === keys.length) return "ok";
+    return "warn";
+  }
+
+
   // ─────────────── NavIcon (private helper for Sidebar) ───────────────
   function NavIcon({ kind }) {
     const m = {
@@ -984,7 +1300,8 @@
   // component must NOT issue duplicate fetches for those endpoints. Future
   // edits: do not re-introduce parallel fetch sites here.
   function Topbar({ killState, setKillState, active, density, onRefreshIntervalChange, onRefreshNow,
-                    combinedPortfolio, mode: modeProp, services: servicesProp }) {
+                    combinedPortfolio, mode: modeProp, services: servicesProp,
+                    heartbeatStatus, onHeartbeatClick }) {
     const [clock, setClock] = useState(fmtClock());
     // Real uptime — poll /api/ops/uptime every 30s for freqtrade's actual
     // start time. Earlier this was page-load time, which made the pill
@@ -1143,13 +1460,23 @@
       }
       return ftUpLocal;
     })();
+    const hb = heartbeatStatus === "warn" || heartbeatStatus === "bad" ? heartbeatStatus : "ok";
     return h(
       "header",
       { className: "topbar" },
       h(
         "div",
         { className: "brand" },
-        h("div", { className: "brand-mark" }, "Q"),
+        h(
+          "div",
+          { className: "v3-brand-stack" },
+          h(HeartbeatDot, {
+            status: hb,
+            onClick: onHeartbeatClick,
+            title: "System health · click for service probes",
+          }),
+          h("div", { className: "brand-mark" }, "Q")
+        ),
         h(
           "span",
           { className: "brand-text" },
@@ -1283,14 +1610,7 @@
           },
           "↻"
         )
-      ),
-      h("div", { className: "tb-divider" }),
-      h(KillSwitch, {
-        state: killState,
-        onArm: () => setKillState && setKillState("armed"),
-        onKill: () => setKillState && setKillState("killed"),
-        onResume: () => setKillState && setKillState("normal"),
-      })
+      )
     );
   }
 
@@ -1518,5 +1838,6 @@
     NumberRoll, Sparkline, CandleChart, IndicatorSubchart, RegimeRibbon, StatusRow,
     GateBadge, KillSwitch, Topbar, Sidebar, Card, LiveTicker,
     ProgressBar, TimeSince,
+    HoldToConfirmButton, DDRibbon, HeartbeatDot, KillBar, deriveHeartbeatStatus,
   });
 })();
