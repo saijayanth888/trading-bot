@@ -79,11 +79,23 @@ For HANDOFF.md          → drop (worktree-local artifact)
 For per-module init     → keep whichever has more content
 ```
 
-### Item 3: Frontend branch name collision
+### Item 3: Frontend branch name collision — CORRECTED MAP
 
-`feat/v4-wave2-frontend` was taken by some other agent's empty branch BEFORE agent K ran. K landed its actual frontend work on `feat/v4-wave2-quality` (the original quality engineer's branch name — that agent renamed to `feat/v4-wave2-quality-F-report`).
+Verified branch ground truth:
 
-So when merging frontend, pull from `feat/v4-wave2-quality` (the K commits — `e52feb3` + `b1f4b88` + `3f5c252`), NOT from `feat/v4-wave2-frontend`.
+| Branch | Contents | Notes |
+|---|---|---|
+| `feat/v4-wave2-frontend-v2` | **frontend-v4/ 55 files** + integration into v4_routes.py + K's collision note + this MORNING-STATE | **← merge frontend from here (most complete)** |
+| `feat/v4-wave2-quality` | Same frontend, 55 files, but missing the `3f5c252` collision-note commit | Subset of frontend-v2 |
+| `feat/v4-wave2-quality-F-report` | **Quality report only** (`QUALITY-REPORT-WAVE-2.md`) — no frontend code | ← merge for the quality matrix |
+| `feat/v4-wave2-frontend` | Empty / same as main | DO NOT USE |
+
+**Merge recipe**:
+```bash
+git merge --no-ff feat/v4-wave2-frontend-v2        # gets frontend-v4/ + v4_routes.py + app.py mount
+# (skip feat/v4-wave2-quality — it's a subset of v2)
+git merge --no-ff feat/v4-wave2-quality-F-report   # just the QA matrix doc; no code conflicts
+```
 
 ---
 
@@ -99,12 +111,13 @@ git checkout feat/v4-build-reconciled
 # 3. confirm frontend source = feat/v4-wave2-quality
 
 # Merge order recommended by agent L:
-git merge --no-ff feat/v4-wave2-ledger        # foundation for others
+git merge --no-ff feat/v4-wave2-ledger              # foundation for others
 git merge --no-ff feat/v4-wave2-hermes
 git merge --no-ff feat/v4-wave2-agents
 git merge --no-ff feat/v4-wave2-backtest
-git merge --no-ff feat/v4-wave2-quality       # ← contains frontend-v4
-git merge --no-ff feat/v4-wave2-integration   # last (depends on the above)
+git merge --no-ff feat/v4-wave2-frontend-v2         # ← contains frontend-v4 + v4_routes.py
+git merge --no-ff feat/v4-wave2-quality-F-report    # ← QA matrix doc
+git merge --no-ff feat/v4-wave2-integration         # last (depends on the above)
 
 # Final test sweep — expect 907 passing (2 GPU-skipped)
 pytest src/quanta_core/ tests/ -v
