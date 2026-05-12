@@ -3243,16 +3243,22 @@
     const ariaLabel = empty
       ? role + " — no calls in 24h window"
       : role + " — " + detail.count + " calls, last " + ageLabel;
+    const boxRef = useRef(null);
+    // Tier E: inline "last:" preview line uses last_response_gist (added
+    // server-side in commit 6528a7f). Falls back to last_gist for compat
+    // with any older payload shape still in cache. Empty when no calls.
+    const lastGist = detail && (detail.last_response_gist || detail.last_gist);
     return h("div", {
+      ref: boxRef,
       className: cls,
       role: "button",
       tabIndex: 0,
       "aria-label": ariaLabel,
-      onClick: () => onClick(role, detail),
+      onClick: () => onClick(role, detail, boxRef.current),
       onKeyDown: (e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
-          onClick(role, detail);
+          onClick(role, detail, boxRef.current);
         }
       },
     },
@@ -3275,7 +3281,16 @@
             "avg ", (detail.avg_latency_s || 0).toFixed(1), "s · p95 ",
             (detail.p95_latency_s || 0).toFixed(1), "s"),
       h("div", { className: "af-gist", title: detail && detail.last_gist || "" },
-        empty ? "no calls today" : (detail.last_gist || "—"))
+        empty ? "no calls today" : (detail.last_gist || "—")),
+      // Tier E: inline "last:" preview row — render-skipped entirely when
+      // the role has no calls, so empty boxes don't gain a stray "last: -".
+      !empty && lastGist && h("div", {
+        className: "af-last",
+        title: lastGist,
+      },
+        h("span", { className: "af-last-key" }, "last:"),
+        '"', _aldTrim(lastGist, 60), '"'
+      )
     );
   }
 
@@ -3323,11 +3338,32 @@
       return () => clearInterval(iv);
     }, []);
 
-    const click = useCallback((role, detail) => {
-      // Fire a custom event the LLMCallsLive component listens for. We
-      // pass the role + raw agent names so the listener can pick the
-      // newest matching row in the unfiltered list. Decoupled from the
-      // component so existing LLMCallsLive doesn't need a refactor.
+    const click = useCallback((role, detail, originEl) => {
+      // Tier E: prefer the AgentLogsDrawer. If the operator opted out
+      // via ``localStorage["quanta.agent_logs_drawer"] === "0"``, fall
+      // back to the Tier-D scroll-and-pulse path on the activity list.
+      let useDrawer = true;
+      try {
+        if (localStorage.getItem("quanta.agent_logs_drawer") === "0") {
+          useDrawer = false;
+        }
+      } catch (_e) { /* localStorage may be unavailable */ }
+
+      if (useDrawer) {
+        const evt = new CustomEvent("quanta:agent-logs-open", {
+          detail: {
+            role,
+            model: detail && detail.model || null,
+            detail: detail || null,
+            originEl: originEl || null,
+          },
+        });
+        window.dispatchEvent(evt);
+        return;
+      }
+
+      // Fallback (Tier-D behavior). Fires the existing pick event so the
+      // LLMCallsLive component scrolls + pulses the matching row.
       const evt = new CustomEvent("quanta:agent-flow-pick", {
         detail: {
           role,
@@ -4317,7 +4353,12 @@
           // consume the same /api/ops/llm_calls response; no extra poll.
           h("div", { id: "llm-calls", className: "anchor", style: { gridColumn: "span 12" } },
             h(AgentFlow, { data }),
-            h(LLMCallsLive, { data })
+            h(LLMCallsLive, { data }),
+            // Tier E: AgentLogsDrawer renders via React portal to
+            // document.body, so its position in the tree is irrelevant
+            // for layout. Mounted here so its lifecycle is tied to the
+            // same LLM-activity section.
+            h(AgentLogsDrawer)
           ),
           // AGENT TIMELINE + RESEARCH FEED
           h("div", { id: "agent", className: "grid g-12 anchor", style: { gap: "var(--gap-grid)" } },
