@@ -4144,6 +4144,7 @@ def _summarise_llm_window(calls: list[dict]) -> dict[str, Any]:
         slot = role_acc.setdefault(role, {
             "count": 0, "success": 0, "fail": 0,
             "latencies": [],
+            "completion_tokens": [],
             "last_ts": None, "last_success": True,
             "last_gist": None, "last_agent": None,
             "models": {}, "raw_agents": {},
@@ -4154,6 +4155,7 @@ def _summarise_llm_window(calls: list[dict]) -> dict[str, Any]:
         else:
             slot["fail"] += 1
         slot["latencies"].append(float(c.get("latency_seconds") or 0))
+        slot["completion_tokens"].append(int(c.get("completion_tokens") or 0))
         slot["models"][m] = slot["models"].get(m, 0) + 1
         slot["raw_agents"][agent] = slot["raw_agents"].get(agent, 0) + 1
         # The tail-reader returns newest-first, so the FIRST record we see
@@ -4188,16 +4190,25 @@ def _summarise_llm_window(calls: list[dict]) -> dict[str, Any]:
         avg_r = sum(lats) / len(lats) if lats else 0.0
         ls = sorted(lats)
         p95_r = ls[max(0, int(0.95 * len(ls)) - 1)] if ls else 0.0
+        toks = slot["completion_tokens"]
+        avg_tok = (sum(toks) / len(toks)) if toks else 0.0
         top_model = max(slot["models"].items(), key=lambda kv: kv[1])[0] if slot["models"] else "?"
+        # ``last_gist`` keeps the legacy field name (mirrors what AgentFlow
+        # already reads) but Tier E also wants a copy under
+        # ``last_response_gist`` for the inline preview line in each agent
+        # box. Same value — two keys keeps both call-sites happy without a
+        # rename migration on the existing AgentFlow strip.
         by_role_detail[role] = {
             "count": slot["count"],
             "success": slot["success"],
             "fail": slot["fail"],
             "avg_latency_s": round(avg_r, 2),
             "p95_latency_s": round(p95_r, 2),
+            "tokens_avg": round(avg_tok, 1),
             "last_ts": slot["last_ts"],
             "last_success": slot["last_success"],
             "last_gist": slot["last_gist"],
+            "last_response_gist": slot["last_gist"],
             "last_agent": slot["last_agent"],
             "model": top_model,
             "raw_agents": dict(sorted(slot["raw_agents"].items(), key=lambda kv: -kv[1])),
@@ -4232,6 +4243,7 @@ async def llm_calls(
     model: str | None = None,
     min_latency: float | None = None,
     max_latency: float | None = None,
+    role: str | None = None,
 ):
     """LLM activity feed — paginated list of recent LLM calls.
 
@@ -4248,6 +4260,12 @@ async def llm_calls(
                     response (tiny payload). 1 → keep them.
     min_latency   : seconds; reject calls faster than this
     max_latency   : seconds; reject calls slower than this
+    role          : canonical AgentFlow role (regime_tagger, bull_debater,
+                    bear_debater, arbiter, reflector, indicator_selector).
+                    Filters records whose raw agent name maps to that
+                    canonical role via ``_canonical_role()``. Used by the
+                    Tier-E AgentLogsDrawer to fetch the last N calls for
+                    one specific pipeline stage with FULL prompt/response.
 
     Response: ``{status, data, error, checked_at}`` where ``data`` is::
 
@@ -4298,12 +4316,20 @@ async def llm_calls(
         except _llm_re.error as exc:
             return _envelope("down", data=None, error=f"bad regex: {exc}")
 
+    # Canonical role filter — separate from substring ``agent`` filter
+    # because the canonical role is a logical grouping (multiple raw agent
+    # names map to one role).
+    role_norm = (role or "").strip().lower() or None
+
     filtered: list[dict] = []
     for rec in tail_records:
         if agent and agent.lower() not in str(rec.get("agent", "")).lower():
             continue
         if model and model.lower() not in str(rec.get("model", "")).lower():
             continue
+        if role_norm is not None:
+            if _canonical_role(rec.get("agent")) != role_norm:
+                continue
         if min_latency is not None and float(rec.get("latency_seconds") or 0) < float(min_latency):
             continue
         if max_latency is not None and float(rec.get("latency_seconds") or 0) > float(max_latency):

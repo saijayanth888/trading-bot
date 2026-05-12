@@ -863,6 +863,291 @@ table.t .row-strike td { color: var(--fg-3); }
 }
 .af-pulse-row { animation: pulse-row 800ms var(--ease) 1; }
 
+/* ── AgentFlow inline "last:" preview line (Tier E) ───────────────────
+   Sits as the LAST child of an .af-box, below the existing .af-gist /
+   latency block, showing one truncated copy of the most recent response.
+   Render-skipped entirely when there are no calls today — empty box
+   stays its existing height. */
+.af-box .af-last {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 4px;
+  border-top: 1px solid var(--line-1);
+  padding-top: 4px;
+}
+.af-box .af-last .af-last-key { color: var(--fg-4); margin-right: 4px; }
+
+/* ── AgentLogsDrawer — slide-in panel from the right (Tier E) ─────────
+   Replaces (with opt-out fallback) the Tier-D scroll-and-pulse behavior
+   when an agent box is clicked. Mounts to document.body via React
+   portal, NOT inside the AgentFlow strip, so the strip layout never
+   reflows. Z-index above topbar (which is 30) but below modal layer
+   (which is 100 in LLMCallModal). */
+.ald-backdrop {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,.35);
+  z-index: 80;
+  opacity: 0;
+  transition: opacity 180ms cubic-bezier(.2,0,0,1);
+  pointer-events: none;
+}
+.ald-backdrop.is-open {
+  opacity: 1;
+  pointer-events: auto;
+}
+.ald-drawer {
+  position: fixed; top: 0; right: 0; bottom: 0;
+  width: 480px; max-width: 90vw;
+  background: var(--bg-card);
+  border-left: 1px solid var(--line-3);
+  z-index: 81;
+  display: flex; flex-direction: column;
+  transform: translateX(100%);
+  transition: transform 180ms cubic-bezier(.2,0,0,1);
+  font-family: var(--mono);
+  outline: none;
+}
+.ald-drawer.is-open { transform: translateX(0); }
+@media (max-width: 720px) {
+  .ald-drawer { width: 90vw; }
+}
+
+.ald-head {
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line-2);
+  background: var(--bg-card);
+}
+.ald-head .ald-title {
+  font-size: var(--t-xs);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--fg-1);
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ald-head .ald-close {
+  background: transparent;
+  border: 1px solid var(--line-2);
+  color: var(--fg-2);
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  width: 26px; height: 26px;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  padding: 0;
+}
+.ald-head .ald-close:hover { background: var(--bg-card-2); color: var(--fg-1); }
+.ald-head .ald-close:focus-visible {
+  outline: 1px solid var(--info-line);
+  outline-offset: 1px;
+}
+
+.ald-aggregate {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line-1);
+  font-size: var(--t-2xs);
+  color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.6;
+}
+.ald-aggregate .agg-ok   { color: var(--up); }
+.ald-aggregate .agg-bad  { color: var(--down); }
+.ald-aggregate .agg-sep  { color: var(--fg-4); margin: 0 6px; }
+.ald-aggregate .agg-empty { color: var(--fg-3); font-style: normal; }
+
+.ald-toolbar {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line-1);
+  flex-wrap: wrap;
+}
+.ald-chip {
+  background: transparent;
+  border: 1px solid var(--line-2);
+  color: var(--fg-2);
+  font-family: var(--mono);
+  font-size: var(--t-2xs);
+  letter-spacing: .04em;
+  padding: 3px 8px;
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  line-height: 1.4;
+}
+.ald-chip:hover { background: var(--bg-card-2); color: var(--fg-1); }
+.ald-chip.is-active {
+  background: var(--info-bg);
+  border-color: var(--info-line);
+  color: var(--fg-1);
+}
+.ald-chip:focus-visible {
+  outline: 1px solid var(--info-line);
+  outline-offset: 1px;
+}
+
+.ald-search {
+  flex: 1;
+  min-width: 140px;
+  background: var(--bg-inset);
+  border: 1px solid var(--line-2);
+  color: var(--fg-1);
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  padding: 4px 8px;
+  border-radius: var(--r-sm);
+  outline: none;
+}
+.ald-search:focus { border-color: var(--info-line); }
+
+.ald-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 12px 16px;
+  scrollbar-width: thin;
+}
+.ald-body::-webkit-scrollbar { width: 6px; }
+.ald-body::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: var(--r-sm); }
+.ald-body::-webkit-scrollbar-track { background: transparent; }
+
+.ald-loading,
+.ald-error,
+.ald-empty {
+  padding: 16px 4px;
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+}
+.ald-error { color: var(--down); }
+.ald-error button {
+  margin-left: 8px;
+  background: transparent;
+  border: 1px solid var(--down-line);
+  color: var(--down);
+  font-family: var(--mono);
+  font-size: var(--t-2xs);
+  padding: 2px 8px;
+  cursor: pointer;
+  border-radius: var(--r-sm);
+}
+
+.ald-entry {
+  border: 1px solid var(--line-1);
+  border-radius: var(--r-sm);
+  margin-bottom: 6px;
+  padding: 6px 8px;
+  font-size: var(--t-2xs);
+  color: var(--fg-2);
+  background: var(--bg-card);
+}
+.ald-entry.is-fail { border-color: var(--down-line); }
+.ald-entry .ald-entry-head {
+  display: flex; align-items: center; gap: 8px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-2);
+}
+.ald-entry .ald-entry-head .ald-time { color: var(--fg-3); }
+.ald-entry .ald-entry-head .ald-model { color: var(--fg-2); }
+.ald-entry .ald-entry-head .ald-status-ok  { color: var(--up); }
+.ald-entry .ald-entry-head .ald-status-bad { color: var(--down); }
+.ald-entry .ald-entry-head .ald-lat { color: var(--fg-2); }
+.ald-entry .ald-entry-head .ald-tok { color: var(--fg-3); }
+.ald-entry .ald-slow {
+  background: var(--warn-bg, transparent);
+  border: 1px solid var(--warn-line);
+  color: var(--warn);
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: var(--r-sm);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.ald-line {
+  display: flex; align-items: flex-start; gap: 6px;
+  margin-top: 4px;
+  font-size: var(--t-2xs);
+  color: var(--fg-2);
+}
+.ald-line .ald-caret {
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  color: var(--fg-3);
+  font-family: var(--mono);
+  font-size: var(--t-2xs);
+  padding: 0;
+  line-height: 1.4;
+  min-width: 12px;
+  outline: none;
+}
+.ald-line .ald-caret:focus-visible { color: var(--fg-1); }
+.ald-line .ald-label {
+  color: var(--fg-3);
+  text-transform: lowercase;
+}
+.ald-line .ald-snippet {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  color: var(--fg-2);
+}
+.ald-line .ald-snippet:hover { color: var(--fg-1); }
+.ald-line .ald-copy {
+  background: transparent;
+  border: 1px solid var(--line-2);
+  color: var(--fg-3);
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 0 5px;
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  transition: border-color 200ms var(--ease), color 200ms var(--ease);
+  line-height: 1.4;
+}
+.ald-line .ald-copy:hover { color: var(--fg-1); }
+.ald-line .ald-copy.is-flashed {
+  border-color: var(--up-line);
+  color: var(--up);
+}
+.ald-pre {
+  display: block;
+  background: var(--bg-inset);
+  border: 1px solid var(--line-1);
+  border-radius: var(--r-sm);
+  padding: 6px 8px;
+  margin: 4px 0 0 18px;
+  font-family: var(--mono);
+  font-size: var(--t-2xs);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 400px;
+  overflow: auto;
+  line-height: 1.5;
+  color: var(--fg-1);
+}
+
+.ald-show-more {
+  display: block;
+  width: 100%;
+  background: transparent;
+  border: 1px solid var(--line-2);
+  color: var(--fg-2);
+  font-family: var(--mono);
+  font-size: var(--t-2xs);
+  padding: 6px 8px;
+  margin-top: 6px;
+  cursor: pointer;
+  border-radius: var(--r-sm);
+}
+.ald-show-more:hover { background: var(--bg-card-2); color: var(--fg-1); }
+
 /* responsive guard */
 @media (max-width: 1200px) {
   .app { grid-template-columns: 64px 1fr; }
