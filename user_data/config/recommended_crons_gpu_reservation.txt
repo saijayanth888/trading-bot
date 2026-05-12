@@ -1,0 +1,20 @@
+# Recommended crontab entries for the GPU reservation system (Phase 1).
+#
+# These are NOT auto-installed. Operator runs `crontab -e` and pastes the two
+# lines below. The TZ= prefix tells cron to interpret hour/minute fields in
+# the named timezone (Vixie cron / glibc supports this).
+#
+# To verify after install:
+#   crontab -l | grep gpu_
+#
+# Schedule rationale (matches ~/.hermes/config/gpu_reservation.yaml):
+#   Reservation: Sunday 14:00 EST  (LoRA training window)
+#   Duration:    4 hours           (14:00-18:00 EST)
+#   Pre-drain:   5 minutes         (yield at 13:55 EST)
+#   Grace:       30 minutes        (resume at 18:30 EST)
+
+# Pre-drain at Sunday 13:55 EST (5 min before reservation)
+55 13 * * 0 TZ=America/New_York /home/saijayanthai/.hermes/scripts/gpu_yield_now.sh >> /home/saijayanthai/.hermes/logs/gpu_gate.log 2>&1
+
+# Resume at Sunday 18:30 EST (4h + 30min grace)
+30 18 * * 0 TZ=America/New_York /home/saijayanthai/.hermes/scripts/gpu_resume.sh >> /home/saijayanthai/.hermes/logs/gpu_gate.log 2>&1
