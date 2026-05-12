@@ -226,9 +226,15 @@ class Guardrails:
         Returns:
             (True, ok_msg) or (False, fail_msg).
         """
+        # Asset-class gate (Shark/Wheel isolation, 2026-05-12 leak):
+        # Wheel-owned options/shares share the same Alpaca account; counting
+        # them toward Shark's per-sector concentration cap is wrong (Shark
+        # didn't open them, can't close them, and shouldn't be blocked from
+        # opening new equity positions because Wheel is rolling CSPs).
         same_sector_count = sum(
             1 for p in positions
-            if p.get("sector", "").lower() == sector.lower()
+            if p.get("asset_class", "us_equity") == "us_equity"
+            and p.get("sector", "").lower() == sector.lower()
         )
 
         new_count = same_sector_count + 1
@@ -360,7 +366,15 @@ class Guardrails:
         qty = int(proposed_trade.get("qty", 0))
         sector = proposed_trade.get("sector", "Unknown")
         positions = account.get("positions", [])
-        current_count = len(positions)
+        # Asset-class gate (Shark/Wheel isolation, 2026-05-12 leak):
+        # Only count Shark-managed equity rows toward the max-positions cap.
+        # Wheel options/assigned shares live on the same account but are not
+        # Shark's concern; counting them would over-block new equity entries.
+        equity_positions = [
+            p for p in positions
+            if p.get("asset_class", "us_equity") == "us_equity"
+        ]
+        current_count = len(equity_positions)
 
         cash_after = cash - estimated_cost
         macro_multiplier = 1.0
@@ -387,7 +401,7 @@ class Guardrails:
 
         # --- ADVANCED CHECKS ---
 
-        passed, msg = self.check_sector_concentration(sector, positions)
+        passed, msg = self.check_sector_concentration(sector, equity_positions)
         checks["sector_concentration"] = {"passed": passed, "message": msg}
 
         passed, msg = self.check_regime_gate(regime)
