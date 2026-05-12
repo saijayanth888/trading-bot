@@ -27,6 +27,8 @@ dependencies = [
     "safetensors>=0.4",
     "alpaca-py>=0.43.0",
     "coinbase-advanced-py>=1.8.0",
+    "numpy>=1.26",
+    "pandas>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -127,6 +129,7 @@ markers = [
     "integration: tests that require a real Postgres",
     "anyio: anyio-driven async test (used by live/)",
     "vcr: marks tests that replay cassettes (no network)",
+    "gpu: requires CuPy/PyTorch with a CUDA device (skipped by default)",
 ]
 
 # ---------------------------------------------------------------------------
