@@ -206,7 +206,7 @@ type-checked or linted by these gates.
 
 ## 6. Commit shas
 
-(filled in by the commit step — see `git log feat/v4-build-live`)
+- `1d90f64` feat(v4-build-live): scaffold live module — engine + tick aggregator + dispatcher + reconciler
 
 ---
 
