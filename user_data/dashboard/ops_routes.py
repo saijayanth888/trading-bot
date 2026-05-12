@@ -339,6 +339,25 @@ def _training_health_payload(identifier: str = "tft_v1") -> dict[str, Any]:
     from freqaimodels import tft_pickle as _save_mod
     scan = _save_mod.scan_pair_dictionary_for_quarantine(identifier)
 
+    # Read strategy_overrides.tft_blind_fallback so the dashboard can
+    # show whether the operator has opted in. We surface BOTH the
+    # per-pair eligibility (status != ok OR stale) AND the global
+    # enabled flag so the chip in the UI can disambiguate:
+    #   - eligible & enabled  → fallback path is RUNNING for that pair
+    #   - eligible & disabled → pair is DARK (no signal)
+    blind_enabled = False
+    blind_multiplier = 0.5
+    try:
+        with open(CONFIG_PATH) as _fp:
+            _cfg = json.load(_fp)
+        _so = (_cfg.get("strategy_overrides", {}) or {})
+        _block = (_so.get("tft_blind_fallback", {}) or {})
+        blind_enabled = bool(_block.get("enabled", False))
+        blind_multiplier = float(_block.get("position_size_multiplier", 0.5))
+    except Exception:    # noqa: BLE001
+        # Config-read failures are non-fatal — fall back to eligibility only.
+        pass
+
     now = datetime.now(timezone.utc)
     rows: list[dict[str, Any]] = []
     for pair, info in sorted(scan.items()):
@@ -376,6 +395,14 @@ def _training_health_payload(identifier: str = "tft_v1") -> dict[str, Any]:
         if stale:
             status = "stale"
 
+        # TFT-blind fallback eligibility — the pair would be running on
+        # the BollingerRSI MR signal at degraded sizing right now IF the
+        # operator has flipped strategy_overrides.tft_blind_fallback to
+        # enabled=true. "Eligible" = the TFT path is unavailable for this
+        # pair (quarantine status OR > 72h stale).
+        blind_eligible = status in ("stub", "missing", "error", "stale")
+        blind_active = bool(blind_eligible and blind_enabled)
+
         rows.append({
             "pair": pair,
             "status": status,
@@ -388,6 +415,9 @@ def _training_health_payload(identifier: str = "tft_v1") -> dict[str, Any]:
             "tensor_blobs": validate_info.get("tensor_blobs") or 0,
             "age_hours": age_hours,
             "stale": stale,
+            # Fix 6: TFT-blind fallback indicators.
+            "tft_blind_eligible": blind_eligible,
+            "tft_blind_active": blind_active,
         })
 
     counts = {"ok": 0, "stub": 0, "missing": 0, "stale": 0, "error": 0}
@@ -399,6 +429,15 @@ def _training_health_payload(identifier: str = "tft_v1") -> dict[str, Any]:
         "stale_hours_threshold": TRAINING_HEALTH_STALE_HOURS,
         "counts": counts,
         "pairs": rows,
+        # Fix 6: surface the global fallback config so the UI can render
+        # the correct chip text (ACTIVE vs DARK) for each eligible row
+        # and emit a banner when fallback is enabled.
+        "tft_blind_fallback": {
+            "enabled": blind_enabled,
+            "position_size_multiplier": blind_multiplier,
+            "eligible_count": sum(1 for r in rows if r["tft_blind_eligible"]),
+            "active_count": sum(1 for r in rows if r["tft_blind_active"]),
+        },
     }
 
 
