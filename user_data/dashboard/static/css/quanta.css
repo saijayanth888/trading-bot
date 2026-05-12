@@ -156,6 +156,7 @@ button { font-family: inherit; }
 .up   { color: var(--up); }
 .down { color: var(--down); }
 .warn { color: var(--warn); }
+.warn-strong { color: var(--warn); font-weight: 600; }
 .accent{color: var(--accent); }
 .info { color: var(--info); }
 .uppercase { text-transform: uppercase; letter-spacing: .08em; }
