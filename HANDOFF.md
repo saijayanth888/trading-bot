@@ -181,9 +181,13 @@ These are flagged in the source via inline comments rather than blocked:
 
 ## 10 · Files & commits
 
-- Branch: `feat/v4-wave2-hermes`
-- Commit `340d0eb`: *Wave-2 Hermes: 7 Layer-8 modules + tests + pyproject*
-- No subsequent commits — single-commit landing.
+Branch: `feat/v4-wave2-hermes` (3 commits, oldest → newest):
+
+| SHA | Message |
+|---|---|
+| `340d0eb` | Wave-2 Hermes: 7 Layer-8 modules + tests + pyproject |
+| `2163459` | HANDOFF.md: smoke-test exit-code matrix + module + commit summary |
+| `7368335` | ruff: fix import order in reflector.py |
 
 ## 11 · Pre-merge checklist (operator review)
 
