@@ -72,6 +72,35 @@ _CONFIG_JSON = _REPO_ROOT / "user_data" / "config.json"
 
 
 # ---------------------------------------------------------------------------
+# Risk gates — operator-editable thresholds (stage/10-risk-gates-yaml)
+# ---------------------------------------------------------------------------
+#
+# These were hard-coded constants. They now live in config.json:risk_gates so
+# the operator can edit them via the dashboard's /api/ops/risk_gates endpoint
+# (or directly in config.json) without a code change.
+#
+# The defaults below MUST match the operator-approved 2026-05-11 set and are
+# also what we fall back to when:
+#   - config.json is missing entirely (cold start)
+#   - the risk_gates block is absent from config.json (rollback)
+#   - an individual key is missing from the block (partial config)
+#
+# Override priority (highest first):
+#   1. Per-key value in config.json:risk_gates
+#   2. _RISK_GATE_DEFAULTS (this file)
+
+_RISK_GATE_DEFAULTS = {
+    "daily_loss_halt_pct":        0.03,
+    "weekly_loss_size_cut_pct":   0.05,
+    "weekly_loss_size_factor":    0.5,
+    "single_name_cap_pct":        0.10,
+    "correlation_cap":            0.85,
+    "vix_high_multiplier":        2.0,
+    "vix_high_min_size_factor":   0.25,
+}
+
+
+# ---------------------------------------------------------------------------
 # Data-source helpers
 # ---------------------------------------------------------------------------
 
@@ -84,6 +113,53 @@ def _load_json(path: Path) -> Optional[dict]:
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning("unified_risk: failed to read %s: %s", path, exc)
         return None
+
+
+def _load_risk_gates() -> dict:
+    """Return the merged risk_gates: defaults overlaid with config.json values.
+
+    Backward-compat: if the ``risk_gates`` block is absent the defaults are
+    returned unchanged. Missing individual keys also fall back to defaults
+    silently. Non-numeric or out-of-band values are ignored with a warning
+    (defaults win) — keeps the trading loop alive when the operator typos
+    a manual edit.
+
+    Read every call rather than module-init so config.json edits via the
+    dashboard POST take effect on the *next* trading-loop tick without a
+    process restart.
+    """
+    cfg = _load_json(_CONFIG_JSON) or {}
+    raw = cfg.get("risk_gates")
+    merged = dict(_RISK_GATE_DEFAULTS)
+    if not isinstance(raw, dict):
+        return merged
+    for key, default_val in _RISK_GATE_DEFAULTS.items():
+        if key not in raw:
+            continue
+        val = raw[key]
+        if not isinstance(val, (int, float)) or isinstance(val, bool):
+            logger.warning(
+                "unified_risk: risk_gates.%s is not a number (got %r) — using default %s",
+                key, val, default_val,
+            )
+            continue
+        merged[key] = float(val)
+    return merged
+
+
+def get_risk_gate(key: str) -> float:
+    """Fetch a single risk-gate threshold by name.
+
+    Public helper for callers outside this module (the wheel runner and
+    Shark sizing code import this). Raises KeyError on unknown keys so
+    typos surface loudly rather than silently returning the default 0.
+    """
+    if key not in _RISK_GATE_DEFAULTS:
+        raise KeyError(
+            f"unknown risk_gate {key!r}; known keys: "
+            f"{sorted(_RISK_GATE_DEFAULTS)}"
+        )
+    return _load_risk_gates()[key]
 
 
 def _crypto_starting_equity() -> float:
@@ -274,6 +350,134 @@ STOCKS_UNTRUSTED_SECONDS = int(os.environ.get("UNIFIED_STOCKS_UNTRUSTED_S", "720
 
 
 # ---------------------------------------------------------------------------
+# Risk-gate evaluators (config-driven, callable from wheel + shark runners)
+# ---------------------------------------------------------------------------
+#
+# Every threshold below comes from _load_risk_gates() — never a literal. To
+# change a threshold, edit config.json:risk_gates (or POST /api/ops/risk_gates).
+# These helpers stay pure (no side effects) so callers can decide what to do
+# with the verdict.
+
+
+def evaluate_loss_size_factor(
+    daily_pnl_pct: float,
+    weekly_pnl_pct: float,
+    gates: Optional[dict] = None,
+) -> dict:
+    """Return how the daily / weekly loss gates should size positions.
+
+    Inputs are signed P&L fractions (e.g. -0.04 == down 4%). Returns:
+        {
+            "size_factor":   float,   # multiply intended size by this
+            "halt":          bool,    # True == do not open ANY new entries
+            "reasons":       list[str],
+        }
+
+    Wiring:
+      - daily loss <= -daily_loss_halt_pct           → halt entirely
+      - weekly loss <= -weekly_loss_size_cut_pct     → multiply size by
+                                                       weekly_loss_size_factor
+    """
+    g = gates if gates is not None else _load_risk_gates()
+    reasons: list[str] = []
+    halt = False
+    size_factor = 1.0
+
+    daily_halt = g["daily_loss_halt_pct"]
+    if daily_pnl_pct <= -daily_halt:
+        halt = True
+        size_factor = 0.0
+        reasons.append(
+            f"daily P&L {daily_pnl_pct*100:.2f}% breaches halt {-daily_halt*100:.2f}%"
+        )
+
+    weekly_cut = g["weekly_loss_size_cut_pct"]
+    weekly_factor = g["weekly_loss_size_factor"]
+    if weekly_pnl_pct <= -weekly_cut and not halt:
+        size_factor = min(size_factor, weekly_factor)
+        reasons.append(
+            f"weekly P&L {weekly_pnl_pct*100:.2f}% ≤ {-weekly_cut*100:.2f}% → "
+            f"size×{weekly_factor:g}"
+        )
+
+    return {"size_factor": size_factor, "halt": halt, "reasons": reasons}
+
+
+def evaluate_vix_size_factor(
+    vix_now: float,
+    vix_historical: float,
+    gates: Optional[dict] = None,
+) -> dict:
+    """Return the VIX-driven size factor.
+
+    When current VIX exceeds ``vix_high_multiplier × vix_historical`` we
+    drop sizing to ``vix_high_min_size_factor`` (default 0.25). Returns a
+    dict with the factor and the reason string for logging.
+    """
+    g = gates if gates is not None else _load_risk_gates()
+    mult = g["vix_high_multiplier"]
+    min_factor = g["vix_high_min_size_factor"]
+    if vix_historical <= 0:
+        return {"size_factor": 1.0, "reason": "no historical VIX baseline"}
+    if vix_now >= mult * vix_historical:
+        return {
+            "size_factor": min_factor,
+            "reason": (
+                f"VIX {vix_now:.1f} ≥ {mult:g}× historical {vix_historical:.1f} → "
+                f"size×{min_factor:g}"
+            ),
+        }
+    return {"size_factor": 1.0, "reason": "VIX within normal band"}
+
+
+def evaluate_single_name_cap(
+    intended_notional: float,
+    portfolio_equity: float,
+    gates: Optional[dict] = None,
+) -> dict:
+    """Cap a single-name notional at ``single_name_cap_pct`` of equity.
+
+    Returns the capped notional + whether it was actually clipped. Caller
+    is responsible for applying the cap (this is pure).
+    """
+    g = gates if gates is not None else _load_risk_gates()
+    cap_pct = g["single_name_cap_pct"]
+    if portfolio_equity <= 0:
+        return {"capped_notional": 0.0, "was_capped": True,
+                "reason": "non-positive equity"}
+    cap_notional = portfolio_equity * cap_pct
+    if intended_notional > cap_notional:
+        return {
+            "capped_notional": cap_notional,
+            "was_capped": True,
+            "reason": (
+                f"intended ${intended_notional:.0f} > cap "
+                f"${cap_notional:.0f} ({cap_pct*100:.1f}% of equity)"
+            ),
+        }
+    return {"capped_notional": intended_notional, "was_capped": False,
+            "reason": "within single-name cap"}
+
+
+def evaluate_correlation_cap(
+    candidate_corr: float,
+    gates: Optional[dict] = None,
+) -> dict:
+    """Reject a candidate position whose correlation with the existing book
+    exceeds ``correlation_cap`` (default 0.85)."""
+    g = gates if gates is not None else _load_risk_gates()
+    cap = g["correlation_cap"]
+    if candidate_corr > cap:
+        return {
+            "allowed": False,
+            "reason": (
+                f"corr {candidate_corr:.2f} > cap {cap:.2f} — already saturated"
+            ),
+        }
+    return {"allowed": True, "reason": f"corr {candidate_corr:.2f} ≤ cap {cap:.2f}"}
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -414,6 +618,10 @@ def get_combined_risk_status() -> dict:
                 "crypto_only_stocks_untrusted" if stocks_untrusted
                 else "crypto_plus_stocks"
             ),
+            # Operator-editable thresholds — surfaced so the dashboard /
+            # ops_spa "Risk gates" card can display the live config
+            # without an extra round-trip to /api/ops/risk_gates.
+            "risk_gates": _load_risk_gates(),
         },
     )
     return asdict(status)

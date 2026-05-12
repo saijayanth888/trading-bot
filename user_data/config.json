@@ -212,6 +212,16 @@
         "meta_min_confidence": 0.35,
         "regime_min_stable_hours": 2.0
     },
+    "risk_gates": {
+        "_doc": "Operator-editable risk thresholds for unified_risk.py. Defaults are the operator-approved 2026-05-11 set. Edit via /api/ops/risk_gates (UI editor) or directly here; freqtrade reload_config picks up changes. Removing this block falls back to the same hardcoded defaults baked into unified_risk.py.",
+        "daily_loss_halt_pct": 0.03,
+        "weekly_loss_size_cut_pct": 0.05,
+        "weekly_loss_size_factor": 0.5,
+        "single_name_cap_pct": 0.10,
+        "correlation_cap": 0.85,
+        "vix_high_multiplier": 2.0,
+        "vix_high_min_size_factor": 0.25
+    },
     "capital_allocation": {
         "_doc": "Weights determine max capital allocation per pair. Pairs below min_sharpe_for_trading are data-only (model still trains, no entries). The strategy reads rolling 14-day Sharpe from trade_journal at bot_loop_start cadence; when fewer than `rebalance_after_days` of live data exist the trained val_sharpe is used as a bootstrap. Auto-rebalance recomputes weights on the rebalance_after_days schedule.",
         "mode": "performance_weighted",
