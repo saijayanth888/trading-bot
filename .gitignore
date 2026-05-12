@@ -141,6 +141,9 @@ private/
 !.hermes/scripts/shark_override_verify.sh
 !.hermes/scripts/bt_quality_gates.sh
 !.hermes/scripts/nightly_reflector.sh
+!.hermes/scripts/gpu_gate.sh
+!.hermes/scripts/gpu_yield_now.sh
+!.hermes/scripts/gpu_resume.sh
 
 # Unified risk peak — runtime state, regenerates on first call
 user_data/data/unified_risk_peak.json
