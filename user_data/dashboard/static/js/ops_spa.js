@@ -2625,21 +2625,43 @@
         h(ProgressBar, { value: progress, max: 100, cls: "accent" }),
         h("div", { className: "hr" })
       ),
+      (function () {
+        const evs = Array.isArray(env.evolution) ? env.evolution : [];
+        const last = evs.length ? evs[evs.length - 1] : null;
+        let members = (last && last.members) || [];
+        if (!members.length) {
+          members = [{ member_id: "Shark TFT · pool", val_acc: env.best_val_acc }];
+        }
+        return h("div", { style: { display: "flex", flexDirection: "column", gap: 4, marginTop: 6 } },
+          members.slice(0, 15).map((m, i) => h("div", {
+            key: (m.member_id || "m") + String(i),
+            style: {
+              display: "flex", alignItems: "center", gap: 10, fontSize: "var(--t-xs)",
+              padding: "4px 0", borderBottom: "1px solid rgba(255,255,255,.05)",
+            },
+          },
+            h("span", { className: "mono", style: { minWidth: 140 } }, m.member_id || "—"),
+            h("span", { className: "tb-spacer", style: { flex: 1 } }),
+            h("span", { className: "dim mono v3-num", style: { fontSize: "var(--t-2xs)" } },
+              "age ", (env.weights_age_seconds != null ? Math.floor(env.weights_age_seconds / 3600) + "h" : "—")),
+            h("span", { className: "pill accent", style: { height: 18, fontSize: "var(--t-2xs)" } },
+              "α ", m.val_acc != null ? Number(m.val_acc).toFixed(3) : (env.best_val_acc != null ? Number(env.best_val_acc).toFixed(3) : "—"))
+          )));
+      })(),
+      h("div", { className: "hr" }),
       h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, fontSize: "var(--t-xs)" } },
         h("div", { className: "dim mono" }, "BEST VAL_ACC"),
-        h("div", { className: "num" }, env.best_val_acc != null ? env.best_val_acc.toFixed(3) : "—"),
+        h("div", { className: "num v3-num" }, env.best_val_acc != null ? env.best_val_acc.toFixed(3) : "—"),
         h("div", { className: "dim mono" }, "BEST EPOCH"),
-        h("div", { className: "num" }, env.best_epoch != null ? env.best_epoch : "—"),
+        h("div", { className: "num v3-num" }, env.best_epoch != null ? env.best_epoch : "—"),
         h("div", { className: "dim mono" }, "N TRAIN"),
-        h("div", { className: "num" }, env.n_train != null ? env.n_train : "—"),
+        h("div", { className: "num v3-num" }, env.n_train != null ? env.n_train : "—"),
         h("div", { className: "dim mono" }, "N TICKERS"),
-        h("div", { className: "num" }, env.n_tickers != null ? env.n_tickers : "—"),
+        h("div", { className: "num v3-num" }, env.n_tickers != null ? env.n_tickers : "—"),
         h("div", { className: "dim mono" }, "DEVICE"),
-        h("div", { className: "num" }, env.device || "—"),
-        h("div", { className: "dim mono" }, "AGE"),
-        h("div", { className: "num" }, env.weights_age_seconds != null ? Math.floor(env.weights_age_seconds / 3600) + "h" : "—"),
+        h("div", { className: "num v3-num" }, env.device || "—"),
         h("div", { className: "dim mono" }, "NEXT CRON"),
-        h("div", { className: "num" }, env.next_train_cron || "—")
+        h("div", { className: "num v3-num" }, env.next_train_cron || "—")
       ),
       env.log_tail && env.log_tail.length > 0 && h("div", null,
         h("div", { className: "hr" }),
@@ -2792,26 +2814,23 @@
       );
     }
 
+    const st = envelopeStatus(slot.env);
+    const degraded = st === "degraded";
+    const pillLabel = !reachable ? "DOWN" : degraded ? "DEGRADED" : "OK";
+    const pillCls = !reachable ? "v3-mcp-pill--down" : degraded ? "v3-mcp-pill--deg" : "v3-mcp-pill--ok";
+    const lastTs = lastCall.ts ? String(lastCall.ts).replace("T", " ").slice(0, 19) : "—";
+
     return h(Card, {
       num: "11", title: "MCP · wire status",
-      sub: reachable ? "Hermes MCP reachable" : "MCP unreachable",
-      right: cardRight(slot.fetchedAt,
-        h("span", { className: "pill " + (reachable ? "up" : "down") }, h("span", { className: "dot " + (reachable ? "up" : "down") + " pulse" }), " ", reachable ? "OK" : "DOWN"))
+      sub: reachable ? "Hermes MCP · streamable HTTP" : "MCP unreachable",
+      right: cardRight(slot.fetchedAt),
     },
-      h("div", { style: { display: "grid", gridTemplateColumns: "1fr 2fr", gap: 6, fontSize: "var(--t-xs)" } },
-        h("div", { className: "dim mono" }, "URL"),
-        h("div", { className: "num mono", style: { fontSize: "var(--t-2xs)", wordBreak: "break-all" } }, env.endpoint || "—"),
-        h("div", { className: "dim mono" }, "TRANSPORT"),
-        h("div", { className: "num mono", style: { fontSize: "var(--t-2xs)" } }, env.transport || "—"),
-        h("div", { className: "dim mono" }, "PROBE"),
-        h("div", { className: "num" },
-          (probe.via || "—") + (probe.age_s != null ? " · " + Math.round(probe.age_s) + "s" : "")),
-        h("div", { className: "dim mono" }, "TOOLS"),
-        h("div", { className: "num" }, env.tools_count != null ? env.tools_count : "—"),
-        h("div", { className: "dim mono" }, "LAST CALL"),
-        h("div", { className: "num mono", style: { fontSize: "var(--t-2xs)" } },
-          lastCall.tool ? (lastCall.tool + (lastCall.ts ? " · " + lastCall.ts.replace("T", " ").slice(0, 19) : "")) : "—")
-      )
+      h("div", { className: "v3-mcp-pill " + pillCls }, pillLabel),
+      h("div", { className: "mono dim v3-num", style: { fontSize: "var(--t-xs)", marginTop: 10, textAlign: "center" } },
+        "last successful call · ", lastTs,
+        lastCall.tool ? (" · " + String(lastCall.tool)) : ""),
+      h("div", { className: "dim mono", style: { fontSize: "var(--t-2xs)", marginTop: 8, wordBreak: "break-all" } },
+        (env.transport || "—") + " · ", (env.endpoint || "—"))
     );
   }
 
@@ -2821,9 +2840,21 @@
     const [status, setStatus] = useState({ msg: "", level: "info", ts: 0 });
     const toast = (msg, level) => setStatus({ msg, level: level || "info", ts: Date.now() });
 
+    function readMcpKey() {
+      try { return sessionStorage.getItem("hermesMcpKey") || ""; } catch (_) { return ""; }
+    }
+    function authHeadersJson() {
+      const headers = { "Content-Type": "application/json" };
+      const k = readMcpKey();
+      if (k) {
+        headers.Authorization = "Bearer " + k;
+        headers["X-Hermes-MCP-Key"] = k;
+      }
+      return headers;
+    }
     const postJSON = (url, body) => fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeadersJson(),
       body: JSON.stringify(body || {}),
     });
 
@@ -2831,18 +2862,9 @@
       .then(r => r.ok ? toast("PAUSED · dry_run=true", "ok") : toast("PAUSE failed · HTTP " + r.status, "warn"))
       .catch(e => toast("PAUSE error · " + e.message, "warn"));
 
-    // RESUME re-enables order placement; it's irreversible-on-fill, so we
-    // require an explicit operator confirmation. Pause is one-click by design
-    // (always safe to pause), but resume is two-step.
-    const doResume = () => {
-      if (!window.confirm("Resume trading? This re-enables order placement on the live freqtrade instance.")) {
-        toast("RESUME cancelled", "info");
-        return;
-      }
-      return postJSON("/api/ops/resume", { reason: "operator manual resume via spa", confirm: true })
-        .then(r => r.ok ? toast("RESUMED · dry_run=false", "ok") : r.json().then(j => toast("RESUME refused · " + (j.detail || ("HTTP " + r.status)), "warn")))
-        .catch(e => toast("RESUME error · " + e.message, "warn"));
-    };
+    const doResumeDirect = () => postJSON("/api/ops/resume", { reason: "operator manual resume via spa", confirm: true })
+      .then(r => r.ok ? toast("RESUMED · dry_run=false", "ok") : r.json().then(j => toast("RESUME refused · " + (j.detail || ("HTTP " + r.status)), "warn")))
+      .catch(e => toast("RESUME error · " + e.message, "warn"));
 
     const doEvolve = () => postJSON("/api/ops/mcp/trigger_evolution_cycle", {})
       .then(r => r.ok ? toast("Evolution cycle kicked off · check EPT card", "ok") : toast("evolution trigger failed · HTTP " + r.status, "warn"))
@@ -2867,14 +2889,36 @@
 
     return h(Card, {
       num: "12", title: "Quick actions · control panel",
-      sub: "atomic config writes · snapshots auto-saved"
+      sub: "hold-to-confirm 1.5s · X-Hermes-MCP-Key when configured",
     },
-      h("div", { className: "grid g-2", style: { gap: "var(--s-3)" } },
-        h("button", { className: "btn", onClick: doPause, "aria-label": "Pause trading" }, "PAUSE TRADING"),
-        h("button", { className: "btn", onClick: doResume, "aria-label": "Resume trading" }, "RESUME"),
-        h("button", { className: "btn warn", onClick: doEvolve, "aria-label": "Trigger evolution cycle" }, "TRIGGER EVOLUTION"),
-        h("button", { className: "btn", onClick: doRebalance, "aria-label": "Rebalance portfolio weights" }, "REBALANCE WEIGHTS"),
-        h("button", { className: "btn", onClick: doSlackBrief, "aria-label": "Generate daily Slack brief" }, "DAILY SLACK BRIEF")
+      h("div", { style: { display: "flex", flexDirection: "column", gap: "var(--s-3)" } },
+        h(HoldToConfirmButton, {
+          label: "PAUSE TRADING",
+          variant: "compact",
+          ariaLabel: "Pause trading after hold",
+          onHoldComplete: doPause,
+        }),
+        h(HoldToConfirmButton, {
+          label: "RESUME",
+          variant: "compact",
+          ariaLabel: "Resume trading after hold",
+          onHoldComplete: doResumeDirect,
+        }),
+        h(HoldToConfirmButton, {
+          label: "TRIGGER EVOLUTION",
+          variant: "compact",
+          danger: true,
+          ariaLabel: "Trigger evolution after hold",
+          onHoldComplete: doEvolve,
+        }),
+        h(HoldToConfirmButton, {
+          label: "REBALANCE WEIGHTS",
+          variant: "compact",
+          danger: true,
+          ariaLabel: "Rebalance weights after hold",
+          onHoldComplete: doRebalance,
+        }),
+        h("button", { className: "btn", type: "button", onClick: doSlackBrief, "aria-label": "Slack brief info" }, "DAILY SLACK BRIEF")
       ),
       status.msg && h("div", {
         style: {
@@ -3926,7 +3970,6 @@
   }
 
   // ─────────────── BACKTEST QUALITY GATES — strategy promotion eligibility ───
-  // Reads /api/ops/backtest_gates which is written by the weekly Hermes cron
   // bt_quality_gates.sh (Sun 4am ET). Each row = one strategy with 5 gate
   // badges. Click a row to expand the numeric values + thresholds. A
   // strategy is "promotion eligible" only when all 5 gates pass — even
@@ -3972,9 +4015,31 @@
           pillText))
     },
       strategies.length === 0
-        ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)", padding: "var(--s-3)" } },
-            "No gates_report_*_latest.json on disk. Sunday 4am ET cron will populate.")
-        : h("div", { style: { display: "flex", flexDirection: "column", gap: 0 } },
+        ? h("div", { className: "v3-bt-empty" },
+            h("div", { style: { fontSize: "var(--t-sm)", color: "var(--fg-1)", marginBottom: 8 } }, "Awaiting first gates report"),
+            h("div", { className: "dim", style: { fontSize: "var(--t-xs)", lineHeight: 1.5 } },
+              env.error || "No gates_report_*_latest.json on disk yet."),
+            h("div", { className: "v3-bt-countdown dim mono", style: { marginTop: 14 } },
+              "NEXT RUN · Sunday ",
+              h("span", { className: "v3-num" }, "04"),
+              ":",
+              h("span", { className: "v3-num" }, "00"),
+              " ET · Hermes ",
+              h("code", null, "bt_quality_gates.sh"))
+          )
+        : h(F, null,
+            strategies[0] && (strategies[0].gates || []).length > 0 && h("div", { className: "v3-bt-waterfall" },
+              h("div", { className: "metric-label", style: { marginBottom: 6 } }, "QUALITY WATERFALL · " + (strategies[0].strategy || "lead")),
+              (strategies[0].gates || []).map((g, gi) => h("div", { key: gi, className: "v3-bt-wf-row" },
+                h("span", { className: "mono", style: { minWidth: 110, fontSize: "var(--t-2xs)" } }, g.gate),
+                h("span", {
+                  className: "v3-cb-dot " + (g.pass === true ? "ok" : g.pass === false ? "red" : "amber"),
+                  title: (g.detail || "") + " · value " + formatGateValue(g.value) + " / thr " + formatGateValue(g.threshold),
+                }),
+                h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)", flex: 1 } }, g.detail || "")
+              ))
+            ),
+            h("div", { style: { display: "flex", flexDirection: "column", gap: 0 } },
             strategies.map((s, i) => {
               const gates = s.gates || [];
               const passing = gates.filter(g => g.pass === true).length;
@@ -4034,7 +4099,8 @@
                 ),
               ].filter(Boolean));
             })
-          ),
+          )
+        ),
       h("div", { className: "dim", style: { fontSize: "var(--t-2xs)", padding: "var(--s-2) var(--s-2) 0",
           fontFamily: "var(--mono)" } },
         "promotion-eligible = recommendation surface only · operator must flip live by hand")
