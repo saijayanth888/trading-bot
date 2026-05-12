@@ -3376,6 +3376,394 @@
     );
   }
 
+  // ─────────────── AgentLogsDrawer — Tier E ────────────────────────────
+  // Right-anchored slide-in panel that lists the last 50 calls for ONE
+  // canonical AgentFlow role (bull_debater, bear_debater, arbiter, …).
+  // Replaces the Tier-D scroll-and-pulse behavior when an agent box is
+  // clicked. The old behavior is still available as a fallback via
+  // ``localStorage.setItem("quanta.agent_logs_drawer", "0")``.
+  //
+  // - Mounts to document.body via ReactDOM.createPortal so the strip
+  //   never reflows. z-index 81 (above topbar, below LLM modal).
+  // - Fetches /api/ops/llm_calls?role=ROLE&include_text=1&limit=50 ONCE
+  //   on open. No new poll loop.
+  // - Click a different agent box while open → re-fetches, no flicker
+  //   (transform stays at translateX(0)).
+  // - ESC or backdrop click closes; focus returns to the originally
+  //   clicked box.
+  //
+  // Open via: window.dispatchEvent(new CustomEvent("quanta:agent-logs-open",
+  //   { detail: { role, model, detail, originEl } }))
+
+  function _aldFmtTime(iso) {
+    if (!iso) return "—";
+    try {
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return "—";
+      const hh = String(d.getHours()).padStart(2, "0");
+      const mm = String(d.getMinutes()).padStart(2, "0");
+      const ss = String(d.getSeconds()).padStart(2, "0");
+      return hh + ":" + mm + ":" + ss;
+    } catch (_e) { return "—"; }
+  }
+  function _aldTrim(s, n) {
+    if (!s) return "";
+    const flat = String(s).replace(/\s+/g, " ").trim();
+    if (flat.length <= n) return flat;
+    return flat.slice(0, n) + "…";
+  }
+  function _aldCallText(c, field) {
+    // Records sometimes ship `prompt` as a JSON-encoded string; show
+    // raw text when available. Falls back to system_message for the
+    // prompt side if `prompt` is empty.
+    if (field === "prompt") {
+      return c.prompt || c.system_message || "";
+    }
+    return c.response_text || "";
+  }
+
+  function _AldEntry({ call, role, p95, query }) {
+    const [expandPrompt, setExpandPrompt] = useState(false);
+    const [expandResp, setExpandResp] = useState(false);
+    const [copied, setCopied] = useState(null);  // "prompt" | "response" | null
+
+    const lat = Number(call.latency_seconds || 0);
+    const cTok = Number(call.completion_tokens || 0);
+    const pTok = Number(call.prompt_tokens || 0);
+    const totalTok = cTok + pTok;
+    const failed = call.success === false || !!call.error || (lat === 0 && cTok === 0);
+    const slow = isFinite(p95) && p95 > 0 && lat > p95;
+    const prompt = _aldCallText(call, "prompt");
+    const response = _aldCallText(call, "response");
+
+    function doCopy(key, text) {
+      copyToClipboard(text || "").then(ok => {
+        if (!ok) return;
+        setCopied(key);
+        setTimeout(() => setCopied(null), 600);
+      });
+    }
+
+    // Highlight matched text — for now we just rely on the row being
+    // visible (filter already narrowed by query). Highlighting inside
+    // <pre> would need DOM-string surgery; out of scope for Tier E.
+    void query;
+
+    const cls = "ald-entry" + (failed ? " is-fail" : "");
+    return h("div", { className: cls },
+      h("div", { className: "ald-entry-head" },
+        h("span", { className: "ald-time" }, _aldFmtTime(call.timestamp)),
+        h("span", { className: "ald-model" }, call.model || "—"),
+        h("span", { className: failed ? "ald-status-bad" : "ald-status-ok" },
+          failed ? "✕" : "✓"),
+        h("span", { className: "ald-lat" }, lat.toFixed(2) + "s"),
+        slow && h("span", { className: "ald-slow", title: "slower than p95" }, "slow"),
+        h("span", { className: "ald-tok" }, totalTok + " tok")
+      ),
+      // Prompt line
+      prompt && h("div", { className: "ald-line" },
+        h("button", {
+          type: "button",
+          className: "ald-caret",
+          "aria-expanded": expandPrompt,
+          "aria-label": expandPrompt ? "collapse prompt" : "expand prompt",
+          onClick: () => setExpandPrompt(v => !v),
+        }, expandPrompt ? "▾" : "▸"),
+        h("span", { className: "ald-label" }, "prompt:"),
+        !expandPrompt && h("span", {
+          className: "ald-snippet",
+          title: "click to expand",
+          onClick: () => setExpandPrompt(true),
+        }, _aldTrim(prompt, 120)),
+        h("button", {
+          type: "button",
+          className: "ald-copy" + (copied === "prompt" ? " is-flashed" : ""),
+          title: copied === "prompt" ? "copied" : "copy prompt",
+          "aria-label": "copy prompt",
+          onClick: () => doCopy("prompt", prompt),
+        }, copied === "prompt" ? "✓" : "📋")
+      ),
+      expandPrompt && prompt && h("pre", { className: "ald-pre" }, prompt),
+      // Response line
+      response && h("div", { className: "ald-line" },
+        h("button", {
+          type: "button",
+          className: "ald-caret",
+          "aria-expanded": expandResp,
+          "aria-label": expandResp ? "collapse response" : "expand response",
+          onClick: () => setExpandResp(v => !v),
+        }, expandResp ? "▾" : "▸"),
+        h("span", { className: "ald-label" }, "response:"),
+        !expandResp && h("span", {
+          className: "ald-snippet",
+          title: "click to expand",
+          onClick: () => setExpandResp(true),
+        }, _aldTrim(response, 120)),
+        h("button", {
+          type: "button",
+          className: "ald-copy" + (copied === "response" ? " is-flashed" : ""),
+          title: copied === "response" ? "copied" : "copy response",
+          "aria-label": "copy response",
+          onClick: () => doCopy("response", response),
+        }, copied === "response" ? "✓" : "📋")
+      ),
+      expandResp && response && h("pre", { className: "ald-pre" }, response),
+      // No-text fallback so the operator can see we still rendered the call
+      !prompt && !response && h("div", { className: "ald-line" },
+        h("span", { className: "ald-label" },
+          "no prompt/response captured (SHARK_LLM_LOG_FULL_TEXT was off)")
+      )
+    );
+  }
+
+  function AgentLogsDrawer() {
+    // ── Drawer-level state ──────────────────────────────────────────
+    const [open, setOpen] = useState(false);
+    const [role, setRole] = useState(null);
+    const [model, setModel] = useState(null);
+    const [detail, setDetail] = useState(null);    // by_role_detail entry
+    const [calls, setCalls] = useState([]);
+    const [phase, setPhase] = useState("idle");    // idle|loading|ok|error
+    const [errMsg, setErrMsg] = useState("");
+    const [filter, setFilter] = useState("all");   // all|success|failures|slow
+    const [search, setSearch] = useState("");
+    const [searchInput, setSearchInput] = useState("");
+    const [shown, setShown] = useState(20);
+    const originElRef = useRef(null);
+    const closeBtnRef = useRef(null);
+    const searchRef = useRef(null);
+    const reqIdRef = useRef(0);
+
+    // Debounce search 200 ms
+    useEffect(() => {
+      const t = setTimeout(() => setSearch(searchInput), 200);
+      return () => clearTimeout(t);
+    }, [searchInput]);
+
+    // Reset pagination + filter when role changes
+    useEffect(() => {
+      setShown(20);
+      setFilter("all");
+      setSearchInput("");
+      setSearch("");
+    }, [role]);
+
+    function doFetch(r) {
+      if (!r) return;
+      const myReq = ++reqIdRef.current;
+      setPhase("loading");
+      setErrMsg("");
+      const url = "/api/ops/llm_calls?role=" + encodeURIComponent(r)
+        + "&include_text=1&limit=50";
+      fetch(url)
+        .then(res => res.ok ? res.json() : Promise.reject(new Error("HTTP " + res.status)))
+        .then(env => {
+          if (myReq !== reqIdRef.current) return;  // stale response
+          const data = envelopeData(env) || {};
+          const list = Array.isArray(data.calls) ? data.calls : [];
+          setCalls(list);
+          setPhase("ok");
+        })
+        .catch(err => {
+          if (myReq !== reqIdRef.current) return;
+          setErrMsg(String(err && err.message || err));
+          setPhase("error");
+        });
+    }
+
+    // ── Listen for open events ─────────────────────────────────────
+    useEffect(() => {
+      function onOpen(e) {
+        const d = (e && e.detail) || {};
+        // Stash the click origin so we can return focus to it on close.
+        originElRef.current = d.originEl || null;
+        setRole(d.role || null);
+        setModel(d.model || null);
+        setDetail(d.detail || null);
+        setOpen(true);
+        doFetch(d.role);
+      }
+      window.addEventListener("quanta:agent-logs-open", onOpen);
+      return () => window.removeEventListener("quanta:agent-logs-open", onOpen);
+    }, []);
+
+    // ── ESC to close + body-scroll lock + focus management ────────
+    useEffect(() => {
+      if (!open) return;
+      function onKey(e) {
+        if (e.key === "Escape") { e.preventDefault(); close(); }
+      }
+      document.addEventListener("keydown", onKey);
+      const prev = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+      // Focus first interactive on open
+      requestAnimationFrame(() => {
+        if (closeBtnRef.current) closeBtnRef.current.focus();
+      });
+      return () => {
+        document.removeEventListener("keydown", onKey);
+        document.body.style.overflow = prev;
+      };
+    }, [open]);
+
+    function close() {
+      setOpen(false);
+      // Return focus to the originating box
+      const el = originElRef.current;
+      if (el && typeof el.focus === "function") {
+        try { el.focus(); } catch (_e) { /* ignore */ }
+      }
+    }
+
+    function retry() { doFetch(role); }
+
+    // ── Derived: counts per filter ─────────────────────────────────
+    const p95 = (detail && Number(detail.p95_latency_s)) || 0;
+    const counts = useMemo(() => {
+      let ok = 0, bad = 0, slow = 0;
+      for (const c of calls) {
+        const lat = Number(c.latency_seconds || 0);
+        const cTok = Number(c.completion_tokens || 0);
+        const failed = c.success === false || !!c.error || (lat === 0 && cTok === 0);
+        if (failed) bad++; else ok++;
+        if (p95 > 0 && lat > p95) slow++;
+      }
+      return { all: calls.length, success: ok, failures: bad, slow };
+    }, [calls, p95]);
+
+    const filtered = useMemo(() => {
+      const q = (search || "").toLowerCase();
+      return calls.filter(c => {
+        const lat = Number(c.latency_seconds || 0);
+        const cTok = Number(c.completion_tokens || 0);
+        const failed = c.success === false || !!c.error || (lat === 0 && cTok === 0);
+        if (filter === "success" && failed) return false;
+        if (filter === "failures" && !failed) return false;
+        if (filter === "slow" && !(p95 > 0 && lat > p95)) return false;
+        if (q) {
+          const hay = ((_aldCallText(c, "prompt") || "") + " "
+                    + (_aldCallText(c, "response") || "")).toLowerCase();
+          if (hay.indexOf(q) === -1) return false;
+        }
+        return true;
+      });
+    }, [calls, filter, search, p95]);
+
+    // Always render so the drawer can animate in. When closed, the
+    // .is-open class is removed → transform slides it off-screen +
+    // backdrop pointer-events disables, so nothing intercepts clicks.
+    const showModel = model || (detail && detail.model) || "—";
+    const title = role
+      ? "AGENT LOGS — " + role + (showModel && showModel !== "—" ? " · " + showModel : "")
+      : "AGENT LOGS";
+
+    function aggregateLine() {
+      const empty = !detail || !detail.count;
+      if (empty) {
+        return h("span", { className: "agg-empty" }, "no calls yet");
+      }
+      const ok = Number(detail.success || 0);
+      const bad = Number(detail.fail || 0);
+      const avg = Number(detail.avg_latency_s || 0).toFixed(1);
+      const p95v = Number(detail.p95_latency_s || 0).toFixed(1);
+      const tokAvg = Math.round(Number(detail.tokens_avg || 0));
+      return h(F, null,
+        "today: ",
+        h("span", { className: "agg-ok" }, ok),
+        " ✓",
+        h("span", { className: "agg-sep" }, "·"),
+        h("span", { className: "agg-bad" }, bad),
+        " ✕",
+        h("span", { className: "agg-sep" }, "·"),
+        "avg ", avg, "s",
+        h("span", { className: "agg-sep" }, "·"),
+        "p95 ", p95v, "s",
+        h("span", { className: "agg-sep" }, "·"),
+        tokAvg, " tokens/call avg"
+      );
+    }
+
+    function bodyContent() {
+      if (phase === "loading") return h("div", { className: "ald-loading" }, "loading…");
+      if (phase === "error") {
+        return h("div", { className: "ald-error" },
+          "fetch failed: " + errMsg,
+          h("button", { type: "button", onClick: retry }, "retry"));
+      }
+      if (filtered.length === 0) {
+        const reason = (calls.length === 0)
+          ? "no calls for this role in the 24h window"
+          : "no matches for current filter / search";
+        return h("div", { className: "ald-empty" }, reason);
+      }
+      const slice = filtered.slice(0, shown);
+      const remaining = filtered.length - slice.length;
+      return h(F, null,
+        slice.map((c, i) => h(_AldEntry, {
+          key: (c.timestamp || "") + "_" + i,
+          call: c, role, p95, query: search,
+        })),
+        remaining > 0 && h("button", {
+          type: "button",
+          className: "ald-show-more",
+          onClick: () => setShown(n => n + 30),
+        }, "show " + Math.min(30, remaining) + " more (" + remaining + " hidden)")
+      );
+    }
+
+    const drawerEl = h(F, null,
+      h("div", {
+        className: "ald-backdrop" + (open ? " is-open" : ""),
+        onClick: close,
+        "aria-hidden": "true",
+      }),
+      h("div", {
+        className: "ald-drawer" + (open ? " is-open" : ""),
+        role: "dialog",
+        "aria-modal": "true",
+        "aria-label": role ? ("agent logs for " + role) : "agent logs",
+        tabIndex: -1,
+      },
+        h("div", { className: "ald-head" },
+          h("span", { className: "ald-title" }, title),
+          h("button", {
+            ref: closeBtnRef,
+            type: "button",
+            className: "ald-close",
+            onClick: close,
+            "aria-label": "close drawer",
+            title: "close (esc)",
+          }, "×")
+        ),
+        h("div", { className: "ald-aggregate" }, aggregateLine()),
+        h("div", { className: "ald-toolbar" },
+          ["all", "success", "failures", "slow"].map(k =>
+            h("button", {
+              key: k,
+              type: "button",
+              className: "ald-chip" + (filter === k ? " is-active" : ""),
+              onClick: () => setFilter(k),
+              "aria-pressed": filter === k,
+            }, k + " (" + (counts[k] || 0) + ")")
+          ),
+          h("input", {
+            ref: searchRef,
+            type: "text",
+            className: "ald-search",
+            placeholder: "search prompt + response…",
+            value: searchInput,
+            onChange: (e) => setSearchInput(e.target.value),
+            "aria-label": "search prompt and response",
+          })
+        ),
+        h("div", { className: "ald-body" }, bodyContent())
+      )
+    );
+
+    // Portal to body so the drawer escapes the AgentFlow card layout.
+    return ReactDOM.createPortal(drawerEl, document.body);
+  }
+
   function LLMCallsLive({ data }) {
     const slot = slotState(data, "llm_calls");
     const env = envelopeData(slot.env) || {};
