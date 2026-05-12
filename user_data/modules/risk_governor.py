@@ -597,7 +597,19 @@ class RiskGovernor:
     def _pearson_returns(
         self, a: "pd.Series", b: "pd.Series",
     ) -> float | None:
-        """Pearson correlation over the most recent `correlation_lookback_days`."""
+        """Pearson correlation over the most recent `correlation_lookback_days`.
+
+        Duplicate-timestamp safety (Bug 1, 2026-05-12): one 5m candle can
+        produce two trades against the same pair (e.g. trailing-stop close
+        + immediate re-entry stamped at the same minute), which gives the
+        returns Series a non-unique DatetimeIndex. ``pd.concat(..., join="inner")``
+        and any subsequent ``.reindex`` operation then raise
+        ``InvalidIndexError: Reindexing only valid with uniquely valued
+        Index objects``. We collapse duplicates BEFORE the join by keeping
+        the LAST observation per timestamp — that mirrors the actual book
+        state at candle close, which is what the correlation gate cares
+        about.
+        """
         if a is None or b is None or len(a) == 0 or len(b) == 0:
             return None
         lookback = self.config.correlation_lookback_days
@@ -607,6 +619,13 @@ class RiskGovernor:
             n = min(len(a), len(b))
             ax, bx = np.asarray(a[-n:]), np.asarray(b[-n:])
         else:
+            # Deduplicate the index (keep last per timestamp). Cheap O(n)
+            # mask — safer than groupby().last() because it preserves the
+            # original Series dtype and tz.
+            if not a.index.is_unique:
+                a = a[~a.index.duplicated(keep="last")]
+            if not b.index.is_unique:
+                b = b[~b.index.duplicated(keep="last")]
             cutoff = max(a.index.max(), b.index.max()) - pd.Timedelta(days=lookback)
             ax = a[a.index >= cutoff]
             bx = b[b.index >= cutoff]
