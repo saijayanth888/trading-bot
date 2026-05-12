@@ -1,0 +1,52 @@
+{% if data_integrity_warnings -%}
+> ❗ **Data integrity issue this week.** See banner(s) below before reading numbers.
+{% for w in data_integrity_warnings -%}
+> - {{ w.gate }}: {{ w.message }}
+{% endfor -%}
+
+{% endif -%}
+# Quanta · Week {{ iso_year }}-W{{ iso_week }} ({{ monday_date }} → {{ sunday_date }})
+
+## Headline
+- **Net P&L** · ${{ net_pnl }} ({{ net_pnl_pct }}%)
+- **Drawdown** · {{ drawdown_pct }}%
+- **Open positions** · {{ open_count }}
+- **Mode** · {{ run_mode }}
+
+## Trades this week ({{ trade_count }})
+{% if trades %}
+{% for trade in trades %}
+### {{ loop.index }}. {{ trade.pair }} · {{ trade.side }}
+- **Entry** ${{ trade.entry_price }} @ {{ trade.entry_ts }}
+- **Exit**  ${{ trade.exit_price }} @ {{ trade.exit_ts }}
+- **P&L**   ${{ trade.pnl }} ({{ trade.pnl_pct }}%)
+- **Hold**  {{ trade.hold_duration }}
+- **Strategy** {{ trade.strategy }} · **Regime at entry** {{ trade.regime }}
+{% if trade.lessons %}
+**Lessons logged by Reflector**
+{% for lesson in trade.lessons %}
+- {{ lesson }}
+{% endfor %}
+{% endif %}
+{% endfor %}
+{% else %}
+_No trades closed this week._
+{% endif %}
+
+## Closed-loop telemetry
+- **Reflector lessons added this week** · {{ lessons_added }}
+- **LoRA adapters promoted last Sunday** · {{ adapters_promoted | join(", ") if adapters_promoted else "none" }}
+- **Regime mix** · {% if regime_mix %}{% for k, v in regime_mix.items() %}{{ k }}={{ v }}{{ ", " if not loop.last }}{% endfor %}{% else %}unknown{% endif %}
+
+## Open positions
+{% if open_positions %}
+{% for p in open_positions %}
+- **{{ p.pair }}** · {{ p.side }} · entered {{ p.entry_ts }}{% if p.days_held is not none %} · {{ p.days_held }}d held{% endif %}
+{% endfor %}
+{% else %}
+_None open at close._
+{% endif %}
+
+---
+_Generated {{ generated_ts }} by `quanta_core.hermes.weekly_publisher`._
+_Bot run-mode this week: **{{ run_mode }}**. {{ privacy_footer }}_
