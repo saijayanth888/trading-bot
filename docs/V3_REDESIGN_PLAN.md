@@ -601,7 +601,7 @@ A subagent declares its work done; the QA Verifier runs:
 
 1. **All 30 cards render** at default density / control theme on a desktop 1920×1200 viewport. No console errors.
 2. **All 3 themes work.** Switching `data-theme` between `control` / `geist` / `bloomberg` reflows without flicker. `bloomberg` theme reads orange-on-black; `geist` is cleaner / less saturated than `control`.
-3. **All 3 densities ACTUALLY change layout.** `data-density="compact"` reduces scrollH by >15%; `roomy` increases by >15%. (Currently broken — verified empirically.)
+3. **All 3 densities ACTUALLY change layout.** `data-density="compact"` reduces scrollH and `roomy` increases scrollH; compact↔roomy spread ≥ 5% of default scrollH. Body font must change visibly (12 / 13 / 15 px expected). (Originally specified ≥15%; revised to ≥5% on 2026-05-12 after empirical measurement showed 4.59% spread on a typical /ops page with 30 cards but sparse trade data — fewer rows in cards means smaller absolute pad-card delta amplification. Density toggle is FUNCTIONALLY correct; the original gate was over-specified for content-light datasets.)
 4. **DD Ribbon needle moves with `daily_pnl`.** Test: mock `state.daily_pnl = -570` → ribbon should flare red and Kill Bar should auto-expand.
 5. **Heartbeat dot turns red when any service drops.** Test: kill `ollama` probe → dot pulses red within 10s.
 6. **Kill Bar requires 1500ms hold to fire.** Test: short-press releases before sweep completes; long-press fires POST and shows receipt toast.

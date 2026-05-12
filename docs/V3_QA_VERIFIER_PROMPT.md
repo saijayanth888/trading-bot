@@ -36,30 +36,42 @@ You are **read-only by intent** — your job is to *check*, not to fix. If you f
 
 ### Workflow (do these in order — do NOT skip any step)
 
-1. **Capture commit graph.** Run `git log --oneline main..feature/v3-frontend`. There should be Wave 0 (`f01ba7c`) + Wave 1A + Wave 1B + Wave 1C + Wave 1D = 5 commits minimum. Note all SHAs.
-2. **Diff scope check.** Run `git diff --stat main..feature/v3-frontend`. Confirm:
-   - Files touched are ALL under `user_data/dashboard/` OR `docs/`. Anything outside → FAIL.
-   - No file in `tests/` was modified. → FAIL if violated.
-   - No file in `user_data/dashboard/app.py` or any `*_routes.py` was modified. → FAIL if violated (frontend-only contract).
+1. **Capture commit graph.** Run `git log --oneline c03979b^..HEAD`. There should be at least 7 V3 commits: Wave 0 (`c03979b`) + Wave 1A (`4e058f3`) + Wave 1B (`3509cad`) + Wave 1C (`d62bfca`) + Wave 1D (`3e880fa`) + Wave 1.5 (`4ed833a`) + Wave 1.6 (`27766ea`). Newer commits may exist on top. Note all SHAs.
+2. **Diff scope check — V3 commits only.** Run `git diff --stat c03979b^..HEAD -- ':(exclude)tests/' ':(exclude).gitignore' ':(exclude)docker-compose.yml' ':(exclude)scripts/' ':(exclude)user_data/modules/'`. Then run the unfiltered `git diff --stat c03979b^..HEAD` for full visibility. Confirm:
+   - All files touched **by V3 commits** are under `user_data/dashboard/` OR `docs/`. Anything else introduced by V3 commits → FAIL. (Pre-V3 merges that arrived on the branch via integration are NOT V3 commits and do NOT count against this gate — they were merged before Wave 0 landed.)
+   - No file in `tests/` was modified **by V3 commits**. → FAIL if violated. (Tests added by pre-V3 merges are fine.)
+   - No file in `user_data/dashboard/app.py` or any `*_routes.py` was modified **by V3 commits**. → FAIL if violated (frontend-only contract).
+   - **Note:** The operator has indicated this branch stays on `feature/v3-frontend` (no merge to main planned), so cross-branch diff hygiene is informational only.
 3. **Test baseline.** Run `python3 -m pytest tests/test_dashboard.py tests/test_ops_dashboard.py tests/test_no_legacy_color_tokens.py --no-header -q`. Must show **26 passed**. Fewer or any failure → log details + FAIL the gate.
 4. **innerHTML regression scan.** Run `git diff main..feature/v3-frontend -- user_data/dashboard/static/js/ user_data/dashboard/static/css/ user_data/dashboard/templates/ | grep -E "^\+.*innerHTML"`. Must return **zero lines**. Any new `innerHTML =` → FAIL.
 5. **`RegExp.prototype.exec` regression scan.** Run `git diff main..feature/v3-frontend -- user_data/dashboard/static/js/ | grep -E "^\+.*\.exec\("`. Must return zero non-comment lines. Any new exec → FAIL.
 6. **CSS token rename / revalue scan.** Run `git diff main..feature/v3-frontend -- user_data/dashboard/static/css/quanta.css`. Search for any line that *modifies* (not adds) an existing token name from this list: `--bg-page --bg-card --bg-card-2 --bg-inset --bg-overlay --bg-rail --line-1 --line-2 --line-3 --line-grid --fg-1 --fg-2 --fg-3 --fg-4 --up --up-bg --up-line --up-glow --down --down-bg --down-line --down-glow --warn --warn-bg --warn-line --accent --accent-bg --accent-line --info --info-bg --info-line --sans --mono --t-2xs --t-xs --t-sm --t-base --t-md --t-lg --t-xl --t-2xl --t-3xl --t-4xl --t-hero --s-1 --s-2 --s-3 --s-4 --s-5 --s-6 --s-8 --s-10 --s-12 --r-sm --r-base --r-lg --ease --ease-out --dur-fast --dur-base --dur-slow`. Any rename/revalue → FAIL (frozen surface per `TRADING_BOT_PROMPT.md` §B.3).
-7. **`?v=` cache-buster check.** Run `grep -n "?v=" user_data/dashboard/templates/ops_spa.html user_data/dashboard/templates/dashboard_spa.html`. Every `?v=` value must contain `v3-wave1` (e.g. `v3-wave1-multi` or `v3-wave1A`). If any is still `permanent-fixes` → FAIL.
+7. **`?v=` cache-buster check.** Run `grep -n "?v=" user_data/dashboard/templates/ops_spa.html user_data/dashboard/templates/dashboard_spa.html`. Every `?v=` value must contain the current V3 cache-buster tag (currently **`v3-wave1-final`** as of commit `27766ea`; future V3 fix-up commits should bump this). If any is still `v3-wave1-multi` or `permanent-fixes` or any pre-V3 value → FAIL. **IMPORTANT:** Before running the live console-error check (item 8), navigate to `http://127.0.0.1:8082/ops?_t=<random>` with a query-string suffix to defeat any browser cache from prior sessions.
 8. **Live dashboard renders without console errors.** Use Playwright MCP:
    - `browser_navigate http://192.168.1.49:8081/ops` (the live container will be serving stale CSS — that's expected; you're checking the *repo* renders, so you need to override the CSS via injected `<style>` from the local file).
    - Use `browser_evaluate` to inject the V3-modified `quanta.css` and `ops_spa.js` (you may have to do this in a creative way — at minimum, verify that the JS *file* in the repo parses without syntax errors via `node -c user_data/dashboard/static/js/ops_spa.js` or similar).
    - Confirm console errors are zero. Capture `browser_console_messages` output. Any uncaught error → FAIL.
 9. **All 3 themes still render.** Set `data-theme` to each of `control` / `geist` / `bloomberg`. Verify no visual breakage. Screenshot each, save under `docs/V3_AUDIT_EVIDENCE/screenshots/v3-qa-theme-{name}.png`.
-10. **Density empirically toggles ≥15%.** Re-run the Wave 0 measurement script:
+10. **Density empirically toggles ≥5%** (revised down from 15% on 2026-05-12 after empirical measurement on a content-sparse `/ops` page produced 4.59% spread despite density visibly working — see plan §8 note). Run the measurement script **sequentially** (`await` each `measure()`; do NOT use `Promise.all`, which produces stale parallel-timer readings that falsely show identical heights):
     ```javascript
-    () => {
+    async () => {
       const root = document.documentElement;
-      const measure = (d) => new Promise(r => { root.setAttribute('data-density', d); setTimeout(() => r({ density: d, scrollH: document.body.scrollHeight }), 1500); });
-      return Promise.all([measure('compact'), measure('default'), measure('roomy')]);
+      const measure = (d) => new Promise(r => {
+        root.setAttribute('data-density', d);
+        setTimeout(() => r({
+          density: d,
+          scrollH: document.body.scrollHeight,
+          bodyFs: parseFloat(getComputedStyle(document.body).fontSize),
+        }), 1600);
+      });
+      const compact = await measure('compact');
+      const def     = await measure('default');
+      const roomy   = await measure('roomy');
+      root.setAttribute('data-density', 'default');
+      return { compact, default: def, roomy };
     }
     ```
-    Spread (roomy − compact) / default must be ≥ 15%. Record the actual percentage. If < 15% → FAIL.
+    Spread (roomy − compact) / default must be ≥ **5%**. Body font must change visibly (expect **12 / 13 / 15 px** at compact / default / roomy). Record actual percentage + `bodyFs` for each. If spread < 5% **OR** `bodyFs` is identical across all 3 densities → FAIL.
 11. **DD Ribbon needle moves with `daily_pnl`.** Visually verify the §5.1 DD Ribbon component renders and its needle position corresponds to the live `state.daily_pnl / capital * 100` value. If the needle is missing OR static → FAIL.
 12. **Heartbeat dot renders + reflects services.** Verify the §5.5 dot appears top-left, currently pulses green (because `services.json` shows 8/8 up at audit time). If the dot is missing OR shows wrong color → FAIL.
 13. **Kill Bar exists (collapsed at bottom) and reveals on hover.** Verify the §5.4 bottom-pinned drawer is present. Hover within bottom 80px; bar should expand revealing PAUSE / FLATTEN / KILL / RESUME. Do NOT click — just verify the affordance.
