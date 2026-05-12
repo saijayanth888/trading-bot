@@ -437,6 +437,10 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
     # is plenty since the pair_dictionary quarantine startup banner in
     # the TFT module already names the offenders at boot.
     _missing_pred_cols_logged: set = set()
+    # Per-pair "TFT-blind fallback ACTIVE" log latch. Same once-per-pair
+    # cadence as _missing_pred_cols_logged so the operator gets a single
+    # confirmation per pair per process lifetime when fallback fires.
+    _tft_blind_logged: set = set()
 
     # ------------------------------------------------------------------
     # FreqAI feature engineering
@@ -1336,6 +1340,90 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
                     or (dataframe["meta_position_size"] > 0).any())
 
     # ------------------------------------------------------------------
+    # TFT-blind fallback config + safety gates
+    # ------------------------------------------------------------------
+
+    _TFT_BLIND_DEFAULTS = {
+        "enabled": False,
+        "position_size_multiplier": 0.5,
+        "log_per_pair_once": True,
+    }
+
+    @property
+    def _tft_blind_config(self) -> dict:
+        """config.json[strategy_overrides][tft_blind_fallback] merged on
+        defaults. The block is OPTIONAL — when absent, defaults keep the
+        feature OFF, preserving the safe pre-fallback behaviour.
+        """
+        cfg = dict(self._TFT_BLIND_DEFAULTS)
+        overrides = (self.config.get("strategy_overrides", {}) or {})
+        block = (overrides.get("tft_blind_fallback", {}) or {})
+        for k, v in block.items():
+            if k.startswith("_"):
+                continue
+            cfg[k] = v
+        return cfg
+
+    def _apply_blind_safety_gates(self, dataframe: DataFrame, pair: str) -> DataFrame:
+        """Apply the SAME pair-level + per-row safety gates the TFT entry
+        path uses, BUT only the ones that do not require the TFT columns
+        (up / down / tft_confidence / meta_signal).
+
+        Gates applied:
+          - capital_allocation.pair_weight <= 0  → block ALL entries
+          - capital_allocation.min_sharpe gate    → block ALL entries
+          - regime_confidence < 0 (DB-down sentinel) → block per-row
+          - regime_label == 'trending_down'       → block per-row
+              (TFT-blind has no model confidence to override the trend,
+               so we stay categorical here — the original hard block.)
+          - regime_label == 'high_volatility'     → block per-row
+              (same reasoning — no confidence floor available)
+          - %-regime_duration_h >= REGIME_MIN_STABLE_HOURS → block per-row
+              (regime-stability gate; absent column = duration 0 = block,
+               which is the safer fallback.)
+
+        Note: the static stoploss + minimal_roi + risk_governor checks
+        in custom_stake_amount still own the hard floor for any entry
+        that survives these gates.
+        """
+        # Initialize enter_long so the gates below can zero it cleanly.
+        if "enter_long" not in dataframe.columns:
+            dataframe["enter_long"] = 0
+
+        # Pair-level (capital allocation) — kills ALL entries if it fires.
+        if pair and self._capital_allocation:
+            if self._pair_weight(pair) <= 0.0:
+                dataframe["enter_long"] = 0
+                return dataframe
+            min_sharpe = self._min_sharpe_for_trading()
+            live_sharpe = self._pair_rolling_sharpe.get(pair)
+            if min_sharpe > 0 and live_sharpe is not None and live_sharpe < min_sharpe:
+                dataframe["enter_long"] = 0
+                return dataframe
+
+        # Per-row regime-source health gate (DB-down sentinel).
+        if "regime_confidence" in dataframe.columns:
+            db_down = dataframe["regime_confidence"] < 0
+            if db_down.any():
+                dataframe.loc[db_down, "enter_long"] = 0
+
+        # Per-row regime-label gates. TFT-blind has no confidence floor
+        # to lift, so trending_down and high_volatility stay categorical.
+        if "regime_label" in dataframe.columns:
+            danger = dataframe["regime_label"].isin(("trending_down", "high_volatility"))
+            if danger.any():
+                dataframe.loc[danger, "enter_long"] = 0
+
+        # Per-row regime-stability gate (same default 2.0h as full-TFT path).
+        # Absent column → duration unknown → treat as 0 → gate blocks.
+        if "%-regime_duration_h" in dataframe.columns:
+            unstable = dataframe["%-regime_duration_h"] < self.REGIME_MIN_STABLE_HOURS
+            if unstable.any():
+                dataframe.loc[unstable, "enter_long"] = 0
+
+        return dataframe
+
+    # ------------------------------------------------------------------
     # BollingerRSI mean-reversion signal (TFT-blind fallback path)
     # ------------------------------------------------------------------
 
@@ -1425,17 +1513,45 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         #      at startup; this confirms the pair is being skipped at
         #      runtime too.
         if "up" not in dataframe.columns or "down" not in dataframe.columns:
-            if pair and pair not in self._missing_pred_cols_logged:
-                self._missing_pred_cols_logged.add(pair)
+            blind_cfg = self._tft_blind_config
+            if not blind_cfg.get("enabled"):
+                # Existing safe default: log once per pair, return no-signal.
+                if pair and pair not in self._missing_pred_cols_logged:
+                    self._missing_pred_cols_logged.add(pair)
+                    logger.info(
+                        "[strategy] %s missing prediction columns "
+                        "(up/down) — freqai load_data() likely failed for this "
+                        "pair. TFT-blind fallback OFF, skipping signals; "
+                        "position management (stoploss, custom_exit) still "
+                        "applies to any open trade.",
+                        pair,
+                    )
+                # No entry signal — pair stays dark until the next retrain
+                # produces a valid model.zip and freqai re-loads it.
+                return dataframe
+
+            # TFT-blind fallback path. Trade the pure BollingerRSI MR
+            # signal at degraded sizing while TFT is unavailable. ALL
+            # non-TFT safety gates still apply via _apply_blind_safety_gates.
+            mult = float(blind_cfg.get("position_size_multiplier", 0.5))
+            if pair and pair not in self._tft_blind_logged:
+                self._tft_blind_logged.add(pair)
                 logger.info(
-                    "[strategy] %s missing prediction columns "
-                    "(up/down) — freqai load_data() likely failed for this "
-                    "pair. Skipping entry/exit signals; position management "
-                    "(stoploss, custom_exit) still applies to any open trade.",
-                    pair,
+                    "[strategy] %s TFT-blind fallback ACTIVE — trading on "
+                    "BollingerRSI MR signal at %.0f%% size. Will auto-disable "
+                    "as soon as freqai populates up/down columns for this pair.",
+                    pair, mult * 100,
                 )
-            # No entry signal — pair stays dark until the next retrain
-            # produces a valid model.zip and freqai re-loads it.
+            # Compute the pure-technical entry signal.
+            bbrsi = self._compute_bbrsi_entry_signal(dataframe)
+            dataframe["enter_long"] = 0
+            dataframe.loc[bbrsi, ["enter_long", "enter_tag"]] = (1, "tft_blind_bbrsi")
+            # Tag every row so custom_stake_amount can detect the path
+            # at trade time. Column-typed bool avoids the object-dtype
+            # pydantic coercion cost in the indicator pipeline.
+            dataframe["tft_blind"] = True
+            # Apply all non-TFT safety gates to the candidate entries.
+            dataframe = self._apply_blind_safety_gates(dataframe, pair)
             return dataframe
 
         # Capital-allocation gates (no-op if config has no [capital_allocation]).
@@ -1604,15 +1720,27 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         # still goes through custom_stoploss, minimal_roi, and custom_exit
         # which are not touched here.
         if "up" not in dataframe.columns or "down" not in dataframe.columns:
-            if pair and pair not in self._missing_pred_cols_logged:
-                self._missing_pred_cols_logged.add(pair)
-                logger.info(
-                    "[strategy] %s missing prediction columns "
-                    "(up/down) at exit phase — no exit_long signals emitted "
-                    "this candle. Stoploss + minimal_roi still own the hard "
-                    "floor on any open position.",
-                    pair,
-                )
+            blind_cfg = self._tft_blind_config
+            if not blind_cfg.get("enabled"):
+                if pair and pair not in self._missing_pred_cols_logged:
+                    self._missing_pred_cols_logged.add(pair)
+                    logger.info(
+                        "[strategy] %s missing prediction columns "
+                        "(up/down) at exit phase — TFT-blind fallback OFF; no "
+                        "exit_long signals emitted this candle. Stoploss + "
+                        "minimal_roi still own the hard floor on any open "
+                        "position.",
+                        pair,
+                    )
+                return dataframe
+
+            # TFT-blind exit path: BB-upper-band cross + RSI overbought.
+            # custom_stoploss and minimal_roi remain the hard floor; this
+            # signal is an opportunistic mean-reversion target exit only.
+            bbrsi_exit = self._compute_bbrsi_exit_signal(dataframe)
+            dataframe["exit_long"] = 0
+            dataframe.loc[bbrsi_exit, ["exit_long", "exit_tag"]] = (1, "tft_blind_bbrsi_exit")
+            dataframe["tft_blind"] = True
             return dataframe
 
         base = float(self.exit_threshold.value)
