@@ -69,3 +69,8 @@ _None — paper trading mode initialized 2026-04-25_
 ### 2026-05-11 — EOD Snapshot
 **Portfolio:** $99939.96 | **Cash:** $100629.96 | **Day P&L:** -60.04 | **Open Positions:** 2
 
+| 2026-05-12 | HOOD260522P00078000 | SELL (hard stop) | 1 | 0.00 | - | - | - | Midday cut: -7% rule triggered | OPEN |
+| 2026-05-12 | MARA260522P00012000 | SELL (hard stop) | 1 | 0.00 | - | - | - | Midday cut: -7% rule triggered | OPEN |
+| 2026-05-12 | NVDA260522P00215000 | SELL (hard stop) | 1 | 0.00 | - | - | - | Midday cut: -7% rule triggered | OPEN |
+| 2026-05-12 | PLTR260522P00130000 | SELL (hard stop) | 1 | 0.00 | - | - | - | Midday cut: -7% rule triggered | OPEN |
+| 2026-05-12 | SOFI260522P00015500 | SELL (hard stop) | 1 | 0.00 | - | - | - | Midday cut: -7% rule triggered | OPEN |
