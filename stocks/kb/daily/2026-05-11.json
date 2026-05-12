@@ -1,0 +1,31 @@
+{
+  "date": "2026-05-11",
+  "equity": 99939.96,
+  "cash": 100629.96,
+  "day_pnl_dollars": -60.0399999999936,
+  "day_pnl_pct": -0.0600399999999936,
+  "positions": [
+    {
+      "symbol": "NVDA260522P00215000",
+      "qty": -1.0,
+      "avg_entry_price": 5.95,
+      "current_price": 6.6,
+      "unrealized_pl": -65.0,
+      "unrealized_plpc": -0.10924,
+      "market_value": -660.0,
+      "side": "short"
+    },
+    {
+      "symbol": "SOFI260522P00015500",
+      "qty": -1.0,
+      "avg_entry_price": 0.35,
+      "current_price": 0.3,
+      "unrealized_pl": 5.0,
+      "unrealized_plpc": 0.14286,
+      "market_value": -30.0,
+      "side": "short"
+    }
+  ],
+  "trades_today": 0,
+  "trades_this_week": 0
+}
