@@ -93,7 +93,8 @@ Pre-existing legacy test failures (4 in `test_tft_pickle.py` and `test_weekly_tr
 
 ## Commit SHAs
 
-(filled in after `git commit`)
+* `70aa760` — feat(v4): exchanges module — alpaca-py + coinbase-advanced-py adapters
+  (single commit; branch `feat/v4-build-exchanges` off `main` at `d5d1fd7`)
 
 ## What the next agent needs
 
