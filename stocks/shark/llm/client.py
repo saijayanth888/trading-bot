@@ -361,12 +361,29 @@ class OllamaClient(LLMClient):
 # Factory
 # ---------------------------------------------------------------------------
 
-_PROVIDERS = {
+_PROVIDERS: dict[str, type[LLMClient]] = {
     "ollama": OllamaClient,
     "anthropic": AnthropicClient,
     "openai": OpenAIClient,
     "google": GoogleClient,
 }
+
+
+def _maybe_register_vllm() -> None:
+    """Lazy-register VLLMClient on first request.
+
+    vllm_client.py imports LLMClient/LLMResponse from THIS module, so
+    eager top-of-file registration would create a circular import. We
+    register on demand instead — the only callers asking for vllm have
+    already opted in via model_tiers.json or SHARK_*_LLM_PROVIDER=vllm.
+    """
+    if "vllm" in _PROVIDERS:
+        return
+    try:
+        from shark.llm.vllm_client import VLLMClient
+        _PROVIDERS["vllm"] = VLLMClient
+    except ImportError as exc:
+        logger.warning("vLLM client not importable (%s) — routing will fail soft", exc)
 
 
 def get_llm_client(
@@ -378,15 +395,20 @@ def get_llm_client(
     Create an LLM client for the specified provider.
 
     Args:
-        provider: One of "anthropic", "openai", "google". Defaults to env SHARK_LLM_PROVIDER or "anthropic".
-        model: Model name. Defaults to provider-specific default.
-        **kwargs: Additional kwargs passed to the client (e.g., api_key).
+        provider: One of "ollama", "vllm", "anthropic", "openai", "google".
+                  Defaults to env SHARK_LLM_PROVIDER or "ollama".
+        model:    Model name. Defaults to provider-specific default.
+        **kwargs: Additional kwargs passed to the client (e.g., api_key,
+                  base_url).
 
     Returns:
         LLMClient instance.
     """
     provider = provider or os.environ.get("SHARK_LLM_PROVIDER", "ollama")
     provider = provider.lower()
+
+    if provider == "vllm":
+        _maybe_register_vllm()
 
     cls = _PROVIDERS.get(provider)
     if cls is None:
@@ -398,6 +420,7 @@ def get_llm_client(
     if model is None:
         model_defaults = {
             "ollama":    os.environ.get("OLLAMA_MODEL", "hermes3:70b"),
+            "vllm":      os.environ.get("VLLM_BASE_MODEL", "qwen3:30b"),
             "anthropic": os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6"),
             "openai":    os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
             "google":    os.environ.get("GOOGLE_MODEL", "gemini-2.0-flash"),
@@ -709,3 +732,203 @@ def get_risk_client(**kwargs) -> LLMClient:
                               os.environ.get("SHARK_LLM_PROVIDER", "ollama"))
     model = os.environ.get("SHARK_RISK_LLM_MODEL")
     return get_llm_client(provider=provider, model=model, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Role-based routing — reads stocks/shark/model_tiers.json "routing" block
+# ---------------------------------------------------------------------------
+
+# Resolves to .../stocks/shark/model_tiers.json from .../stocks/shark/llm/
+from pathlib import Path as _Path  # noqa: E402
+
+_MODEL_TIERS_PATH = _Path(__file__).resolve().parent.parent / "model_tiers.json"
+_ROUTING_CACHE: dict[str, dict] | None = None
+
+
+def _load_routing() -> dict[str, dict]:
+    """Read the 'routing' map from model_tiers.json. Cached after first load."""
+    global _ROUTING_CACHE
+    if _ROUTING_CACHE is not None:
+        return _ROUTING_CACHE
+    try:
+        if _MODEL_TIERS_PATH.is_file():
+            raw = json.loads(_MODEL_TIERS_PATH.read_text())
+            routing = raw.get("routing") or {}
+            _ROUTING_CACHE = {
+                k: v for k, v in routing.items()
+                if isinstance(v, dict) and not k.startswith("_")
+            }
+            return _ROUTING_CACHE
+    except Exception as exc:
+        logger.warning("model_tiers.json routing block unreadable (%s)", exc)
+    _ROUTING_CACHE = {}
+    return _ROUTING_CACHE
+
+
+def _reset_routing_cache() -> None:
+    """Test helper — forget the cached routing map."""
+    global _ROUTING_CACHE
+    _ROUTING_CACHE = None
+
+
+def resolve_role_route(role: str) -> dict[str, str]:
+    """Return the routing record for *role*.
+
+    Lookup order:
+      1. Env override ``SHARK_ROLE_<UPPER>_BACKEND`` + ``..._MODEL`` /
+         ``..._ADAPTER`` — operator can override one role from the shell
+         without editing JSON.
+      2. ``routing[<role>]`` block in model_tiers.json.
+      3. Default: ``{"backend": "ollama", "model": "hermes3:8b"}`` —
+         safe, JSON-friendly, doesn't accidentally pull a 70b weight.
+
+    Returns:
+        ``{"backend": "ollama"|"vllm", "model": str, "adapter": str|None}``
+    """
+    role_key = (role or "").strip()
+    upper = role_key.replace("-", "_").upper()
+    env_backend = os.environ.get(f"SHARK_ROLE_{upper}_BACKEND")
+    if env_backend:
+        return {
+            "backend": env_backend.lower(),
+            "model": os.environ.get(f"SHARK_ROLE_{upper}_MODEL", ""),
+            "adapter": os.environ.get(f"SHARK_ROLE_{upper}_ADAPTER", ""),
+        }
+    routing = _load_routing()
+    rec = routing.get(role_key)
+    if rec:
+        backend = (rec.get("backend") or "ollama").lower()
+        if backend == "vllm":
+            return {
+                "backend": "vllm",
+                "model": rec.get("base") or rec.get("model")
+                or os.environ.get("VLLM_BASE_MODEL", "qwen3:30b"),
+                "adapter": rec.get("adapter", "") or "",
+            }
+        return {
+            "backend": "ollama",
+            "model": rec.get("model") or os.environ.get("OLLAMA_MODEL", "hermes3:8b"),
+            "adapter": "",
+        }
+    # Default: Ollama 8b — fast & cheap.
+    return {
+        "backend": "ollama",
+        "model": os.environ.get("OLLAMA_MODEL", "hermes3:8b"),
+        "adapter": "",
+    }
+
+
+def chat_by_role(
+    role: str,
+    system_prompt: str,
+    user_message: str,
+    *,
+    max_tokens: int = 1000,
+    temperature: float = 0.3,
+    agent: str = "unknown",
+    schema_hint: str = "",
+    json_mode: bool = False,
+) -> tuple[str, dict[str, int], str]:
+    """Route a chat call to the backend configured for *role*.
+
+    For roles routed to vLLM, the per-role LoRA adapter is selected at
+    call time. On any vLLM error (5xx, timeout, connection failure), the
+    call transparently falls back to Ollama using the base model with NO
+    adapter. The failure is logged at WARNING; metrics still flow through
+    the tracker (the served model name carries the adapter when used).
+
+    Args:
+        role:       Routing key (e.g. "trading-bull", "trading-arbiter").
+        system_prompt / user_message: standard chat content.
+        max_tokens, temperature: generation params.
+        agent:      Caller identifier used by the tracker.
+        schema_hint: Optional JSON Schema to append for grammar-friendly
+                    structured output (Ollama) / json_object mode (vLLM).
+        json_mode:  When True, request OpenAI ``response_format=json_object``
+                    on vLLM and ``format=json`` on the Ollama path.
+
+    Returns:
+        ``(content, usage, served_model)`` — same shape as ``chat_json``
+        so it's a drop-in replacement.
+    """
+    route = resolve_role_route(role)
+    backend = route["backend"]
+    user = user_message
+    if schema_hint:
+        user = (
+            f"{user_message}\n\n"
+            f"Respond with a single JSON object matching this exact schema "
+            f"(no prose, no markdown, no code-fence):\n{schema_hint}"
+        )
+
+    # ── vLLM path ────────────────────────────────────────────────────
+    if backend == "vllm":
+        try:
+            client = get_llm_client(provider="vllm", model=route["model"])
+            start = time.monotonic()
+            chat_kwargs: dict[str, Any] = {
+                "max_tokens": max_tokens, "temperature": temperature,
+            }
+            if route.get("adapter"):
+                chat_kwargs["adapter"] = route["adapter"]
+            if json_mode:
+                chat_kwargs["format"] = "json"
+            resp = client.chat(system_prompt, user, **chat_kwargs)
+            elapsed = time.monotonic() - start
+            _emit_tracker(
+                agent, resp.model, client.provider_name, elapsed,
+                resp.usage, tier="deep", role=role,
+                system_message=system_prompt,
+                user_message=user,
+                response_text=resp.content,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user},
+                    {"role": "assistant", "content": resp.content},
+                ],
+            )
+            return resp.content, resp.usage, resp.model
+        except Exception as exc:
+            # vLLM unreachable / 5xx — transparent fall-through to Ollama
+            # with the base model and NO adapter. Operator sees a warning
+            # in the log; trading continues in degraded mode.
+            from shark.llm.vllm_client import VLLMUnavailableError
+            if isinstance(exc, VLLMUnavailableError):
+                logger.warning(
+                    "vLLM unavailable for role=%s (%s) — falling back to "
+                    "Ollama base model", role, exc,
+                )
+            else:
+                logger.warning(
+                    "vLLM call failed for role=%s (%s) — falling back to Ollama",
+                    role, exc,
+                )
+            # Drop through to Ollama path below with the base model and no adapter.
+
+    # ── Ollama path (default + vLLM-fallback target) ────────────────
+    ollama_model = route.get("model") if backend == "ollama" else (
+        os.environ.get("VLLM_BASE_OLLAMA_TAG", "qwen3:30b")
+    )
+    # When called as the vLLM fallback we want SHARK_<ROLE>_LLM_MODEL
+    # not to silently rewrite the model; pin it for this single call.
+    env_key = f"SHARK_{role.upper().replace('-', '_')}_LLM_MODEL"
+    saved = os.environ.get(env_key)
+    os.environ[env_key] = ollama_model
+    try:
+        content, usage, model = chat_json(
+            system_prompt=system_prompt,
+            user_message=user_message,  # raw — chat_json appends its own hint
+            max_tokens=max_tokens,
+            temperature=temperature,
+            role=role,
+            tier="deep" if "70b" in (ollama_model or "") or "30b" in (ollama_model or "")
+                 else "fast",
+            agent=agent,
+            schema_hint=schema_hint,
+        )
+        return content, usage, model
+    finally:
+        if saved is None:
+            os.environ.pop(env_key, None)
+        else:
+            os.environ[env_key] = saved

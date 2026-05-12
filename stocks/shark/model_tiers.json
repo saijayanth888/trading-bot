@@ -1,5 +1,6 @@
 {
-  "_comment": "Two-tier model assignment for the LangGraph-style debate. Grunts run on hermes3:8b for speed; judges (Research Manager, Portfolio Manager) run on hermes3:70b for quality. Operator can flip any node by editing this file — no code changes required.",
+  "_comment": "Per-role LLM routing. Two backends: 'ollama' (default — JSON-only fast roles) and 'vllm' (qwen3:30b base + hot-swappable LoRA adapter per request). When backend='vllm' is unavailable, the router silently falls back to Ollama with the base model and NO adapter — see docs/VLLM_SERVING.md ('Fallback behavior'). The legacy flat 'role: model' shape is preserved as a default so existing callers in shark.graph (which read this file directly with _load_model_tiers) keep working unchanged.",
+
   "market_analyst": "hermes3:8b",
   "sentiment_analyst": "hermes3:8b",
   "news_analyst": "hermes3:8b",
@@ -11,5 +12,17 @@
   "conservative_critic": "hermes3:8b",
   "aggressive_critic": "hermes3:8b",
   "neutral_critic": "hermes3:8b",
-  "portfolio_manager": "hermes3:70b"
+  "portfolio_manager": "hermes3:70b",
+
+  "routing": {
+    "_comment": "Per-role backend + model/adapter selection consumed by shark.llm.client.resolve_role_route(). When a role is missing from this map, the router falls back to the flat 'role: model' table above on Ollama.",
+
+    "trading-reflector":          {"backend": "vllm",   "base": "qwen3:30b",       "adapter": "reflector"},
+    "trading-bull":               {"backend": "vllm",   "base": "qwen3:30b",       "adapter": "bull"},
+    "trading-bear":               {"backend": "vllm",   "base": "qwen3:30b",       "adapter": "bear"},
+    "trading-arbiter":            {"backend": "vllm",   "base": "qwen3:30b",       "adapter": "arbiter"},
+
+    "trading-regime-tagger":      {"backend": "ollama", "model": "hermes3:8b-trader"},
+    "trading-indicator-selector": {"backend": "ollama", "model": "hermes3:8b-trader"}
+  }
 }
