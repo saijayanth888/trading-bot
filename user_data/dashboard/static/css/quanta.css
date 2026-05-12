@@ -804,24 +804,27 @@ table.t .row-strike td { color: var(--fg-3); }
   flex: 1 1 auto;
   min-width: 0;
 }
-/* Role-monogram avatar — 18×18 square, 10px tabular mono glyph, role-tinted
-   background. Subtle: 12% alpha fill so it reads as a chip not a button. */
+/* Role-icon avatar — 20×20 square chip holding a 12px SVG glyph. The icon
+   uses currentColor so the role-tinted color class carries through to the
+   strokes/fills. Subtle 12% alpha background so the chip reads as a chip,
+   not a button. */
 .af-avatar {
-  flex: 0 0 18px;
-  height: 18px;
-  width: 22px;
+  flex: 0 0 20px;
+  height: 20px;
+  width: 20px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-family: var(--mono);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0;
   border-radius: var(--r-sm);
   border: 1px solid var(--line-2);
   color: var(--fg-1);
   background: var(--bg-card-2);
   user-select: none;
+}
+.af-avatar svg {
+  display: block;
+  width: 12px;
+  height: 12px;
 }
 .af-avatar-up      { color: var(--up);     border-color: var(--up-line);     background: color-mix(in srgb, var(--up) 12%, transparent); }
 .af-avatar-down    { color: var(--down);   border-color: var(--down-line);   background: color-mix(in srgb, var(--down) 12%, transparent); }

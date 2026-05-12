@@ -3543,23 +3543,80 @@
     return "";
   }
 
-  // Per-role agent avatar — 18×18 monogram chip with role-tinted background,
-  // shown next to the box title so the operator can identify the role at a
-  // glance without reading the lowercase snake_case label. Monograms match
-  // the operator's mental model:
-  //   regime_tagger       → "RT"  (gray)
-  //   indicator_selector  → "IS"  (gray)
-  //   bull_debater        → "B↑"  (green)
-  //   bear_debater        → "B↓"  (red)
-  //   arbiter             → "AR"  (blue)
-  //   reflector           → "RF"  (amber)
+  // Per-role agent avatar — 18×18 SVG chip with role-tinted background and
+  // an icon that signals what the agent DOES. currentColor carries the role
+  // tint through, so the same icon shape inherits the right hue. Style:
+  // 12×12 viewBox, 1.4px stroke, round caps. Hand-picked to match the
+  // operator's mental model of each agent's job:
+  //   regime_tagger       → trend line                  (gray  / neutral)
+  //   indicator_selector  → sliders                     (gray  / neutral)
+  //   bull_debater        → up arrow with riser         (green / up)
+  //   bear_debater        → down arrow with stem        (red   / down)
+  //   arbiter             → balance scales              (blue  / info)
+  //   reflector           → cyclical refresh arrow      (amber / warn)
+  function _afIconSvg(paths, opts) {
+    opts = opts || {};
+    const attrs = {
+      viewBox: "0 0 12 12",
+      width: 12,
+      height: 12,
+      fill: opts.fill ? "currentColor" : "none",
+      stroke: opts.fill ? "none" : "currentColor",
+      strokeWidth: opts.stroke || 1.4,
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      "aria-hidden": "true",
+    };
+    return h("svg", attrs, ...paths);
+  }
+  function _afIconRegimeTagger() {
+    return _afIconSvg([
+      h("path", { d: "M1.5 9 L4.5 6 L7.5 7.5 L10.5 3" }),
+      h("path", { d: "M10.5 6 L10.5 3 L7.5 3" }),
+    ]);
+  }
+  function _afIconIndicatorSelector() {
+    return _afIconSvg([
+      h("line", { x1: 2, y1: 3, x2: 10, y2: 3 }),
+      h("circle", { cx: 7.5, cy: 3, r: 1.3, fill: "currentColor", stroke: "none" }),
+      h("line", { x1: 2, y1: 6, x2: 10, y2: 6 }),
+      h("circle", { cx: 4, cy: 6, r: 1.3, fill: "currentColor", stroke: "none" }),
+      h("line", { x1: 2, y1: 9, x2: 10, y2: 9 }),
+      h("circle", { cx: 8, cy: 9, r: 1.3, fill: "currentColor", stroke: "none" }),
+    ], { stroke: 1.2 });
+  }
+  function _afIconBull() {
+    return _afIconSvg([
+      h("path", { d: "M6 1 L11 7 L8 7 L8 11 L4 11 L4 7 L1 7 Z" }),
+    ], { fill: true });
+  }
+  function _afIconBear() {
+    return _afIconSvg([
+      h("path", { d: "M6 11 L11 5 L8 5 L8 1 L4 1 L4 5 L1 5 Z" }),
+    ], { fill: true });
+  }
+  function _afIconArbiter() {
+    return _afIconSvg([
+      h("rect", { x: 5.5, y: 1.5, width: 1, height: 8.5, fill: "currentColor", stroke: "none" }),
+      h("rect", { x: 2, y: 9.5, width: 8, height: 1, fill: "currentColor", stroke: "none" }),
+      h("path", { d: "M1 5 L5 5 L3 8.2 Z", fill: "currentColor", stroke: "none" }),
+      h("path", { d: "M7 5 L11 5 L9 8.2 Z", fill: "currentColor", stroke: "none" }),
+      h("line", { x1: 2.5, y1: 4, x2: 9.5, y2: 4 }),
+    ], { stroke: 1.0 });
+  }
+  function _afIconReflector() {
+    return _afIconSvg([
+      h("path", { d: "M2.5 3 A4 4 0 1 1 2.5 9" }),
+      h("path", { d: "M2.5 3 L2.5 1 L4.5 1" }),
+    ]);
+  }
   const _AF_AVATARS = {
-    regime_tagger:      { glyph: "RT", tone: "neutral" },
-    indicator_selector: { glyph: "IS", tone: "neutral" },
-    bull_debater:       { glyph: "B↑", tone: "up" },
-    bear_debater:       { glyph: "B↓", tone: "down" },
-    arbiter:            { glyph: "AR", tone: "info" },
-    reflector:          { glyph: "RF", tone: "warn" },
+    regime_tagger:      { tone: "neutral", icon: _afIconRegimeTagger },
+    indicator_selector: { tone: "neutral", icon: _afIconIndicatorSelector },
+    bull_debater:       { tone: "up",      icon: _afIconBull },
+    bear_debater:       { tone: "down",    icon: _afIconBear },
+    arbiter:            { tone: "info",    icon: _afIconArbiter },
+    reflector:          { tone: "warn",    icon: _afIconReflector },
   };
 
   // Strip JSON syntax noise from a response gist so it renders as flat
@@ -3615,7 +3672,7 @@
           av && h("span", {
             className: "af-avatar af-avatar-" + av.tone,
             "aria-hidden": "true",
-          }, av.glyph),
+          }, av.icon ? av.icon() : av.glyph),
           h("span", { className: "af-title" }, role)
         );
       })(),
