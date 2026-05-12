@@ -266,7 +266,11 @@ def get_positions() -> list[dict[str, Any]]:
         Each dict contains: ``symbol``, ``qty`` (float),
         ``avg_entry_price`` (float), ``current_price`` (float),
         ``unrealized_pl`` (float), ``unrealized_plpc`` (float),
-        ``market_value`` (float), ``side`` (str).
+        ``market_value`` (float), ``side`` (str),
+        ``asset_class`` (str — e.g. ``"us_equity"``, ``"us_option"``, ``"crypto"``).
+        ``asset_class`` is critical for Shark/Wheel isolation — Shark must
+        skip non-equity rows (Wheel-owned). Defaults to ``"us_equity"`` if
+        the broker omits the field (legacy compatibility).
         Returns an empty list when there are no open positions.
 
     Raises
@@ -284,6 +288,11 @@ def get_positions() -> list[dict[str, Any]]:
 
     result: list[dict[str, Any]] = []
     for pos in positions:
+        # asset_class is what tells Shark "skip this — it's not yours". The
+        # 2026-05-12 leak (5 Wheel options closed at -7%) happened because
+        # this field was dropped on the way out, so downstream gates couldn't
+        # tell options from equities. Default to "us_equity" only as a
+        # legacy-compat fallback — real Alpaca responses always set it.
         result.append(
             {
                 "symbol": getattr(pos, "symbol", None),
@@ -294,6 +303,9 @@ def get_positions() -> list[dict[str, Any]]:
                 "unrealized_plpc": _safe_float(getattr(pos, "unrealized_plpc", None)),
                 "market_value": _safe_float(getattr(pos, "market_value", None)),
                 "side": _enum_val(getattr(pos, "side", "")),
+                "asset_class": _enum_val(
+                    getattr(pos, "asset_class", "us_equity")
+                ) or "us_equity",
             }
         )
 
