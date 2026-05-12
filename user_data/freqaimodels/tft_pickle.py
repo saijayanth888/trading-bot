@@ -50,8 +50,31 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-import torch
-from torch import nn
+# Torch is only required by the runtime save/load path (TFTTrainerWrapper).
+# The validation + quarantine helpers (validate_model_zip,
+# scan_pair_dictionary_for_quarantine) use zipfile/stat only, so the
+# dashboard container — which does NOT install PyTorch — can still import
+# this module to surface training health. Guard the import so module
+# load doesn't fail there; functions that DO need torch raise explicitly.
+try:
+    import torch  # type: ignore[import]
+    from torch import nn  # type: ignore[import]
+    _TORCH_AVAILABLE = True
+except ImportError:
+    torch = None  # type: ignore[assignment]
+    nn = None  # type: ignore[assignment]
+    _TORCH_AVAILABLE = False
+
+
+def _require_torch(caller: str) -> None:
+    if not _TORCH_AVAILABLE:
+        raise RuntimeError(
+            f"{caller} needs PyTorch, but torch is not importable in this "
+            "process. The freqtrade container has torch; the dashboard "
+            "container intentionally does not. This codepath should only "
+            "be hit from the trading runtime."
+        )
+
 
 logger = logging.getLogger(__name__)
 
@@ -269,14 +292,14 @@ def _maybe_emit_stub_alert(pair: str, path: Path, exc: Exception) -> None:
         )
 
 
-def _set_inference_mode(module: nn.Module) -> None:
+def _set_inference_mode(module: "nn.Module") -> None:  # type: ignore[name-defined]
     """Switch a module to inference mode without using ``.eval()`` directly
     (some hooks treat ``.eval()`` as a signal to deregister; ``.train(False)``
     is the equivalent contract without that side-effect)."""
     module.train(False)
 
 
-def _set_training_mode(module: nn.Module) -> None:
+def _set_training_mode(module: "nn.Module") -> None:  # type: ignore[name-defined]
     module.train(True)
 
 
@@ -442,7 +465,8 @@ class TFTTrainerWrapper:
     to succeed on retrains.
     """
 
-    def __init__(self, model: nn.Module, model_meta_data: dict[str, Any]):
+    def __init__(self, model: "nn.Module", model_meta_data: dict[str, Any]):  # type: ignore[name-defined]
+        _require_torch("TFTTrainerWrapper.__init__")
         self.model = model
         self.model_meta_data = model_meta_data
         self.optimizer = None  # populated by fit() - kept for save() round-trip
