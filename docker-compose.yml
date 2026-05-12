@@ -203,6 +203,86 @@ services:
       --config /freqtrade/user_data/strategies/nfi_x6_config.json
       --strategy NostalgiaForInfinityX6
 
+  # ── vLLM with hot-swappable LoRA adapters (PROFILED OFF) ──────────────
+  # Serves qwen3:30b as a base + 4 prose-role LoRAs (reflector / bull /
+  # bear / arbiter). vLLM 0.5+ supports per-request adapter selection
+  # (5-10 ms PCIe-fetch) which Ollama doesn't. Ollama keeps serving the
+  # JSON-only roles (regime tagger, indicator selector) on 11434.
+  #
+  # OFF by default — `docker compose up` will NOT start this. Activate:
+  #     bash scripts/bootstrap_vllm.sh
+  # (or directly: `docker compose --profile vllm up -d vllm`)
+  #
+  # NOTE: the spec called for host port 8090, but freqtrade-nfi already
+  # claims 8090 on loopback. Because both services are profile-gated
+  # (`nfi` vs `vllm`) and only one runs at a time in normal operation,
+  # we can keep 8090 here too — but documenting the collision in
+  # docs/VLLM_SERVING.md so the operator doesn't run both profiles at
+  # once without thinking. The container also exposes 8000 internally
+  # (vLLM's OpenAI server default), so other compose services reach
+  # vLLM at `http://vllm:8000`.
+  #
+  # IMPORTANT: vLLM/OpenAI image expects HF model ids, not Ollama tags.
+  # We pull `Qwen/Qwen3-30B-A3B-Instruct-2507` into the HF cache below;
+  # the trading-bot code still calls it "qwen3:30b" via VLLM_BASE_MODEL.
+  # ──────────────────────────────────────────────────────────────────────
+  vllm:
+    profiles: ["vllm"]
+    image: vllm/vllm-openai:latest
+    container_name: vllm
+    restart: unless-stopped
+    runtime: nvidia
+    shm_size: 16g
+    mem_limit: 64g
+    memswap_limit: 64g
+    ipc: host
+    # Loopback only — same convention as freqtrade / freqtrade-nfi.
+    # See note above on the port-8090 collision with freqtrade-nfi.
+    ports:
+      - "127.0.0.1:8090:8000"
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - VLLM_HOST_IP=0.0.0.0
+      # Where HF caches model weights. Persisted via a named volume so
+      # we don't redownload 30 GB on every container restart.
+      - HF_HOME=/cache/huggingface
+      - HUGGINGFACE_HUB_CACHE=/cache/huggingface/hub
+    volumes:
+      - vllm_cache:/cache/huggingface
+      # Adapter store on the host — ModelForge writes promoted champions
+      # here, and the operator (or a cron) calls /v1/load_lora_adapter
+      # to register new ones without bouncing the container.
+      - ./data/lora-adapters:/lora:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      # vLLM's /health on the OpenAI server (port 8000 inside container).
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 300s  # cold-start can be 3-5 min (weight load + JIT)
+    command:
+      - --model=${VLLM_HF_MODEL:-Qwen/Qwen3-30B-A3B-Instruct-2507}
+      - --served-model-name=${VLLM_BASE_MODEL:-qwen3:30b}
+      - --quantization=${VLLM_QUANTIZATION:-fp8}
+      - --gpu-memory-utilization=${VLLM_GPU_MEM_UTIL:-0.45}
+      - --max-model-len=${VLLM_MAX_MODEL_LEN:-8192}
+      - --enable-lora
+      - --max-loras=6
+      - --max-lora-rank=32
+      - --max-cpu-loras=12
+      - --lora-modules
+      - reflector=/lora/reflector-current
+      - bull=/lora/bull-current
+      - bear=/lora/bear-current
+      - arbiter=/lora/arbiter-current
+
   # ── DEPRECATION NOTICE ────────────────────────────────────────────────
   # InfluxDB is scheduled for removal once Grafana dashboards are migrated
   # to query TimescaleDB directly. Until then, both run in parallel.
@@ -350,3 +430,6 @@ volumes:
   influxdb_data:
   influxdb_config:
   grafana_data:
+  # Persists the HF model cache for vLLM — first pull is ~30 GB, we
+  # don't want to redo it on every container restart.
+  vllm_cache:
