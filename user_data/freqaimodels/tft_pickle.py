@@ -324,6 +324,32 @@ def _set_training_mode(module: "nn.Module") -> None:  # type: ignore[name-define
 # rewriting it from user_data code risks races. Instead the operator (or the
 # next 24h retrain cycle) clears the bad entries. The strategy-side Fix 3
 # does the runtime no-op for any pair flagged here.
+#
+# Self-healing — auto-rehab on next successful training cycle
+# -----------------------------------------------------------
+# This module FLAGS, but never EXCLUDES. Quarantine status is consumed by:
+#   - the strategy (degrades to no-op signal — Fix 3 in FreqAIMeanRevV1.py
+#     of the original `fix/train-pipeline-prod-ready` branch),
+#   - the dashboard TrainingHealthLive card (informational badge),
+#   - the TFT-blind fallback path (when operator enables
+#     strategy_overrides.tft_blind_fallback, the strategy falls through
+#     to BollingerRSI MR signal at degraded sizing instead of going dark).
+#
+# Critically, NO code path consults the quarantine set to skip a pair
+# during training. FreqAI's training-queue selection is driven entirely
+# by the pair_whitelist + the live_retrain_hours scheduler — the pair
+# stays in queue and IS retrained on schedule. When the new training
+# cycle produces a valid model.zip (Fix 1 of `fix/train-pipeline-prod-
+# ready` runs validate_model_zip BEFORE promoting .tmp → final), the
+# pair_dictionary entry's trained_timestamp is bumped and the next
+# scan_pair_dictionary_for_quarantine returns status=ok. The pair
+# self-rehabilitates with no operator intervention.
+#
+# The startup-banner emit-once latch (_QUARANTINE_LOGGED) is augmented
+# below by quarantine_rehab_summary(), which is intended to be called
+# at strategy bot_start: it names every currently-quarantined pair AND
+# explicitly states that they will retrain on next freqai cycle. This
+# is the operator's "I see it, here's when it heals" signal.
 # ---------------------------------------------------------------------------
 
 # Use the user_data root as a fallback when no env override is given.
@@ -451,6 +477,88 @@ def quarantined_pairs(identifier: str = "tft_v1") -> set[str]:
         pair for pair, info in scan_pair_dictionary_for_quarantine(identifier).items()
         if info["status"] != "ok"
     }
+
+
+# Track rehabilitation transitions so we log when a pair heals.
+# Key: "{identifier}:{pair}" → last-seen status string.
+_REHAB_STATUS_SEEN: dict[str, str] = {}
+
+
+def quarantine_rehab_summary(identifier: str = "tft_v1") -> dict[str, Any]:
+    """Emit (and return) a structured rehabilitation summary for the
+    quarantine set. Designed to be called from strategy bot_start so
+    the operator sees, at boot, every currently-quarantined pair AND
+    the explicit message that those pairs WILL retrain on the next
+    freqai cycle and self-rehabilitate.
+
+    Returns::
+
+        {
+            "quarantined": [pair, ...],   # status != ok at scan time
+            "ok":          [pair, ...],
+            "rehabilitated": [pair, ...], # were !=ok last scan, now ok
+            "newly_quarantined": [pair, ...],
+        }
+
+    Side effects:
+      - One INFO log per quarantined-pair list (deduped per process via
+        the snapshot of status above — re-runs only re-log on transitions).
+      - One INFO log per rehabilitated pair on the call that detects the
+        transition.
+
+    No state on disk is mutated — pair_dictionary is owned by freqai.
+    """
+    summary: dict[str, list[str]] = {
+        "quarantined": [],
+        "ok": [],
+        "rehabilitated": [],
+        "newly_quarantined": [],
+    }
+    try:
+        scan = scan_pair_dictionary_for_quarantine(identifier)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("[tft-rehab] scan failed (continuing): %s", exc)
+        return summary
+
+    for pair, info in scan.items():
+        status = info.get("status", "error")
+        key = f"{identifier}:{pair}"
+        prev = _REHAB_STATUS_SEEN.get(key)
+
+        if status == "ok":
+            summary["ok"].append(pair)
+            if prev is not None and prev != "ok":
+                summary["rehabilitated"].append(pair)
+                logger.info(
+                    "[tft-rehab] %s REHABILITATED — last status was %r, "
+                    "freqai now reports trained_ts > 0 and model.zip validates. "
+                    "Strategy will resume full TFT-driven signals on next candle.",
+                    pair, prev,
+                )
+        else:
+            summary["quarantined"].append(pair)
+            if prev != status:
+                summary["newly_quarantined"].append(pair)
+
+        _REHAB_STATUS_SEEN[key] = status
+
+    if summary["quarantined"]:
+        logger.info(
+            "[tft-rehab] %d/%d pair(s) quarantined; "
+            "will rehabilitate on next successful training cycle: %s. "
+            "FreqAI's training queue is NOT filtered by quarantine — these "
+            "pairs stay in the live_retrain_hours rotation and will heal "
+            "automatically when their next model.zip validates clean.",
+            len(summary["quarantined"]), len(scan),
+            ", ".join(sorted(summary["quarantined"])),
+        )
+    else:
+        logger.info(
+            "[tft-rehab] all %d pair(s) validate OK — no rehabilitation pending",
+            len(scan),
+        )
+
+    return summary
 
 
 class TFTTrainerWrapper:

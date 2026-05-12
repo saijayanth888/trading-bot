@@ -854,7 +854,26 @@
           ? "stub = size < 1 MB or no data.pkl · missing = trained_ts = 0 (last save failed) · investigate before next retrain"
           : staleN > 0
             ? "stale rows have not retrained in the last " + Math.round(staleThreshold) + "h — check freqai live_retrain_hours"
-            : "all artifacts pass: size > 1 MB · data.pkl present · tensor blobs > 0")
+            : "all artifacts pass: size > 1 MB · data.pkl present · tensor blobs > 0"),
+      // Fix 6: TFT-blind fallback footer line. Shown only when at least
+      // one pair is eligible so the operator knows their config setting
+      // is actively governing live trading behaviour.
+      (function() {
+        const tbf = env.tft_blind_fallback || {};
+        const eligible = tbf.eligible_count || 0;
+        if (eligible <= 0) return null;
+        const mult = Math.round((tbf.position_size_multiplier || 0.5) * 100);
+        const active = tbf.active_count || 0;
+        const cls = tbf.enabled ? "warn" : "down";
+        const txt = tbf.enabled
+          ? "tft-blind fallback ON · " + active + " pair(s) trading on BollingerRSI MR at " + mult + "% size · auto-disables when TFT retrains clean"
+          : "tft-blind fallback OFF · " + eligible + " eligible pair(s) DARK · set strategy_overrides.tft_blind_fallback.enabled=true to trade them at " + mult + "% size";
+        return h("div", {
+          className: "mono " + cls,
+          style: { fontSize: "var(--t-2xs)", padding: "var(--s-2) 0 0",
+                   letterSpacing: ".06em" }
+        }, txt);
+      })()
     );
   }
 
@@ -885,14 +904,38 @@
     }, kids);
 
     // Pair name. On stub/missing the cell stays default colour but the
-    // status pill carries the red.
-    const pairCell = cell(
+    // status pill carries the red. When TFT-blind fallback is eligible
+    // for this pair, append a small chip:
+    //   [blind] (warn) → fallback ACTIVE — pair is trading on BollingerRSI
+    //   [dark]  (down) → fallback DISABLED — pair is no-op until retrain
+    let blindChip = null;
+    if (p.tft_blind_active) {
+      blindChip = h("span", {
+        className: "pill warn",
+        style: { height: 14, fontSize: "var(--t-2xs)", marginLeft: 4 },
+        title: "TFT-blind fallback ACTIVE — trading on BollingerRSI MR signal at degraded sizing. Will auto-disable on next successful TFT retrain."
+      },
+        h("span", { className: "dot warn" }),
+        " blind"
+      );
+    } else if (p.tft_blind_eligible) {
+      blindChip = h("span", {
+        className: "pill down",
+        style: { height: 14, fontSize: "var(--t-2xs)", marginLeft: 4 },
+        title: "Eligible for TFT-blind fallback but operator has not enabled it (strategy_overrides.tft_blind_fallback.enabled = false). Pair is DARK until the next successful TFT retrain."
+      },
+        h("span", { className: "dot down" }),
+        " dark"
+      );
+    }
+    const pairCell = cell([
       h("span", {
         className: "mono",
         style: { color: "var(--fg-1)", fontFamily: "var(--mono)" },
         title: p.reason || ""
-      }, p.pair)
-    );
+      }, p.pair),
+      blindChip,
+    ].filter(Boolean));
 
     const statusCell = cell(
       h("span", {
