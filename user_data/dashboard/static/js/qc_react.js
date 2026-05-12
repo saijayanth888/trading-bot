@@ -859,49 +859,90 @@
   // ─────────────── Topbar ───────────────
   // Note: tweaks (theme/density/accent) are NOT ported; only the props
   // (killState, setKillState, active, density) used by the prototype itself.
-  function Topbar({ killState, setKillState, active, density, onRefreshIntervalChange, onRefreshNow }) {
+  //
+  // Tier C P1-1 (2026-05-12): Topbar previously polled /api/ops/uptime,
+  // /api/ops/combined_portfolio, /api/mode, /api/ops/services every 30s on
+  // top of useOpsData's 10s polling of the same three endpoints (combined
+  // portfolio, mode, services). Net: 3 endpoints × 30s + same 3 × 10s = 9
+  // duplicate calls per minute.
+  //
+  // Fix: accept these envelopes as optional props (combinedPortfolio, mode,
+  // services). When provided, Topbar reads from props and skips its own
+  // fetch. When omitted (e.g. on /dashboard pair page where there's no
+  // useOpsData → but note dashboard_spa uses its own TopbarLive instead, so
+  // in practice this fallback path is dead today; it remains defensive in
+  // case a future page mounts Topbar directly). Uptime poll stays because
+  // /api/ops/uptime is NOT in useOpsData's FAST_ENDPOINTS list.
+  //
+  // INVARIANT: when combinedPortfolio/mode/services props are provided, this
+  // component must NOT issue duplicate fetches for those endpoints. Future
+  // edits: do not re-introduce parallel fetch sites here.
+  function Topbar({ killState, setKillState, active, density, onRefreshIntervalChange, onRefreshNow,
+                    combinedPortfolio, mode: modeProp, services: servicesProp }) {
     const [clock, setClock] = useState(fmtClock());
     // Real uptime — poll /api/ops/uptime every 30s for freqtrade's actual
     // start time. Earlier this was page-load time, which made the pill
     // read "0h 0m" every refresh — not useful.
     const [uptime, setUptime] = useState("—");
-    const [equity, setEquity] = useState({ value: null, deltaPct: null });
-    // Live pill state — previously these were hardcoded "PAPER · DRY-RUN" and
-    // "FREQTRADE OK" strings that lied through any incident. mode comes from
-    // /api/mode, ftUp from /api/ops/services.
-    const [mode, setMode] = useState({ label: "—", dry: true, healthy: false });
-    const [ftUp, setFtUp] = useState(null);   // null = unknown, true/false otherwise
+    // Equity/mode/ftUp are derived from props when provided; otherwise
+    // populated by the local-fallback fetch below.
+    const [equityLocal, setEquityLocal] = useState({ value: null, deltaPct: null });
+    const [modeLocal, setModeLocal] = useState({ label: "—", dry: true, healthy: false });
+    const [ftUpLocal, setFtUpLocal] = useState(null);
+
+    // ── Always-on: clock + uptime (uptime not covered by useOpsData) ──
     useEffect(() => {
+      const ctrl = new AbortController();
       const t = setInterval(() => setClock(fmtClock()), 1000);
-      const refresh = async () => {
+      const refreshUptime = async () => {
         try {
-          const r = await fetch("/api/ops/uptime", { cache: "no-store" });
+          const r = await fetch("/api/ops/uptime", { cache: "no-store", signal: ctrl.signal });
+          if (!r.ok) return;
           const j = await r.json().catch(() => ({}));
+          if (ctrl.signal.aborted) return;
           const ft = (j && j.data && j.data.freqtrade) || {};
           if (typeof ft.uptime_s === "number") {
             const s = ft.uptime_s;
             const d = Math.floor(s / 86400);
-            const h = Math.floor((s % 86400) / 3600);
+            const hh = Math.floor((s % 86400) / 3600);
             const m = Math.floor((s % 3600) / 60);
-            setUptime(d > 0 ? `${d}d ${h}h ${m}m` : (h > 0 ? `${h}h ${m}m` : `${m}m`));
+            setUptime(d > 0 ? `${d}d ${hh}h ${m}m` : (hh > 0 ? `${hh}h ${m}m` : `${m}m`));
           } else {
             setUptime("—");
           }
-        } catch (_) { /* ignore */ }
+        } catch (e) { if (e && e.name !== "AbortError") { /* ignore */ } }
+      };
+      refreshUptime();
+      const u = setInterval(refreshUptime, 30000);
+      return () => { clearInterval(t); clearInterval(u); ctrl.abort(); };
+    }, []);
+
+    // ── Local fallback poll: only runs when parent did NOT pass envelopes ──
+    // Cadence bumped to 30s (was 30s already) and ONLY active when no prop
+    // is provided. This is the dead-path for now (ops passes props,
+    // dashboard_spa uses TopbarLive) but kept defensive.
+    const haveProps = combinedPortfolio != null || modeProp != null || servicesProp != null;
+    useEffect(() => {
+      if (haveProps) return; // P1-1 invariant: skip fetch when props feed us
+      const ctrl = new AbortController();
+      const refresh = async () => {
         try {
-          const r = await fetch("/api/ops/combined_portfolio", { cache: "no-store" });
+          const r = await fetch("/api/ops/combined_portfolio", { cache: "no-store", signal: ctrl.signal });
+          if (!r.ok) return;
           const j = await r.json().catch(() => ({}));
+          if (ctrl.signal.aborted) return;
           const d = (j && j.data) || {};
           const total = Number(d.total_equity);
           const dd = Number(d.combined_drawdown_pct);
           if (Number.isFinite(total)) {
-            setEquity({ value: total, deltaPct: Number.isFinite(dd) ? -Math.abs(dd) : null });
+            setEquityLocal({ value: total, deltaPct: Number.isFinite(dd) ? -Math.abs(dd) : null });
           }
-        } catch (_) { /* ignore */ }
-        // /api/mode — { mode: "paper"|"live", dry_run: bool, state: "running"|"paused"|... }
+        } catch (e) { if (e && e.name !== "AbortError") { /* ignore */ } }
         try {
-          const r = await fetch("/api/mode", { cache: "no-store" });
+          const r = await fetch("/api/mode", { cache: "no-store", signal: ctrl.signal });
+          if (!r.ok) return;
           const j = await r.json().catch(() => ({}));
+          if (ctrl.signal.aborted) return;
           const m = String(j && j.mode || "").toLowerCase();
           const dry = !!(j && j.dry_run);
           const st = String(j && j.state || "").toLowerCase();
@@ -909,20 +950,57 @@
           const label = (m === "paper" || dry)
             ? (dry ? "PAPER · DRY-RUN" : "PAPER")
             : "LIVE";
-          setMode({ label, dry, healthy });
-        } catch (_) { /* ignore */ }
-        // /api/ops/services — { data: { freqtrade: { up: bool, ... }, ... } }
+          setModeLocal({ label, dry, healthy });
+        } catch (e) { if (e && e.name !== "AbortError") { /* ignore */ } }
         try {
-          const r = await fetch("/api/ops/services", { cache: "no-store" });
+          const r = await fetch("/api/ops/services", { cache: "no-store", signal: ctrl.signal });
+          if (!r.ok) return;
           const j = await r.json().catch(() => ({}));
+          if (ctrl.signal.aborted) return;
           const ftSvc = (j && j.data && j.data.freqtrade) || {};
-          setFtUp(typeof ftSvc.up === "boolean" ? ftSvc.up : null);
-        } catch (_) { /* ignore */ }
+          setFtUpLocal(typeof ftSvc.up === "boolean" ? ftSvc.up : null);
+        } catch (e) { if (e && e.name !== "AbortError") { /* ignore */ } }
       };
       refresh();
       const u = setInterval(refresh, 30000);
-      return () => { clearInterval(t); clearInterval(u); };
-    }, []);
+      return () => { clearInterval(u); ctrl.abort(); };
+    }, [haveProps]);
+
+    // ── Resolve final values: prefer props, fall back to local poll ──
+    const equity = (() => {
+      if (combinedPortfolio != null) {
+        const d = (combinedPortfolio && combinedPortfolio.data) || combinedPortfolio || {};
+        const total = Number(d.total_equity);
+        const dd = Number(d.combined_drawdown_pct);
+        if (Number.isFinite(total)) {
+          return { value: total, deltaPct: Number.isFinite(dd) ? -Math.abs(dd) : null };
+        }
+        return { value: null, deltaPct: null };
+      }
+      return equityLocal;
+    })();
+    const mode = (() => {
+      if (modeProp != null) {
+        const j = (modeProp && modeProp.data) || modeProp || {};
+        const m = String(j.mode || "").toLowerCase();
+        const dry = !!j.dry_run;
+        const st = String(j.state || "").toLowerCase();
+        const healthy = ["running", "reload_config", "starting", "init"].includes(st);
+        const label = (m === "paper" || dry)
+          ? (dry ? "PAPER · DRY-RUN" : "PAPER")
+          : (m ? "LIVE" : "—");
+        return { label, dry, healthy };
+      }
+      return modeLocal;
+    })();
+    const ftUp = (() => {
+      if (servicesProp != null) {
+        const ftSvc = (servicesProp && servicesProp.data && servicesProp.data.freqtrade) ||
+                       (servicesProp && servicesProp.freqtrade) || {};
+        return typeof ftSvc.up === "boolean" ? ftSvc.up : null;
+      }
+      return ftUpLocal;
+    })();
     return h(
       "header",
       { className: "topbar" },

@@ -3629,9 +3629,19 @@
       document.documentElement.style.setProperty("--accent", "#7c5cff");
     }, []);
 
+    // Tier C P1-1: feed Topbar from useOpsData state to eliminate duplicate
+    // polling. Previously Topbar polled mode/services/combined_portfolio
+    // every 30s on top of useOpsData's 10s. With these three envelopes as
+    // props, Topbar's local fetch path is skipped — only /api/ops/uptime
+    // (the one endpoint NOT in FAST_ENDPOINTS) is still polled by Topbar.
     return h(F, null,
       h("div", { className: "app" },
-        h(Topbar, { killState, setKillState, active: "ops" }),
+        h(Topbar, {
+          killState, setKillState, active: "ops",
+          combinedPortfolio: data.combined_portfolio,
+          mode: data.mode,
+          services: data.services,
+        }),
         h(Sidebar, { active: "ops" }),
         h("main", { className: "main" },
           h("div", { className: "page-title" },
