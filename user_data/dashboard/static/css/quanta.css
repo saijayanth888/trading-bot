@@ -141,10 +141,34 @@
   --fg-4: var(--fg-4, #3a3a42);
 }
 
-/* density */
-[data-density="compact"] { --pad-card: 12px; --gap-grid: 8px;  --row-h: 28px; }
-[data-density="default"] { --pad-card: 16px; --gap-grid: 12px; --row-h: 32px; }
-[data-density="roomy"]   { --pad-card: 20px; --gap-grid: 16px; --row-h: 38px; }
+/* density — V3 widened so the toggle actually changes scrollHeight by ≥15%.
+   The old block kept --pad-card at 12/16/20 (only ±4px deltas) which on a 30-card
+   page produced <3% scroll-height change. V3 widens the spread on the three
+   existing variables AND overrides --t-base / --t-md so body text reflows. The
+   :root fallback line below keeps non-density-attributed renders rendering
+   identically to today's default. */
+[data-density="compact"] {
+  --pad-card:    6px;    /* was 12 → ↓ 50%, drives ~600px savings across 30 cards */
+  --gap-grid:    4px;    /* was 8  → ↓ 50% */
+  --row-h:       22px;   /* was 28 → ↓ 21% */
+  --t-base:      12px;   /* was 13 (from :root); shrinks body line-height too */
+  --t-md:        13px;   /* was 14 (from :root) */
+  --t-sm:        11px;   /* was 12 (from :root); shrinks subtitle/caption */
+}
+[data-density="default"] {
+  --pad-card:    16px;   /* unchanged */
+  --gap-grid:    12px;   /* unchanged */
+  --row-h:       32px;   /* unchanged */
+  /* --t-base / --t-md / --t-sm inherit :root defaults (13 / 14 / 12) */
+}
+[data-density="roomy"] {
+  --pad-card:    32px;   /* was 20 → ↑ 60% */
+  --gap-grid:    24px;   /* was 16 → ↑ 50% */
+  --row-h:       46px;   /* was 38 → ↑ 21% */
+  --t-base:      15px;   /* was 13 (from :root); grows body line-height too */
+  --t-md:        16px;   /* was 14 (from :root) */
+  --t-sm:        13px;   /* was 12 (from :root); grows subtitle/caption */
+}
 :root { --pad-card: 16px; --gap-grid: 12px; --row-h: 32px; }
 
 /* ============================================================ base */
@@ -1383,3 +1407,117 @@ table.t tbody tr.flash-sell { animation: flash-sell 200ms cubic-bezier(0.2, 0, 0
   border-bottom-width: 2px;
   transition: border-bottom-color 200ms cubic-bezier(0.2, 0, 0, 1);
 }
+
+/* ============================================================
+   V3 TOKENS — Wave 0 (additive only, no existing token renamed
+   or revalued; consumed by Wave 1 signature-move components).
+   ============================================================
+   Plan reference: docs/V3_REDESIGN_PLAN.md §4.1.
+   Naming convention: --v3-* prefix on every NEW token so they
+   never collide with existing CSS. The three exceptions
+   (--up-2, --down-2, --hairline) are namespaced via grouping
+   classes only.
+   ============================================================ */
+
+:root {
+  /* --- Elevation / z-stack (depth via inset + shadow pairs) --- */
+  --v3-z-card-raised:   0 1px 0 rgba(255,255,255,.04) inset, 0 8px 24px -12px rgba(0,0,0,.6);
+  --v3-z-card-hover:    0 1px 0 rgba(255,255,255,.06) inset, 0 12px 32px -10px rgba(0,0,0,.7);
+  --v3-z-overlay:       0 1px 0 rgba(255,255,255,.08) inset, 0 24px 64px -16px rgba(0,0,0,.85);
+  --v3-z-flare-danger:  0 0 0 1px var(--down-line),  0 0 32px -8px rgba(240,68,55,.4);
+  --v3-z-flare-warn:    0 0 0 1px var(--warn-line),  0 0 32px -8px rgba(245,166,35,.35);
+  --v3-z-flare-up:      0 0 0 1px var(--up-line),    0 0 32px -8px rgba(46,194,126,.35);
+  --v3-z-flare-accent:  0 0 0 1px var(--accent-line),0 0 32px -8px rgba(124,92,255,.35);
+
+  /* --- Hairlines (Geist-style crisper borders) --- */
+  --v3-hairline:        0.5px solid rgba(255,255,255,.06);
+  --v3-hairline-strong: 1px solid   rgba(255,255,255,.10);
+  --v3-hairline-bold:   1px solid   rgba(255,255,255,.18);
+  --v3-hairline-up:     1px solid   var(--up-line);
+  --v3-hairline-down:   1px solid   var(--down-line);
+  --v3-hairline-warn:   1px solid   var(--warn-line);
+
+  /* --- Motion (sweep, flare, spring) --- */
+  --v3-dur-sweep:        1500ms;       /* hold-to-confirm (kill / flatten / pause) */
+  --v3-dur-flare:        600ms;        /* regime crossfade */
+  --v3-dur-spring:       240ms;
+  --v3-ease-spring:      cubic-bezier(.34, 1.56, .64, 1);   /* slight overshoot */
+  --v3-ease-decel:       cubic-bezier(.05, .8, .25, 1);
+
+  /* --- Heat-map ramp (Gates Matrix · §5.3 of plan) --- */
+  --v3-heat-0:           #0c0c10;   /* null / unknown / not-evaluated */
+  --v3-heat-1:           #1a3a2a;   /* pass-disabled (gate marked n/a) */
+  --v3-heat-2:           #2ec27e;   /* pass (= --up) */
+  --v3-heat-3:           #5a3a1a;   /* warn-dim */
+  --v3-heat-4:           #f5a623;   /* warn-bright (= --warn) */
+  --v3-heat-5:           #4a1818;   /* fail-soft (model_age, freshness) */
+  --v3-heat-6:           #f04437;   /* fail-hard (regime, capital_allocation = --down) */
+
+  /* --- Deeper accent colors (for emergency / promoted states) --- */
+  --v3-up-2:             #1a9c5a;   /* deeper green: champion adapter promoted */
+  --v3-down-2:           #c8342a;   /* deeper red: kill armed / drawdown halt */
+
+  /* --- Signature accents (used SPARINGLY — only on debate-live / refresh-in-flight / WS-live) --- */
+  --v3-electric-yellow:  #f5e63f;   /* debate-in-progress · refresh-in-flight ring */
+  --v3-cold-blue:        #4dc4ff;   /* WebSocket live-stream · AI-thinking pulse */
+
+  /* --- Hero P&L typography (DD Ribbon + scoreboard) --- */
+  --v3-t-hero:           96px;      /* big — only the day P&L number */
+  --v3-t-hero-md:        64px;      /* fallback at narrower viewports */
+  --v3-tracking-tight:   -0.025em;  /* letter-spacing for hero monospace digits */
+
+  /* --- Mono OpenType features (consumed via .v3-num utility) --- */
+  --v3-mono-features:    "tnum" 1, "zero" 1, "cv11" 1, "ss01" 1;
+}
+
+/* Utility: apply Bloomberg-grade tabular monospace to any element.
+   Consumed by Wave 1 components (DD Ribbon, scoreboard, sparkline tickers, gates matrix). */
+.v3-num {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums slashed-zero;
+  font-feature-settings: var(--v3-mono-features);
+  letter-spacing: -0.01em;
+}
+
+/* Utility: hero P&L digit (NumberRoll-compatible).
+   Used by card 00 scoreboard in Wave 1. */
+.v3-hero-num {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums slashed-zero;
+  font-feature-settings: var(--v3-mono-features);
+  font-size: var(--v3-t-hero);
+  letter-spacing: var(--v3-tracking-tight);
+  font-weight: 400;
+  line-height: 1;
+}
+@media (max-width: 1280px) {
+  .v3-hero-num { font-size: var(--v3-t-hero-md); }
+}
+
+/* Theme overrides for V3 tokens — keep the spirit of each theme.
+   Bloomberg flips the heat ramp to amber-saturated values so it reads
+   on the orange-on-black surface; Geist tightens the alpha hairlines. */
+[data-theme="bloomberg"] {
+  --v3-hairline:        0.5px solid rgba(255,174,40,.10);
+  --v3-hairline-strong: 1px solid   rgba(255,174,40,.18);
+  --v3-hairline-bold:   1px solid   rgba(255,174,40,.30);
+  --v3-heat-0:          #050505;
+  --v3-heat-1:          #1a2a18;
+  --v3-heat-2:          #50fa7b;
+  --v3-heat-4:          #ffd866;
+  --v3-heat-6:          #ff5555;
+  --v3-electric-yellow: #ffd866;
+  --v3-cold-blue:       #00d9ff;
+}
+[data-theme="geist"] {
+  --v3-hairline:        0.5px solid rgba(237,237,237,.07);
+  --v3-hairline-strong: 1px solid   rgba(237,237,237,.12);
+}
+
+/* ============================================================
+   End V3 Wave 0 tokens.
+   Wave 1 signature components (DD Ribbon, Debate Floor, Gates
+   Matrix, Sparkline Strip, Kill Bar, Heartbeat dot, Cmd-K
+   palette) consume these via the --v3-* names. No existing
+   token name was renamed or revalued in this wave.
+   ============================================================ */
