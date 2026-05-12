@@ -1273,16 +1273,33 @@
 
   // ─────────────── ENTRY GATES — live from /api/ops/gates ───────────────
   function GateDot({ state, label, detail }) {
-    // tiny inline dot used in EntryGatesLive's per-pair gate-strip. hover
-    // title surfaces gate name + detail so operator gets per-gate context
-    // without expanding the row.
+    // tiny inline dot + glyph used in EntryGatesLive's per-pair gate-strip.
+    // hover title surfaces gate name + detail so operator gets per-gate
+    // context without expanding the row.
+    //
+    // WCAG 1.4.1 — color is not the only channel: pass = green dot + ✓,
+    // fail = red dot + ✕, unknown = dim dot + · . Glyph is 10px, inherits
+    // color from the dot so it stays readable on colorblind-safe palettes.
     const color = state === true ? "var(--up)"
       : state === false ? "var(--down)"
       : "color-mix(in srgb, var(--fg-3) 60%, transparent)";
+    const glyph = state === true ? "✓"   // ✓
+      : state === false ? "✕"            // ✕
+      : "·";                              // ·
     return h("span", {
       title: label + " — " + (state === true ? "PASS" : state === false ? "BLOCK" : "n/a") + (detail ? " · " + detail : ""),
-      style: { width: 9, height: 9, borderRadius: "50%", background: color, display: "inline-block", flexShrink: 0 },
-    });
+      "aria-label": label + " " + (state === true ? "pass" : state === false ? "block" : "unknown"),
+      style: { display: "inline-flex", alignItems: "center", gap: 3, flexShrink: 0 },
+    },
+      h("span", {
+        "aria-hidden": "true",
+        style: { width: 9, height: 9, borderRadius: "50%", background: color, display: "inline-block", flexShrink: 0 },
+      }),
+      h("span", {
+        "aria-hidden": "true",
+        style: { fontSize: 10, lineHeight: 1, color: color, fontWeight: 600 },
+      }, glyph)
+    );
   }
 
   function EntryGatesLive({ data }) {
