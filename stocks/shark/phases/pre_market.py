@@ -237,7 +237,29 @@ def run(dry_run: bool = False) -> bool:
     account = get_account()
     positions = get_positions()
 
-    at_risk = [p for p in positions if float(p.get("unrealized_plpc", 0)) <= -0.06]
+    # Asset-class gate (Shark/Wheel isolation, 2026-05-12 leak):
+    # Pre-market "approaching -7% stop" alerts are equity-only — an option
+    # premium being down 6% intraday is normal Wheel behaviour, not a Shark
+    # risk event. Filter BEFORE the at_risk slice so the email/Slack pager
+    # doesn't wake the operator over Wheel positions.
+    at_risk = [
+        p for p in positions
+        if p.get("asset_class", "us_equity") == "us_equity"
+        and float(p.get("unrealized_plpc", 0)) <= -0.06
+    ]
+    skipped_non_equity = [
+        p for p in positions
+        if p.get("asset_class", "us_equity") != "us_equity"
+        and float(p.get("unrealized_plpc", 0)) <= -0.06
+    ]
+    for pos in skipped_non_equity:
+        logger.warning(
+            "[shark.pre_market] skipping non-equity at-risk position %s "
+            "(asset_class=%s, plpc=%.1f%%) — managed by wheel, NOT Shark's concern",
+            pos.get("symbol", "?"),
+            pos.get("asset_class", "?"),
+            float(pos.get("unrealized_plpc", 0)) * 100,
+        )
     for pos in at_risk:
         _notify_premarket_risk(pos["symbol"], float(pos["unrealized_plpc"]))
 
