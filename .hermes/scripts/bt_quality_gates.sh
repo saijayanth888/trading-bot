@@ -167,18 +167,24 @@ else
     sev="OK"
 fi
 
-lines+=("$icon *[bt_quality_gates]* · *$sev* · $et_now")
-lines+=("strategies tested: ${STRATEGIES[*]}")
-[[ ${#regressions[@]} -gt 0 ]] && lines+=(":rotating_light: REGRESSED (was promotion-eligible, now not): ${regressions[*]}")
-[[ ${#promotions[@]} -gt 0 ]] && lines+=(":white_check_mark: NEW eligibility: ${promotions[*]}  ←  consider manual flip")
-[[ ${#errors[@]} -gt 0 ]] && lines+=(":warning: backtest errored: ${errors[*]}")
-lines+=("see /ops · BacktestGatesLive card for the per-gate breakdown")
+# Signal-only: only post when something changed or errored.
+# Operator has the BacktestGatesLive dashboard card for the no-op view.
+if [[ ${#regressions[@]} -gt 0 || ${#promotions[@]} -gt 0 || ${#errors[@]} -gt 0 ]]; then
+    lines+=("$icon *[bt_quality_gates]* · *$sev* · $et_now")
+    lines+=("strategies tested: ${STRATEGIES[*]}")
+    [[ ${#regressions[@]} -gt 0 ]] && lines+=(":rotating_light: REGRESSED (was promotion-eligible, now not): ${regressions[*]}")
+    [[ ${#promotions[@]} -gt 0 ]] && lines+=(":white_check_mark: NEW eligibility: ${promotions[*]}  ←  consider manual flip")
+    [[ ${#errors[@]} -gt 0 ]] && lines+=(":warning: backtest errored: ${errors[*]}")
+    lines+=("see /ops · BacktestGatesLive card for the per-gate breakdown")
 
-# Compose & post
-msg=$(printf '%s\\n' "${lines[@]}")
-curl -fsS -X POST -H "Content-Type: application/json" \
-    -d "$(python3 -c 'import json,sys; print(json.dumps({"text": sys.argv[1]}))' "$msg")" \
-    "$SLACK_WEBHOOK_URL" >/dev/null || echo "  slack post failed"
+    # Compose & post
+    msg=$(printf '%s\\n' "${lines[@]}")
+    curl -fsS -X POST -H "Content-Type: application/json" \
+        -d "$(python3 -c 'import json,sys; print(json.dumps({"text": sys.argv[1]}))' "$msg")" \
+        "$SLACK_WEBHOOK_URL" >/dev/null || echo "  slack post failed"
+else
+    echo "  bt_quality_gates: no transitions (OK) — skipping Slack post (use dashboard)"
+fi
 
 echo "── bt_quality_gates done $(date -u +%Y-%m-%dT%H:%M:%SZ) ──"
 exit 0
