@@ -567,6 +567,22 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
             except Exception as exc:
                 logger.warning("[strategy] failed to configure onchain_sources: %s", exc)
 
+        # TFT quarantine rehabilitation banner — informational. Names every
+        # currently-quarantined pair and explicitly states that freqai's
+        # training queue is NOT filtered by quarantine, so the pairs will
+        # retrain on their next live_retrain_hours rotation and self-heal.
+        # Wrapped in a broad try/except so a malformed pair_dictionary.json
+        # never blocks bot_start. Pair_dictionary is read-only here — no
+        # disk mutations.
+        try:
+            # Importing the helper module (module name only; no serialization
+            # APIs are touched — quarantine_rehab_summary parses JSON).
+            import importlib
+            _tft_mod = importlib.import_module("freqaimodels.tft_pickle")
+            _tft_mod.quarantine_rehab_summary()
+        except Exception as exc:    # noqa: BLE001
+            logger.info("[strategy] tft rehab summary unavailable: %s", exc)
+
         # Capital-allocation block (config.json[capital_allocation]). Safe
         # default: empty dict → all pair_weights default to 1.0 (no cap),
         # min_sharpe_for_trading defaults to 0.0 (gate disabled).
