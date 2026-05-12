@@ -1799,6 +1799,27 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         v = float(df.iloc[-1].get("meta_position_size", 0.0) or 0.0)
         return v if v > 0.0 else None
 
+    def _is_tft_blind_trade(self, pair: str) -> bool:
+        """True if the latest analyzed row for ``pair`` was produced by
+        the TFT-blind fallback path (Fix 3 stamped ``tft_blind=True``).
+
+        Exception/no-data fallback: return False — equivalent to "treat
+        as full-TFT trade", which keeps sizing at the meta-agent /
+        risk-governor default. Returning True here would shrink sizing
+        on every error, which is a worse failure mode than the operator
+        opt-in expects.
+        """
+        try:
+            df, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+        except Exception:
+            return False
+        if df is None or df.empty or "tft_blind" not in df.columns:
+            return False
+        try:
+            return bool(df.iloc[-1].get("tft_blind", False))
+        except Exception:
+            return False
+
     def custom_stake_amount(
         self, pair: str, current_time, current_rate: float,
         proposed_stake: float, min_stake: float | None,
@@ -1842,6 +1863,20 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         stake = proposed_stake
         if meta_size is not None:
             stake = proposed_stake * meta_size
+
+        # TFT-blind fallback sizing. The entry on this candle came from
+        # the BollingerRSI MR signal (no TFT confirmation available), so
+        # downsize by the configured position_size_multiplier. Stacks
+        # multiplicatively with the meta-size factor above and the
+        # high-vol penalty below — every conservative layer compounds.
+        # No-op when the operator hasn't opted in (enabled=false) or
+        # when the latest row's tft_blind flag is absent / False.
+        blind_cfg = self._tft_blind_config
+        if blind_cfg.get("enabled") and self._is_tft_blind_trade(pair):
+            mult = float(blind_cfg.get("position_size_multiplier", 0.5))
+            mult = max(0.0, min(mult, 1.0))    # clamp to [0, 1]
+            if mult < 1.0:
+                stake = stake * mult
 
         # Stack the existing high-vol penalty on top so the conservative
         # floor still applies if the meta-agent is too generous.
