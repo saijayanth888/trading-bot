@@ -46,6 +46,12 @@
   function safeJsonFetch(url, opts) {
     return fetch(url, opts).then(r => r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)));
   }
+  // Tier C P1-2: AbortError detector. Components that issue fetches inside
+  // useEffect should swallow these silently — they fire on unmount when the
+  // controller is aborted and are EXPECTED, not real errors.
+  function isAbortError(e) {
+    return !!(e && (e.name === "AbortError" || (e.message && e.message.indexOf("aborted") !== -1)));
+  }
   function envelopeData(env) {
     if (env && typeof env === "object" && "data" in env) return env.data;
     return env;
@@ -180,17 +186,25 @@
     const [state, setState] = useState({});
     const stateRef = useRef(state);
     stateRef.current = state;
+    // Tier C P1-2: AbortController per useEffect tick so unmounting the
+    // page or rotating refresh cycles cancels in-flight fetches cleanly.
+    // INVARIANT: every fetch issued from this hook must pass through the
+    // current ctrlRef.current.signal so unmount aborts them. Without this
+    // 22 in-flight fetches leak per unmount (page tab switch, hot reload).
+    const ctrlRef = useRef(null);
 
-    const fetchOne = useCallback((key, urlOrSpec) => {
+    const fetchOne = useCallback((key, urlOrSpec, signal) => {
       const isSpec = typeof urlOrSpec === "object";
       const url = isSpec ? urlOrSpec.url : urlOrSpec;
       const opts = isSpec
         ? { method: urlOrSpec.method || "GET",
             headers: { "Content-Type": "application/json" },
-            body: urlOrSpec.method === "POST" ? JSON.stringify(urlOrSpec.body || {}) : undefined }
-        : undefined;
+            body: urlOrSpec.method === "POST" ? JSON.stringify(urlOrSpec.body || {}) : undefined,
+            signal }
+        : { signal };
       return safeJsonFetch(url, opts)
         .then(env => {
+          if (signal && signal.aborted) return;
           setState(s => Object.assign({}, s, {
             [key]: env,
             [key + "_fetched_at"]: new Date().toISOString(),
@@ -198,6 +212,7 @@
           }));
         })
         .catch(err => {
+          if (isAbortError(err)) return;
           setState(s => Object.assign({}, s, {
             [key + "_fetched_at"]: new Date().toISOString(),
             [key + "_error"]: String(err && err.message || err),
@@ -206,18 +221,22 @@
     }, []);
 
     const refetchFast = useCallback(() => {
-      Object.entries(FAST_ENDPOINTS).forEach(([k, u]) => fetchOne(k, u));
+      const sig = ctrlRef.current && ctrlRef.current.signal;
+      Object.entries(FAST_ENDPOINTS).forEach(([k, u]) => fetchOne(k, u, sig));
     }, [fetchOne]);
     const refetchSlow = useCallback(() => {
-      Object.entries(SLOW_ENDPOINTS).forEach(([k, spec]) => fetchOne(k, spec));
+      const sig = ctrlRef.current && ctrlRef.current.signal;
+      Object.entries(SLOW_ENDPOINTS).forEach(([k, spec]) => fetchOne(k, spec, sig));
     }, [fetchOne]);
 
     useEffect(() => {
+      const ctrl = new AbortController();
+      ctrlRef.current = ctrl;
       refetchFast();
       refetchSlow();
       const ifast = setInterval(refetchFast, 10_000);
       const islow = setInterval(refetchSlow, 60_000);
-      return () => { clearInterval(ifast); clearInterval(islow); };
+      return () => { clearInterval(ifast); clearInterval(islow); ctrl.abort(); };
     }, [refetchFast, refetchSlow]);
 
     return { state, refetchFast, refetchSlow };
@@ -3187,6 +3206,10 @@
     const [modalLoading, setModalLoading] = useState(false);
     const [modalError, setModalError] = useState(null);
     const searchRef = useRef(null);
+    // Tier C P1-2: track current in-flight modal fetch so closeModal /
+    // unmount can abort it. ESC also triggers closeModal which now aborts
+    // mid-flight — operator can cancel a slow LLM-call drilldown.
+    const modalCtrlRef = useRef(null);
 
     // Cmd-F / Ctrl-F focuses the search input (within this card only —
     // we don't fight the browser shortcut globally).
@@ -3210,10 +3233,15 @@
     // Click a row → fetch full record (include_text=1) for the modal.
     const openCall = useCallback((rec) => {
       if (!rec || !rec.timestamp) return;
+      // Tier C P1-2: cancel any in-flight previous open so rapid-click on
+      // different rows doesn't race; the latest click always wins.
+      if (modalCtrlRef.current) modalCtrlRef.current.abort();
+      const ctrl = new AbortController();
+      modalCtrlRef.current = ctrl;
       setSelectedTs(rec.timestamp);
       setModalLoading(true); setModalError(null); setModalRec(rec);  // optimistic
       const url = "/api/ops/llm_calls/" + encodeURIComponent(rec.timestamp);
-      fetch(url)
+      fetch(url, { signal: ctrl.signal })
         .then(r => {
           if (r.ok) return r.json();
           if (r.status === 410) {
@@ -3226,11 +3254,13 @@
           throw new Error("HTTP " + r.status);
         })
         .then(env => {
+          if (ctrl.signal.aborted) return;
           const c = (env && env.data && env.data.call) || rec;
           setModalRec(c);
           setModalLoading(false);
         })
         .catch(err => {
+          if (isAbortError(err)) return;
           // Fallback: render the row data we have (metadata-only) and
           // surface the error so operator knows full text isn't available.
           setModalRec(rec);
@@ -3240,9 +3270,19 @@
     }, []);
 
     const closeModal = useCallback(() => {
+      // P1-2: abort any in-flight modal fetch so closing the modal
+      // (including via ESC) cancels the request immediately.
+      if (modalCtrlRef.current) { modalCtrlRef.current.abort(); modalCtrlRef.current = null; }
       setSelectedTs(null);
       setModalRec(null);
       setModalError(null);
+    }, []);
+
+    // P1-2: cleanup any in-flight modal fetch when the card unmounts.
+    useEffect(() => {
+      return () => {
+        if (modalCtrlRef.current) { modalCtrlRef.current.abort(); modalCtrlRef.current = null; }
+      };
     }, []);
 
     // ── Filter rows client-side ──────────────────────────────────
