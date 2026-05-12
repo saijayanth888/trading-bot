@@ -1335,6 +1335,62 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         return bool((dataframe["meta_signal"] != 0).any()
                     or (dataframe["meta_position_size"] > 0).any())
 
+    # ------------------------------------------------------------------
+    # BollingerRSI mean-reversion signal (TFT-blind fallback path)
+    # ------------------------------------------------------------------
+
+    # BollingerRSI thresholds mirror the existing `bb_oversold_revert`
+    # branch in _populate_entry_trend_inner (RSI ≤ 30, close ≤ bb_lower):
+    # we extract them into named class constants so the TFT-blind path and
+    # the TFT-present BB-revert branch stay perfectly aligned. Bumping
+    # these will affect both paths — that is intentional.
+    BBRSI_OVERSOLD_RSI = 30.0
+    BBRSI_OVERBOUGHT_RSI = 70.0
+
+    def _compute_bbrsi_entry_signal(self, dataframe: DataFrame) -> pd.Series:
+        """Pure-technical mean-reversion LONG entry candidate.
+
+        Returns a boolean Series aligned with ``dataframe.index``:
+        ``True`` where ``close ≤ bb_lower AND rsi_14 ≤ BBRSI_OVERSOLD_RSI``
+        AND ``volume > 0``. False where any required column is missing
+        (degrades to no-op).
+
+        This signal is the foundation of the TFT-blind fallback path
+        (Fix 3): when the TFT `up`/`down` columns are absent, we still
+        want to trade statistical dips. The thresholds are intentionally
+        identical to the `bb_oversold_revert` branch already present in
+        the TFT-driven entry pipeline so blind vs full-TFT behaviour on
+        a BB-oversold candle is the same SIGNAL — only the size differs
+        (Fix 4 applies the position_size_multiplier in custom_stake).
+        """
+        idx = dataframe.index
+        required = ("close", "bb_lower", "rsi_14", "volume")
+        if any(c not in dataframe.columns for c in required):
+            return pd.Series(False, index=idx)
+        return (
+            (dataframe["close"] <= dataframe["bb_lower"])
+            & (dataframe["rsi_14"] <= self.BBRSI_OVERSOLD_RSI)
+            & (dataframe["volume"] > 0)
+        )
+
+    def _compute_bbrsi_exit_signal(self, dataframe: DataFrame) -> pd.Series:
+        """Pure-technical mean-reversion LONG exit candidate.
+
+        Returns ``True`` where ``close ≥ bb_upper AND rsi_14 ≥
+        BBRSI_OVERBOUGHT_RSI``. Mirror image of ``_compute_bbrsi_entry``
+        used by the TFT-blind exit path (Fix 3 on the exit side); the
+        static stoploss / minimal_roi still own the hard floor for any
+        open position regardless of whether this fires.
+        """
+        idx = dataframe.index
+        required = ("close", "bb_upper", "rsi_14")
+        if any(c not in dataframe.columns for c in required):
+            return pd.Series(False, index=idx)
+        return (
+            (dataframe["close"] >= dataframe["bb_upper"])
+            & (dataframe["rsi_14"] >= self.BBRSI_OVERBOUGHT_RSI)
+        )
+
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         try:
             return self._populate_entry_trend_inner(dataframe, metadata)
