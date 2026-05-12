@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-11T17:30:35.493116",
+  "generated_at": "2026-05-12T17:30:03.256883",
   "state": {
     "peak_equity": 100000.0,
     "circuit_breaker_triggered": false,
@@ -77,6 +77,12 @@
       "equity": 99939.96,
       "cash": 100629.96,
       "day_pnl": -60.04
+    },
+    {
+      "date": "2026-05-12",
+      "equity": 99534.73,
+      "cash": 99534.73,
+      "day_pnl": -405.23
     }
   ],
   "daily_snapshots": [
@@ -190,6 +196,16 @@
       ],
       "trades_today": 0,
       "trades_this_week": 0
+    },
+    {
+      "date": "2026-05-12",
+      "equity": 99534.73,
+      "cash": 99534.73,
+      "day_pnl_dollars": -405.2300000000105,
+      "day_pnl_pct": -0.40547344625714327,
+      "positions": [],
+      "trades_today": 0,
+      "trades_this_week": 5
     }
   ],
   "open_trades": {},
@@ -203,10 +219,10 @@
     "best_trade": 0.0,
     "worst_trade": 0.0,
     "avg_r_multiple": 0.0,
-    "max_drawdown_pct": 0.06,
-    "current_drawdown_pct": 0.06
+    "max_drawdown_pct": 0.47,
+    "current_drawdown_pct": 0.47
   },
   "handoff": {
-    "raw": "# Daily Handoff \u2014 2026-05-11\n\n## pre-market | 09:14 EDT\nconfirmed: NVDA\nskipped: GOOGL, AMD, CCJ, CRDO, XOM\nmarket: bullish=9 bearish=1 of 30\nregime: BEAR_VOLATILE\nmacro: ELEVATED\nlessons: none\n\n## daily-summary | 17:30 EDT\nequity: $99,939.96\ncash: $100,629.96\nday_pnl: -0.06%\nopen_positions: 2\ncircuit_breaker: OK\n"
+    "raw": "# Daily Handoff \u2014 2026-05-12\n\n## pre-market | 09:02 EDT\nconfirmed: NVDA\nskipped: AMD, CCJ, GOOGL, CRDO, AVGO\nmarket: bullish=9 bearish=0 of 30\nregime: BEAR_VOLATILE\nmacro: HIGH\nlessons: none\n\n## pre-execute | 09:30 EDT\nvalidated: NVDA\nrejected: none\n\n## market-open | 09:36 EDT\ntraded: none\ncount: 0\nregime: BEAR_VOLATILE\nmacro: Event day: CPI May 2026\n\n## midday | 13:02 EDT\ncuts: SOFI260522P00015500, NVDA260522P00215000, PLTR260522P00130000, MARA260522P00012000, HOOD260522P00078000\nstops_tightened: 0\nthesis_breaks: none\nregime: BEAR_VOLATILE\nactions: HOOD260522P00078000: hard cut at -57.1%; MARA260522P00012000: hard cut at -105.6%; NVDA260522P00215000: hard cut at -35.3%; PLTR260522P00130000: hard cut at -28.5%; SOFI260522P00015500: hard cut at -45.7%\n\n## daily-summary | 17:30 EDT\nequity: $99,534.73\ncash: $99,534.73\nday_pnl: -0.41%\nopen_positions: 0\ncircuit_breaker: OK\n"
   }
 }

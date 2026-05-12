@@ -24,3 +24,10 @@ stops_tightened: 0
 thesis_breaks: none
 regime: BEAR_VOLATILE
 actions: HOOD260522P00078000: hard cut at -57.1%; MARA260522P00012000: hard cut at -105.6%; NVDA260522P00215000: hard cut at -35.3%; PLTR260522P00130000: hard cut at -28.5%; SOFI260522P00015500: hard cut at -45.7%
+
+## daily-summary | 17:30 EDT
+equity: $99,534.73
+cash: $99,534.73
+day_pnl: -0.41%
+open_positions: 0
+circuit_breaker: OK
