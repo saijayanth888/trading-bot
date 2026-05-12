@@ -1,0 +1,43 @@
+{
+  "orders": [
+    {
+      "order_id": "11111111-2222-3333-4444-555555555555",
+      "product_id": "BTC-USD",
+      "user_id": "u1",
+      "order_configuration": {
+        "limit_limit_gtc": {
+          "base_size": "0.001",
+          "limit_price": "60000.00",
+          "post_only": false
+        }
+      },
+      "side": "BUY",
+      "client_order_id": "qc4-coinbase-mr01-018f6e6406000000000000000000ffff",
+      "status": "OPEN",
+      "time_in_force": "GOOD_UNTIL_CANCELLED",
+      "created_time": "2026-05-12T20:00:00Z",
+      "completion_percentage": "0",
+      "filled_size": "0",
+      "average_filled_price": "0",
+      "fee": "0",
+      "number_of_fills": "0",
+      "filled_value": "0",
+      "pending_cancel": false,
+      "size_in_quote": false,
+      "total_fees": "0",
+      "size_inclusive_of_fees": false,
+      "total_value_after_fees": "0",
+      "trigger_status": "INVALID_ORDER_TYPE",
+      "order_type": "LIMIT",
+      "reject_reason": "REJECT_REASON_UNSPECIFIED",
+      "settled": false,
+      "product_type": "SPOT",
+      "reject_message": "",
+      "cancel_message": "",
+      "order_placement_source": "RETAIL_ADVANCED"
+    }
+  ],
+  "sequence": "0",
+  "has_next": false,
+  "cursor": ""
+}

@@ -168,3 +168,10 @@ stocks/wheel/state/.*.owned_symbols.json.*.tmp
 
 # LLM call tracker — append-only log, regenerates from runtime
 stocks/memory/llm-calls.jsonl
+.venv-exec/
+*.pyc
+__pycache__/
+.coverage
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/

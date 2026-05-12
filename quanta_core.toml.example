@@ -1,0 +1,41 @@
+# quanta_core.toml.example
+#
+# Sample configuration for quanta-core. Copy to `quanta_core.toml` (or set
+# QUANTA_CONFIG=/abs/path/to/quanta_core.toml) and edit. Every key here is
+# the default; the file is reproduced verbatim so an operator can diff it
+# against quanta_core/config.py to spot drift.
+#
+# Live <-> paper is one flag: `runtime.mode`. See
+# `docs/quanta-core-v4-rev2/DESIGN-LOCK.md` §1 for the operator-locked values.
+
+[runtime]
+# "paper" or "live". Flipping to "live" requires the additional preflight
+# checks in quanta_core.config.assert_live_safety (added by a later agent).
+mode = "paper"
+
+# Log threshold. DEBUG is verbose; INFO is the production default.
+log_level = "INFO"
+
+# 27 names — 12 crypto + 15 equities/ETFs. Override per environment.
+universe = [
+  "BTC/USD", "ETH/USD", "SOL/USD", "BCH/USD", "AVAX/USD", "LINK/USD",
+  "DOT/USD", "MATIC/USD", "ATOM/USD", "ADA/USD", "XRP/USD", "DOGE/USD",
+  "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AMD",
+  "SOFI", "HOOD", "ORCL", "SPY", "QQQ", "IWM", "TLT",
+]
+
+# Operator philosophy (DESIGN-LOCK §1): 2-3 trades/week TOTAL.
+max_trades_per_week = 3
+
+# Hold 3-10 days typically; force-exit at 14.
+hold_horizon_days = [3, 10]
+hold_max_days = 14
+
+# Opaque passthrough — Strategy reads whatever it needs from here.
+[strategy_overrides]
+
+# TFT-blind fallback (DESIGN-LOCK §5): when no per-symbol TFT artefact is
+# resident, trade at half size on rule-based signal alone (paper-mode only).
+[strategy_overrides.tft_blind_fallback]
+enabled = true
+position_size_multiplier = 0.5
