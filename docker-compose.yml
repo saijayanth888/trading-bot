@@ -367,6 +367,13 @@ services:
       # decorative effects.js layer for a data-first display.
       - DASHBOARD_EFFECTS=${DASHBOARD_EFFECTS:-1}
       - DASHBOARD_PAIRS=${DASHBOARD_PAIRS:-BTC/USD,ETH/USD,SOL/USD}
+      # Cross-network bridge to mf-api (model-forge_default network).
+      # mf-api binds 0.0.0.0:8000 on the host so host.docker.internal:8000
+      # is the canonical access path from the dashboard container — both
+      # services are on different docker networks. Auth key is sourced
+      # from the trading-bot .env (which now mirrors mf-api's value).
+      - MODELFORGE_API_URL=${MODELFORGE_API_URL:-http://host.docker.internal:8000}
+      - MODELFORGE_API_KEY=${MODELFORGE_API_KEY:-}
       - DASHBOARD_TIMEFRAME=${DASHBOARD_TIMEFRAME:-5m}
       - DASHBOARD_WS_INTERVAL_SEC=${DASHBOARD_WS_INTERVAL_SEC:-30}
       # Pass parts; data_sources._resolve_dsn() URL-encodes the password.
