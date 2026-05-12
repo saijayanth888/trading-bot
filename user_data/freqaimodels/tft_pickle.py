@@ -270,6 +270,156 @@ def _set_training_mode(module: nn.Module) -> None:
     module.train(True)
 
 
+# ---------------------------------------------------------------------------
+# Pair-dictionary quarantine
+# ---------------------------------------------------------------------------
+#
+# FreqAI's data_drawer.load_data() blindly opens whichever model.zip the
+# pair_dictionary points at. When that .zip is a 789-byte stub (4 pairs on
+# disk today: DOGE/XRP/AVAX/LINK), the downstream chain crashes with cryptic
+# torch.load errors, and the strategy spams ``KeyError: 'up'`` every candle
+# because no prediction columns ever land in the dataframe.
+#
+# The quarantine helper:
+#   - scans pair_dictionary.json once on TFTModel module import
+#   - flags entries with trained_timestamp == 0 (stub-write-failure marker)
+#   - re-validates the referenced model.zip via validate_model_zip
+#   - returns a per-pair status dict the dashboard health endpoint can also
+#     consume (Fix 5)
+#
+# We DO NOT mutate the pair_dictionary on disk — freqai owns that file and
+# rewriting it from user_data code risks races. Instead the operator (or the
+# next 24h retrain cycle) clears the bad entries. The strategy-side Fix 3
+# does the runtime no-op for any pair flagged here.
+# ---------------------------------------------------------------------------
+
+# Use the user_data root as a fallback when no env override is given.
+_USER_DATA_ROOT_DEFAULT = Path(__file__).resolve().parent.parent
+USER_DATA_ROOT = Path(os.environ.get("USER_DATA_ROOT", str(_USER_DATA_ROOT_DEFAULT)))
+
+_QUARANTINE_LOGGED: set[str] = set()
+
+
+def _pair_dictionary_path(identifier: str = "tft_v1") -> Path:
+    """Resolve the pair_dictionary.json path under the freqai models root.
+
+    The path is shared between the freqtrade container (``/freqtrade/user_data/
+    models/{identifier}/pair_dictionary.json``) and the host (``{USER_DATA_ROOT}/
+    models/{identifier}/pair_dictionary.json``) — both resolve to the same
+    bind-mounted directory, so the relative ``models/{identifier}`` part is
+    sufficient.
+    """
+    return USER_DATA_ROOT / "models" / identifier / "pair_dictionary.json"
+
+
+def scan_pair_dictionary_for_quarantine(
+    identifier: str = "tft_v1",
+) -> dict[str, dict[str, Any]]:
+    """Return ``{pair: {status, reason, info}}`` for every entry in the
+    pair_dictionary.
+
+    Status values:
+      ``ok``       — model.zip validates clean
+      ``missing``  — pair_dictionary entry has trained_timestamp == 0
+                     (stub-write-failure marker) OR the .zip file is absent
+      ``stub``     — file exists but fails validate_model_zip checks
+      ``error``    — unexpected exception while validating
+
+    Side effect: emits a single WARNING per pair on transition to non-ok
+    status. The ``_QUARANTINE_LOGGED`` set guarantees we never spam the log
+    per-candle (each pair is logged at most once per process lifetime).
+    """
+    result: dict[str, dict[str, Any]] = {}
+    pd_path = _pair_dictionary_path(identifier)
+    try:
+        import json as _json
+        with pd_path.open("r") as fp:
+            entries: dict[str, dict[str, Any]] = _json.load(fp)
+    except FileNotFoundError:
+        logger.info(
+            "[tft-quarantine] pair_dictionary.json not found at %s — "
+            "no quarantine pass possible (cold-start before first train).",
+            pd_path,
+        )
+        return result
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[tft-quarantine] failed to read %s: %s — skipping quarantine pass",
+            pd_path, exc,
+        )
+        return result
+
+    for pair, entry in entries.items():
+        trained_ts = int(entry.get("trained_timestamp", 0) or 0)
+        data_path_str = entry.get("data_path") or ""
+        model_filename = entry.get("model_filename") or ""
+
+        # Resolve host-side path even if pair_dictionary stores the
+        # in-container path (/freqtrade/user_data/...).
+        if data_path_str.startswith("/freqtrade/user_data/"):
+            data_path = USER_DATA_ROOT / data_path_str[len("/freqtrade/user_data/"):]
+        else:
+            data_path = Path(data_path_str) if data_path_str else None
+
+        zip_path = (
+            data_path / f"{model_filename}_model.zip"
+            if data_path and model_filename else None
+        )
+
+        entry_status: dict[str, Any] = {
+            "status": "ok",
+            "reason": None,
+            "trained_ts": trained_ts,
+            "zip_path": str(zip_path) if zip_path else None,
+            "info": None,
+        }
+
+        if trained_ts == 0:
+            entry_status["status"] = "missing"
+            entry_status["reason"] = (
+                "trained_timestamp == 0 (last training cycle failed to write "
+                "a valid artifact)"
+            )
+        elif zip_path is None or not zip_path.exists():
+            entry_status["status"] = "missing"
+            entry_status["reason"] = f"model.zip not found at {zip_path}"
+        else:
+            try:
+                info = validate_model_zip(zip_path)
+                entry_status["info"] = info
+            except StubArtifactError as exc:
+                entry_status["status"] = "stub"
+                entry_status["reason"] = str(exc)
+            except Exception as exc:  # noqa: BLE001
+                entry_status["status"] = "error"
+                entry_status["reason"] = f"validate raised {type(exc).__name__}: {exc}"
+
+        result[pair] = entry_status
+
+        if entry_status["status"] != "ok":
+            log_key = f"{identifier}:{pair}:{entry_status['status']}"
+            if log_key not in _QUARANTINE_LOGGED:
+                _QUARANTINE_LOGGED.add(log_key)
+                logger.warning(
+                    "[tft-quarantine] %s flagged %s — %s. Pair excluded from "
+                    "runtime; strategy will no-op on missing prediction columns.",
+                    pair, entry_status["status"].upper(), entry_status["reason"],
+                )
+
+    return result
+
+
+def quarantined_pairs(identifier: str = "tft_v1") -> set[str]:
+    """Convenience helper for the strategy: return the set of pair symbols
+    currently quarantined (status != ``ok``). Safe to call per-candle — the
+    scan reads pair_dictionary.json (~1 KB JSON) and stats a handful of zip
+    files; well under the cost of one feature-pipeline transform."""
+    return {
+        pair for pair, info in scan_pair_dictionary_for_quarantine(identifier).items()
+        if info["status"] != "ok"
+    }
+
+
 class TFTTrainerWrapper:
     """
     Minimal surface area for FreqAI's ``BasePyTorchClassifier``:

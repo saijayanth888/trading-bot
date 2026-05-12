@@ -83,9 +83,41 @@ from freqaimodels.tft_pickle import (   # noqa: E402
     TFTTrainerWrapper,
     _set_inference_mode,
     _set_training_mode,
+    scan_pair_dictionary_for_quarantine,
 )
 
 logger = logging.getLogger(__name__)
+
+# Run a one-time quarantine scan at module load. The scanner is idempotent
+# and logs at most one WARNING per (pair, status) tuple per process
+# lifetime — see _QUARANTINE_LOGGED in tft_pickle.py. Subsequent calls
+# (per-candle from the strategy or per-poll from the dashboard) use the
+# in-process dedup set so the log doesn't spam.
+#
+# We swallow any exception here so a malformed pair_dictionary.json never
+# blocks freqai from starting up. Worst case: the strategy treats every
+# pair as not-quarantined and falls back to Fix 3's column-missing no-op.
+try:
+    _initial_quarantine = scan_pair_dictionary_for_quarantine()
+    if _initial_quarantine:
+        _bad_pairs = [
+            p for p, info in _initial_quarantine.items() if info["status"] != "ok"
+        ]
+        if _bad_pairs:
+            logger.warning(
+                "[tft-quarantine] startup scan: %d/%d pairs quarantined: %s",
+                len(_bad_pairs), len(_initial_quarantine), ", ".join(sorted(_bad_pairs)),
+            )
+        else:
+            logger.info(
+                "[tft-quarantine] startup scan: all %d pairs validate OK",
+                len(_initial_quarantine),
+            )
+except Exception as _exc:  # noqa: BLE001
+    logger.info(
+        "[tft-quarantine] startup scan failed (continuing): %s", _exc,
+    )
+
 
 QUANTILE_LEVELS: tuple[float, ...] = (0.1, 0.5, 0.9)
 
