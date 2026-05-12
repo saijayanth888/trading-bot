@@ -1,206 +1,170 @@
-# HANDOFF — stage/llm-calls-ux
+# Tier A — Zero-risk frontend fixes — HANDOFF
 
-Branch: `stage/llm-calls-ux`
-Status: ready for review · DO NOT MERGE
-Tests: 88/88 passing (rotation 17, endpoint 23, override-verifier 11, ops-dashboard 20, llm-logger 28; bt_quality_gates 46 also re-checked clean)
-Worktree: `.claude/worktrees/agent-aad7bc15946e36c34`
+**Branch:** `fix/frontend-tier-a-zero-risk`
+**Worktree:** `/home/saijayanthai/Documents/trading-bot/.claude/worktrees/agent-a16e93b25f2b1262d`
+**Source audit:** `FRONTEND_AUDIT_2026-05-12.md` at repo root
+**Cache-bust version:** `v=20260512-tier-a-fixes`
+**Pushed:** NO (operator-review-before-push policy)
+**Container rebuild needed:** NO — `user_data/dashboard/` is a mounted volume; hard-refresh the browser to pick up.
 
-## Why
+---
 
-Operator: "the JSONL is **very ugly**". Once `SHARK_LLM_LOG_FULL_TEXT=1`
-flipped on, each line at `stocks/memory/llm-calls.jsonl` ballooned to 1-4
-KB of dense JSON — `cat` and `tail -f` stopped being usable.
+## Commit ladder (8 commits, all atomic)
 
-This branch delivers a proper UX over that file: dashboard card, slide-
-over modal, terminal viewer, and nightly rotation so the file doesn't
-grow forever.
+| # | SHA | Subject |
+|---|-----|---------|
+| 1 | `8ce98c7` | fix(dashboard): replace --c-{up,down,warn} typo with correct tokens |
+| 2 | `915c09d` | fix(dashboard): define .warn-strong CSS class for LLM latency 5-15s tier |
+| 3 | `8b07194` | chore(dashboard): delete dead app.css (1333 lines, never loaded) |
+| 4 | `0ac4854` | perf(dashboard): replace render-blocking @import with `<link rel=stylesheet>` |
+| 5 | `463bb27` | fix(dashboard): match .anchor scroll-margin-top to topbar height (80->52px) |
+| 6 | `23db199` | fix(dashboard): replace hardcoded LAN IP in sidebar footer with window.location.host |
+| 7 | `acd6fa0` | a11y(dashboard): add WCAG 1.4.1 glyphs to GateDot (color + shape) |
+| 8 | `9fd0de9` | chore(dashboard): cache-bust to 20260512-tier-a-fixes + lock-in tests |
 
-This is also one of the **viral-launch screenshots** — the "watch the AI
-work" angle. The modal aesthetic matters because the screenshots will
-end up on social media.
+---
 
-## What ships
+## 1 - P0-1 - `--c-*` token typo (9 sites, all in `ops_spa.js`)
 
-| # | Thing                                | Path                                                     |
-|---|--------------------------------------|----------------------------------------------------------|
-| 1 | List endpoint                        | `user_data/dashboard/ops_routes.py` — `GET /api/ops/llm_calls` |
-| 2 | Detail endpoint                      | `user_data/dashboard/ops_routes.py` — `GET /api/ops/llm_calls/{call_id}` |
-| 3 | LLMCallsLive card + modal            | `user_data/dashboard/static/js/ops_spa.js`              |
-| 4 | Cache-bust bump                      | `user_data/dashboard/templates/ops_spa.html` → `?v=20260512-llm-calls-ux` |
-| 5 | Rotation library + CLI               | `stocks/shark/llm/rotate.py`                            |
-| 6 | Terminal viewer                      | `scripts/tail_llm_calls.sh`                             |
-| 7 | Hermes cron wrapper                  | `~/.hermes/scripts/llm_log_rotate.sh` (out-of-tree)     |
-| 8 | Endpoint tests (23)                  | `tests/test_llm_calls_endpoint.py`                      |
-| 9 | Rotation tests (17)                  | `stocks/tests/test_llm_rotation.py`                     |
-| 10| Operator runbook                     | `docs/LLM_CALLS_UX.md`                                  |
+**Before:** `var(--c-up)` / `var(--c-down)` / `var(--c-warn)` - non-existent. Browsers resolved them to inherited color so gate dots, circuit-breaker tinting, backtest gate cells, LLM-modal success/error glyphs rendered uncolored.
 
-NOT touched: `stocks/shark/llm/tracker.py` (already correct from the
-earlier merge), the JSONL write format. Read-side only.
+**After:** `var(--up)` / `var(--down)` / `var(--warn)` - the actual tokens defined in `quanta.css:156-158`.
 
-## Card + modal sketches
+**Sites fixed:** lines 1279, 1280, 1336, 1337, 1368, 2768, 2769, 2893, 3129, 3150, 3492 in `user_data/dashboard/static/js/ops_spa.js`.
 
+**Verification:**
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│ 21 · LLM activity · last 24h               142 · 24H               │
-│ ─────────────────────────────────────────────────────────────────── │
-│ Calls   Tokens   Avg lat   P95 lat   Ollama   Success               │
-│ 142     89.3k    2.4s      6.1s      88%      99.3%                 │
-│                                                                     │
-│ AGENT [all agents (8) ▾]  SEARCH [regex over agent/model · ⌘F ]     │
-│                                                                     │
-│ TIME      AGENT              MODEL · TIER     LAT   TOKENS  STATUS  │
-│ 14:32:11  reflector          qwen3:30b · fast 8.2s  421/180  ●      │
-│ 14:31:54  analyst_bull       qwen3:30b · fast 3.1s  502/340  ●      │
-│ 14:31:21  risk_debate.agg    qwen3:30b · deep 4.2s  233/128  ●      │
-│ ...                                                                 │
-│ [ load more (92 more) ]                                             │
-│ click any row · Esc closes modal · ⌘F focuses search                │
-└─────────────────────────────────────────────────────────────────────┘
-
-  Click any row → slide-over from the right:
-
-  ┌─────────────────────────────────────┐
-  │ analyst_bull  [● 3.10s]      [✕ esc]│
-  │ ─────────────────────────────────── │
-  │ METADATA                            │
-  │   timestamp     2026-05-12T14:31:54 │
-  │   provider      ollama              │
-  │   model         qwen3:30b           │
-  │   tier          fast                │
-  │   role          default             │
-  │   latency       3.103s              │
-  │   prompt_tokens 502                 │
-  │   completion    340                 │
-  │   total         842                 │
-  │   redacted      0                   │
-  │                                     │
-  │ SYSTEM MESSAGE                      │
-  │ ┌─────────────────────────────────┐ │
-  │ │ you are a stock analyst…        │ │
-  │ └─────────────────────────────────┘ │
-  │                                     │
-  │ USER PROMPT          [copy prompt] │
-  │ ┌─────────────────────────────────┐ │
-  │ │ Analyse AAPL on the 4h …        │ │
-  │ └─────────────────────────────────┘ │
-  │                                     │
-  │ ASSISTANT RESPONSE  [copy response] │
-  │ ┌─────────────────────────────────┐ │
-  │ │ AAPL is consolidating above…    │ │
-  │ └─────────────────────────────────┘ │
-  └─────────────────────────────────────┘
+$ grep -rn 'var(--c-up)\|var(--c-down)\|var(--c-warn)' user_data/dashboard/
+(no output - zero matches)
 ```
 
-## Endpoint contracts
+No matches in `qc_react.js`, `components.js`, or `dashboard_spa.js` either.
 
-### `GET /api/ops/llm_calls`
+---
 
-Read-only, no auth dep. Query params:
-- `limit` (1..500, default 50)
-- `agent`, `model` — substring filters
-- `since` — ISO timestamp
-- `q` — regex; covers prompt/response when `include_text=1`
-- `min_latency`, `max_latency` — seconds
-- `include_text` (0|1, default 0)
+## 2 - P0-2 - `.warn-strong` CSS class
 
-Returns `{status: "ok", data: {calls, total_in_window, total_24h, summary,
-log_path, log_size_bytes, include_text}, error, checked_at}`.
+**Before:** `ops_spa.js:2941` returned the string `"warn-strong"` for LLM latencies 5-15 s, but no rule existed in `quanta.css`. The cell rendered with inherited color, breaking the green / yellow / orange / red ladder the operator specified.
 
-When `include_text=0` the heavy fields (`prompt`, `system_message`,
-`response_text`, `messages`) are stripped from each call object so the
-polling payload stays small.
+**After:** Added one rule next to the existing severity rules in `user_data/dashboard/static/css/quanta.css` (line 159):
 
-### `GET /api/ops/llm_calls/{call_id}`
-
-`call_id` is the URL-encoded ISO timestamp.
-
-- `200` — found in live log; full record (with text) returned.
-- `404` — not in live AND no archives.
-- `410` — in archive (rotated); response includes `archive_path` so
-  operator can grep manually.
-
-## Terminal viewer
-
-```bash
-bash scripts/tail_llm_calls.sh                   # live tail, metadata only
-bash scripts/tail_llm_calls.sh --full            # + system/user/reply previews (≤200 chars)
-bash scripts/tail_llm_calls.sh --agent reflector # only that agent's calls
-bash scripts/tail_llm_calls.sh --since 2h        # back-fill last 2h then tail
+```css
+.warn-strong { color: var(--warn); font-weight: 600; }
 ```
 
-Output is colour-coded by latency (green <2s, yellow 2-5s, orange 5-15s,
-red >15s). Honours `$SHARK_TRACKER_LOG`.
+---
 
-## Rotation cron
+## 3 - P0-3 - Delete dead `app.css`
 
-Hermes cron: `0 3 * * *` (03:00 local · after midnight UTC pivot, before
-pre-market open).
+**Before:** `user_data/dashboard/static/css/app.css` was 1,333 lines / ~41 KB; loaded by zero templates (`grep -r 'app.css' templates/` -> empty). It defined `.mode-pill`, `.ws-pill`, `.kpi-*`, `.hero`, `.ks-grid`, `.tape` etc. None of those classes are referenced by any JS or template. Shared classes (`.dim`, `.up`, `.down`, `.warn`, `.mono`, `.topbar`, `.brand-mark`, `.nav-item`, ...) are already in `quanta.css`.
 
-Wrapper: `~/.hermes/scripts/llm_log_rotate.sh`
-Library: `stocks/shark/llm/rotate.py`
+**After:** `git rm user_data/dashboard/static/css/app.css`. Zero render impact.
 
-Triggers:
-1. Live file size > **50 MB**, OR
-2. Oldest record > **30 days**.
+---
 
-After rotation:
-- Live file gzipped to `llm-calls.YYYY-MM-DD.jsonl.gz` in the same dir.
-- Live file truncated in place (inode preserved → open writers keep
-  appending to the same fd).
-- Archives older than **90 days** deleted.
+## 4 - P2 - `@import` -> `<link rel=stylesheet>`
 
-To install in crontab (operator does this once):
+**Before:** `quanta.css:8` had `@import url('https://fonts.googleapis.com/...')`. Even with preconnect hints in the template, `@import` blocks paint until the imported sheet returns.
 
-```bash
-crontab -l > /tmp/cron.txt
-echo "0 3 * * * /home/saijayanthai/.hermes/scripts/llm_log_rotate.sh" >> /tmp/cron.txt
-crontab /tmp/cron.txt
+**After:**
+- `quanta.css:8` - `@import` replaced by an explanatory comment.
+- `ops_spa.html` and `dashboard_spa.html` - added `<link rel="stylesheet" href="https://fonts.googleapis.com/...">` immediately after the existing preconnect lines.
+
+Fonts now load in parallel with `quanta.css` rather than serially after it.
+
+---
+
+## 5 - P2 - `scroll-margin-top` matches topbar height
+
+**Before:** `quanta.css:404` set `.anchor { scroll-margin-top: 80px; }`; actual `.topbar` `min-height` is 52 px (`quanta.css:188`). Hash-jumps parked sections 28 px under the topbar.
+
+**After:** `scroll-margin-top: 52px` with an inline comment pointing back to `.topbar` so the next refactor keeps them in sync.
+
+---
+
+## 6 - P2 - Hardcoded LAN IP in sidebar footer
+
+**Before:** `qc_react.js:1116` - literal `'local . 192.168.1.49:8081'`. Wrong on every other host (localhost, Tailscale IP, reverse-proxy hostname).
+
+**After:**
+```js
+"local . " + (typeof window !== "undefined" && window.location ? window.location.host : "")
 ```
 
-## How to test locally
+Footer now mirrors the host:port the operator actually connected from.
 
-```bash
-# Tests
-pytest tests/test_llm_calls_endpoint.py stocks/tests/test_llm_rotation.py -v
+---
 
-# CLI rotation smoke test (won't actually rotate the live file)
-cd stocks && SHARK_TRACKER_LOG=/tmp/dummy.jsonl python3 -m shark.llm.rotate
+## 7 - WCAG 1.4.1 - check/cross glyphs on `GateDot`
 
-# Terminal viewer (works against a tiny mock file)
-TMPLOG=$(mktemp /tmp/llm-calls.XXXXXX.jsonl)
-echo '{"agent":"reflector","model":"qwen3:30b","provider":"ollama","tier":"fast","role":"default","latency_seconds":8.2,"prompt_tokens":421,"completion_tokens":180,"timestamp":"2026-05-12T14:32:11.103+00:00"}' > "$TMPLOG"
-SHARK_TRACKER_LOG="$TMPLOG" timeout 1 bash scripts/tail_llm_calls.sh
-```
+**Before:** `GateDot` (`ops_spa.js:1275`) signaled pass/fail through color alone. Operators with red/green color-vision deficiency could not distinguish passing from blocking gates. Fails WCAG 1.4.1 "Use of Color".
 
-Browser: `http://localhost:8081/ops` (or whatever port the dashboard
-is bound to). The new card is mounted under the TRAINING row, full
-width, anchored at `#llm-calls`.
+**After:** Color dot retained (still useful), 10 px unicode glyph rendered beside it:
+- pass    -> green dot + check glyph
+- fail    -> red dot + cross glyph
+- unknown -> dim dot + middle-dot glyph
 
-## Out-of-scope (deferred)
+Added `aria-label` on the wrapper, `aria-hidden` on the inner dot+glyph spans, so AT users hear one clean status per gate. Glyph inherits the dot color so it stays coherent across the three themes.
 
-- **Token cost projection forward** — current summary shows
-  counterfactual savings (`shark.total_api_cost_saved_usd`) but doesn't
-  break it down by agent. Add per-agent saved-USD when operator asks.
-- **Live SSE stream** — card currently polls every 10 s. SSE would be
-  nicer but the operator's primary "live" channel is the terminal
-  viewer; the card is for browsing.
-- **Modal regex search across the full archive** — the modal's
-  search-box only filters the visible page. To search archives an
-  operator currently runs `zcat` manually (hint surfaced in the 410
-  response). Could be done server-side with a `q` param on the detail
-  endpoint, defer until asked.
+Used at `ops_spa.js:1365` (per-pair gate strip in `EntryGatesLive`) and `ops_spa.js:2864` (backtest gates list) - both get the glyph for free.
 
-## Files changed
+`dashboard_spa.js` has no `GateDot`-like component, no changes there.
+
+---
+
+## 8 - Cache-bust + lint test
+
+**Cache-bust:** every `?v=` on JS/CSS references in `ops_spa.html` and `dashboard_spa.html` bumped to `v=20260512-tier-a-fixes`.
+
+**Lint test added:** `tests/test_no_legacy_color_tokens.py` - 2 cheap regression checks (run in <0.1 s; no docker, no browser):
+
+1. `test_no_legacy_c_color_tokens_in_dashboard_js` - greps every dashboard JS file for `var(--c-(up|down|warn))`; fails with a precise file:line list if any match.
+2. `test_dead_app_css_is_not_resurrected` - asserts `user_data/dashboard/static/css/app.css` does not exist on disk; tells the future agent to port rules into `quanta.css` instead.
+
+Verified: both tests pass on the current branch.
 
 ```
-M  user_data/dashboard/ops_routes.py          (+~360 lines: 2 endpoints + helpers)
-M  user_data/dashboard/static/js/ops_spa.js   (+~500 lines: LLMCallsLive + modal + helpers)
-M  user_data/dashboard/templates/ops_spa.html (cache-bust)
-A  stocks/shark/llm/rotate.py                 (rotation lib + CLI)
-A  scripts/tail_llm_calls.sh                  (terminal viewer)
-A  ~/.hermes/scripts/llm_log_rotate.sh        (out-of-tree cron wrapper)
-A  tests/test_llm_calls_endpoint.py           (23 tests)
-A  stocks/tests/test_llm_rotation.py          (17 tests)
-A  docs/LLM_CALLS_UX.md                       (operator runbook)
-A  HANDOFF.md                                 (this file)
+tests/test_no_legacy_color_tokens.py::test_no_legacy_c_color_tokens_in_dashboard_js PASSED
+tests/test_no_legacy_color_tokens.py::test_dead_app_css_is_not_resurrected PASSED
+2 passed in 0.02s
+```
+
+---
+
+## Operator verification checklist (post-merge, after hard-refresh)
+
+1. Open `http://localhost:8081/ops` with cache disabled (Ctrl+Shift+R).
+2. **"Entry gates"** card - every gate dot now shows green/red color **and** a check / cross glyph beside it.
+3. **"Risk Today" -> Circuit breakers** - tripped rows tinted red, healthy rows uncolored. Border-left bar visible.
+4. **"Backtest preflight"** card - gate pass/fail text shows green or red.
+5. **LLM activity modal** - open it, copy a prompt; the "copied!" feedback text turns green. Errors render orange.
+6. **LLM activity modal** - a call with reported latency 5-15 s now shows latency in bold orange (rather than inherited grey).
+7. **Sidebar footer** - bottom-left text reads `local . <whatever-you-typed-in-the-url-bar>`, not the literal `192.168.1.49`.
+8. **Hash navigation** - click any anchor link in the SPA; the section's top edge sits flush against the topbar bottom, not buried under it.
+9. **DevTools -> Console** - no errors.
+10. **DevTools -> Network** - `fonts.googleapis.com` request kicks off in the very first wave (in parallel with `quanta.css`), not after it.
+
+---
+
+## Constraints respected
+
+- Zero behavior changes: no fetch logic, polling, state management, or `fetchOne` wrappers touched (Tier C territory).
+- Zero new infra: no new dependencies, no Dockerfile changes, no migration.
+- Each of the 8 changes is one atomic commit.
+- Branch is local-only. Not pushed.
+- `dashboard_spa.js` was inspected for an equivalent `GateDot` pattern; it has none, so it was not modified.
+
+---
+
+## Files touched (full list)
+
+```
+user_data/dashboard/static/js/ops_spa.js          (P0-1, WCAG glyphs)
+user_data/dashboard/static/js/qc_react.js         (LAN IP)
+user_data/dashboard/static/css/quanta.css         (warn-strong, @import -> comment, scroll-margin)
+user_data/dashboard/static/css/app.css            (DELETED)
+user_data/dashboard/templates/ops_spa.html        (font <link>, cache-bust)
+user_data/dashboard/templates/dashboard_spa.html  (font <link>, cache-bust)
+tests/test_no_legacy_color_tokens.py              (NEW - regression lint)
+HANDOFF.md                                        (this file)
 ```
