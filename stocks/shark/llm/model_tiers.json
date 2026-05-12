@@ -1,0 +1,12 @@
+{
+  "_comment": "Model assignments per LLM tier. Edit here to swap a tier without changing code. Crons + chat_structured(tier=...) read this file at runtime. Phase B (week 4) plan: swap 'reflector' to a fine-tuned qwen3:30b adapter via this file alone.",
+  "_version": 1,
+  "tiers": {
+    "fast":      "hermes3:8b",
+    "deep":      "hermes3:70b",
+    "reflector": "qwen3:30b",
+    "arbiter":   "hermes3:70b",
+    "debate":    "hermes3:8b",
+    "risk":      "hermes3:70b"
+  }
+}
