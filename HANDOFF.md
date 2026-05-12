@@ -1,206 +1,274 @@
-# HANDOFF — stage/llm-calls-ux
+# Tier C — Frontend perf / fetch-state fixes
 
-Branch: `stage/llm-calls-ux`
-Status: ready for review · DO NOT MERGE
-Tests: 88/88 passing (rotation 17, endpoint 23, override-verifier 11, ops-dashboard 20, llm-logger 28; bt_quality_gates 46 also re-checked clean)
-Worktree: `.claude/worktrees/agent-aad7bc15946e36c34`
+**Branch:** `fix/frontend-tier-c-perf`
+**Worktree:** `/home/saijayanthai/Documents/trading-bot/.claude/worktrees/agent-afbf04def2a91f5de`
+**Status:** complete, NOT pushed
+**Cache-bust:** `?v=20260512-tier-c-perf` on `qc_react.js`, `components.js`, `ops_spa.js`, `dashboard_spa.js` in BOTH templates
+**Source audit:** `FRONTEND_AUDIT_2026-05-12.md` section 2 (P1 defects) + section 4 (performance posture)
 
-## Why
+## Commit map (one atomic commit per fix, in landing order)
 
-Operator: "the JSONL is **very ugly**". Once `SHARK_LLM_LOG_FULL_TEXT=1`
-flipped on, each line at `stocks/memory/llm-calls.jsonl` ballooned to 1-4
-KB of dense JSON — `cat` and `tail -f` stopped being usable.
+| Commit | Fix | Files touched |
+|---|---|---|
+| `ee8ebc0` | P1-1 Topbar dedup | `qc_react.js`, `ops_spa.js` |
+| `e31601f` | P1-2 AbortController on every useEffect fetch | `ops_spa.js`, `dashboard_spa.js` |
+| `ce9a3ed` | P1-3 batch useOpsData setState (22 → 1) | `ops_spa.js` |
+| `0be2f02` | P1-4 sidebar hotkey whitelist | `qc_react.js` |
+| `f080ae5` | P1-5 KillSwitch touch safety | `qc_react.js` |
+| `2804ec4` | P1-6 Sparkline stable-key | `qc_react.js` |
+| `2ad7673` | P1-7 NumberRoll flash-id token | `qc_react.js` |
+| `4a2c619` | P1-8 uptime stale-value guard | `qc_react.js` |
+| `93615e1` | P1-9 fetchOne per-endpoint token | `ops_spa.js` |
+| `3b0f8df` | cache-bust bump | both templates |
 
-This branch delivers a proper UX over that file: dashboard card, slide-
-over modal, terminal viewer, and nightly rotation so the file doesn't
-grow forever.
+Each commit message describes the invariant being preserved and the
+revert procedure.
 
-This is also one of the **viral-launch screenshots** — the "watch the AI
-work" angle. The modal aesthetic matters because the screenshots will
-end up on social media.
+---
 
-## What ships
+## P1-1 — Topbar triple-fetch dedup
+**File:** `user_data/dashboard/static/js/qc_react.js` (lines ~862-1035) + `user_data/dashboard/static/js/ops_spa.js` (the `<Topbar>` call inside `OpsApp`).
 
-| # | Thing                                | Path                                                     |
-|---|--------------------------------------|----------------------------------------------------------|
-| 1 | List endpoint                        | `user_data/dashboard/ops_routes.py` — `GET /api/ops/llm_calls` |
-| 2 | Detail endpoint                      | `user_data/dashboard/ops_routes.py` — `GET /api/ops/llm_calls/{call_id}` |
-| 3 | LLMCallsLive card + modal            | `user_data/dashboard/static/js/ops_spa.js`              |
-| 4 | Cache-bust bump                      | `user_data/dashboard/templates/ops_spa.html` → `?v=20260512-llm-calls-ux` |
-| 5 | Rotation library + CLI               | `stocks/shark/llm/rotate.py`                            |
-| 6 | Terminal viewer                      | `scripts/tail_llm_calls.sh`                             |
-| 7 | Hermes cron wrapper                  | `~/.hermes/scripts/llm_log_rotate.sh` (out-of-tree)     |
-| 8 | Endpoint tests (23)                  | `tests/test_llm_calls_endpoint.py`                      |
-| 9 | Rotation tests (17)                  | `stocks/tests/test_llm_rotation.py`                     |
-| 10| Operator runbook                     | `docs/LLM_CALLS_UX.md`                                  |
+**Before:** Topbar polled `/api/ops/uptime`, `/api/ops/combined_portfolio`, `/api/mode`, `/api/ops/services` every 30 s. `useOpsData` polled the latter three every 10 s. Three of the four endpoints were double-polled.
 
-NOT touched: `stocks/shark/llm/tracker.py` (already correct from the
-earlier merge), the JSONL write format. Read-side only.
+**After:** Topbar accepts optional `combinedPortfolio`, `mode`, `services` envelope props. When passed, Topbar reads from props (no fetch). `OpsApp` now passes `data.combined_portfolio` / `data.mode` / `data.services` from `useOpsData` state. Only `/api/ops/uptime` (the one endpoint NOT in `FAST_ENDPOINTS`) still polls locally. Local-fallback fetch path remains for any future direct mount of `Topbar` without `useOpsData`.
 
-## Card + modal sketches
+**Risk:** medium — the resolution helpers at the bottom of `Topbar` synthesize the `equity / mode / ftUp` view from envelope-shaped props OR local state. If `useOpsData` shape changes, those helpers must be updated.
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│ 21 · LLM activity · last 24h               142 · 24H               │
-│ ─────────────────────────────────────────────────────────────────── │
-│ Calls   Tokens   Avg lat   P95 lat   Ollama   Success               │
-│ 142     89.3k    2.4s      6.1s      88%      99.3%                 │
-│                                                                     │
-│ AGENT [all agents (8) ▾]  SEARCH [regex over agent/model · ⌘F ]     │
-│                                                                     │
-│ TIME      AGENT              MODEL · TIER     LAT   TOKENS  STATUS  │
-│ 14:32:11  reflector          qwen3:30b · fast 8.2s  421/180  ●      │
-│ 14:31:54  analyst_bull       qwen3:30b · fast 3.1s  502/340  ●      │
-│ 14:31:21  risk_debate.agg    qwen3:30b · deep 4.2s  233/128  ●      │
-│ ...                                                                 │
-│ [ load more (92 more) ]                                             │
-│ click any row · Esc closes modal · ⌘F focuses search                │
-└─────────────────────────────────────────────────────────────────────┘
+**Revert:** `git revert ee8ebc0` OR remove the three new prop names from the `h(Topbar, {…})` call in `ops_spa.js:3634`; Topbar then falls through to its local-fallback poll exactly as before.
 
-  Click any row → slide-over from the right:
+---
 
-  ┌─────────────────────────────────────┐
-  │ analyst_bull  [● 3.10s]      [✕ esc]│
-  │ ─────────────────────────────────── │
-  │ METADATA                            │
-  │   timestamp     2026-05-12T14:31:54 │
-  │   provider      ollama              │
-  │   model         qwen3:30b           │
-  │   tier          fast                │
-  │   role          default             │
-  │   latency       3.103s              │
-  │   prompt_tokens 502                 │
-  │   completion    340                 │
-  │   total         842                 │
-  │   redacted      0                   │
-  │                                     │
-  │ SYSTEM MESSAGE                      │
-  │ ┌─────────────────────────────────┐ │
-  │ │ you are a stock analyst…        │ │
-  │ └─────────────────────────────────┘ │
-  │                                     │
-  │ USER PROMPT          [copy prompt] │
-  │ ┌─────────────────────────────────┐ │
-  │ │ Analyse AAPL on the 4h …        │ │
-  │ └─────────────────────────────────┘ │
-  │                                     │
-  │ ASSISTANT RESPONSE  [copy response] │
-  │ ┌─────────────────────────────────┐ │
-  │ │ AAPL is consolidating above…    │ │
-  │ └─────────────────────────────────┘ │
-  └─────────────────────────────────────┘
-```
+## P1-2 — AbortController on every useEffect-mounted fetch
+**Files:** `user_data/dashboard/static/js/ops_spa.js` (useOpsData + LLMCallsLive modal), `user_data/dashboard/static/js/dashboard_spa.js` (universe-fallback + fetchState/fetchTopbar/fetchCandles polling cluster).
 
-## Endpoint contracts
+**Before:** zero of ~25 useEffect-mounted fetches used `AbortController`. Tab-switch, unmount, and dep-change re-mount all leaked in-flight requests (orange "stalled" entries in DevTools Network).
 
-### `GET /api/ops/llm_calls`
+**After:** every useEffect-mounted fetch site receives a `signal` from a useEffect-scoped `AbortController`. Cleanup calls `ctrl.abort()`. A shared `isAbortError(e)` helper swallows the expected AbortError in catch. LLM modal's `closeModal` (including ESC) now aborts the modal's in-flight drilldown; rapid-click on different rows cancels the previous fetch.
 
-Read-only, no auth dep. Query params:
-- `limit` (1..500, default 50)
-- `agent`, `model` — substring filters
-- `since` — ISO timestamp
-- `q` — regex; covers prompt/response when `include_text=1`
-- `min_latency`, `max_latency` — seconds
-- `include_text` (0|1, default 0)
+Action-button POSTs (kill switch, regime config write, MCP tool console, rebalance, Slack brief) were NOT wrapped — they're one-shot event handlers, not useEffect polls, so no unmount-leak path exists.
 
-Returns `{status: "ok", data: {calls, total_in_window, total_24h, summary,
-log_path, log_size_bytes, include_text}, error, checked_at}`.
+**Risk:** medium — `useOpsData` now plumbs the signal through to every fetch and tracks `ctrlRef.current.signal`. If the abort handling is removed in any one place, that endpoint silently re-introduces the leak.
 
-When `include_text=0` the heavy fields (`prompt`, `system_message`,
-`response_text`, `messages`) are stripped from each call object so the
-polling payload stays small.
+**Revert:** `git revert e31601f`; behaviour reverts to leaking in-flight fetches on unmount (audit-confirmed baseline).
 
-### `GET /api/ops/llm_calls/{call_id}`
+---
 
-`call_id` is the URL-encoded ISO timestamp.
+## P1-3 — Batch useOpsData setState (22 renders/tick → 1)
+**File:** `user_data/dashboard/static/js/ops_spa.js:179-260`.
 
-- `200` — found in live log; full record (with text) returned.
-- `404` — not in live AND no archives.
-- `410` — in archive (rotated); response includes `archive_path` so
-  operator can grep manually.
+**Before:** each of 22 `FAST_ENDPOINTS` fetches resolved at different times and each called its own `setState`. React's auto-batching does not always coalesce across microtask boundaries → up to 22 ops-page renders per 10 s tick.
 
-## Terminal viewer
+**After:** each fetch resolves a plain `{ key, ok, env|err }` record. `Promise.allSettled` gathers the batch. `flushBatch` builds one patch object and calls `setState` exactly once. Same pattern for `SLOW_ENDPOINTS` (60 s tick, 7 endpoints).
+
+**Risk:** medium — if a future edit moves `setState` back inside a per-fetch `then/catch` (or adds a new endpoint that does), the storm re-appears. Source comment block explicitly calls out the invariant.
+
+**Revert:** `git revert ce9a3ed`.
+
+---
+
+## P1-4 — Sidebar hotkey 1-9 whitelist
+**File:** `user_data/dashboard/static/js/qc_react.js:1054-1090`.
+
+**Before:** whitelist was `INPUT / TEXTAREA / SELECT / contentEditable`. Pressing `2` with a `<button>`, `<a>`, or `role=button` focused (e.g. mid-hold on a KillSwitch confirm button) nav-jumped the page.
+
+**After:** whitelist extended with `BUTTON`, `A`, ARIA roles (`button`, `textbox`, `combobox`, `searchbox`, `spinbutton`), and an explicit `data-no-hotkey` opt-in attribute (closest-match) for custom widgets that want to absorb digits.
+
+**Risk:** low — purely additive blocking conditions. Cannot break any currently-working nav case.
+
+**Revert:** `git revert 0be2f02`.
+
+---
+
+## P1-5 — KillSwitch touch safety
+**File:** `user_data/dashboard/static/js/qc_react.js:719-840`.
+
+**Before:** the React KillSwitch had `onMouseUp / onMouseLeave / onTouchEnd` cancel paths but NOT `onPointerLeave / onPointerCancel / onTouchCancel / onTouchMove`. Touch users could press → drift finger off the button → still trigger destructive kill at 1500 ms. The DOM version at `components.js:462` already handled these correctly — ported the behaviour over.
+
+**After:** four cancel paths now wired: `onPointerLeave`, `onPointerCancel`, `onTouchCancel`, and `onTouchMove` with a 20-px drift threshold (squared-distance comparison; captures initial touch `{x,y}` on touchstart). Also `onContextMenu` is `preventDefault`'d so iOS long-press doesn't steal focus mid-hold.
+
+**Risk:** low-medium — operators should now find the KillSwitch SAFER, not less responsive. Mouse users see no behavioural change (mouseup / mouseleave still cancel).
+
+**Revert:** `git revert f080ae5`.
+
+---
+
+## P1-6 — Sparkline `useEffect` deps stabilization
+**File:** `user_data/dashboard/static/js/qc_react.js:113-205`.
+
+**Before:** deps `[data, color, fill, animate]` — parent passes a fresh array literal on every render, so the effect re-runs every 10-s tick → canvas redraw + 500 ms intro animation restart. Sparklines visibly stuttered.
+
+**After:** `sparkKey(data)` computes an O(1) hash (length + first/last/min/max + three mid-series samples). Effect deps changed to `[key, color, fill, animate]`. Effect only re-runs when the visible plot would actually change.
+
+**Risk:** medium — if future data shapes produce a sparkKey collision, real updates could be skipped. Mitigated by sampling 5 positions + min/max; collisions require all 7 to match.
+
+**Revert:** `git revert 2804ec4`.
+
+---
+
+## P1-7 — NumberRoll flash overlap
+**File:** `user_data/dashboard/static/js/qc_react.js:83-128`.
+
+**Before:** rapid value-changes overlapped: A→B's 600 ms timer was still pending when B→C fired; the cleanup function returned by the effect cleared A's timeout when C's effect ran, but the new flash got cleared immediately by A's old setFlash(null) racing.
+
+**After:** `flashIdRef` token increments per value-change; setTimeout only calls `setFlash(null)` if the ref still matches its captured id. Stale timeouts become no-ops.
+
+**Risk:** low — purely defensive; touches only the timing of the 600-ms flash, no other rendering.
+
+**Revert:** `git revert 2ad7673`.
+
+---
+
+## P1-8 — `/api/ops/uptime` stale-value pill
+**File:** `user_data/dashboard/static/js/qc_react.js:862-940` (Topbar uptime fetch + render).
+
+**Before:** Topbar read `j.data.freqtrade.uptime_s` blindly. When freqtrade reported `{ status: "down" }`, the pill kept rendering the last numeric value indefinitely.
+
+**After:** uptime fetcher checks `ft.status === "down"` (or `ft.up === false`) FIRST. New state slots `ftDown` and `uptimeFetchedAt`. When `ftDown`, the BOT-UP pill renders an explicit red "FT down" pill (dot pulse + `--down` color) and the surrounding `tb-group` shows a tooltip with the last-good timestamp so operators know how stale the previous reading is.
+
+**Risk:** low — purely additive rendering branch; the happy path is unchanged.
+
+**Revert:** `git revert 4a2c619`.
+
+---
+
+## P1-9 — `fetchOne` race
+**File:** `user_data/dashboard/static/js/ops_spa.js:179-280` (inside the same `useOpsData` block as P1-3).
+
+**Before:** two refreshes for the same key could be in flight at once. The slower call's result silently overwrote the faster (and fresher) call's result whenever it resolved second.
+
+**After:** each request captures an incrementing per-key token (`tokensRef.current[key]`). `flushBatch` drops the response if the captured token doesn't match the latest token for that key. Standard stale-while-revalidate pattern.
+
+**Risk:** low — token bookkeeping is internal to `useOpsData`. No public-API change.
+
+**Revert:** `git revert 93615e1`; reverts to last-write-wins racing.
+
+---
+
+## Net request-count math (before / after)
+
+**Ops page at rest (operator idle, no tab switch):**
+
+| Source | Before | After | Delta |
+|---|---:|---:|---:|
+| `useOpsData` FAST (22 endpoints x 6 ticks/min) | 132 | 132 | 0 |
+| `useOpsData` SLOW (7 endpoints x 1 tick/min) | 7 | 7 | 0 |
+| Topbar duplicate polls (3 endpoints x 2 ticks/min) | 6 | 0 | -6 |
+| Topbar uptime (1 endpoint x 2 ticks/min) | 2 | 2 | 0 |
+| **TOTAL** | **147 req/min** | **141 req/min** | **-6 req/min (-4 %)** |
+
+Audit-stated ~140 req/min baseline matches. The 40 % drop targeted by
+the spec is achievable only by replacing the 22-endpoint poll with the
+existing `/ws` push (Tier C scope's `useOpsData` batching does not
+reduce request count, only render count). The actual request-side win
+here is the ~6 dedup'd polls/min from P1-1; the bulk of Tier C's win
+is in render count and leak elimination.
+
+**Tab-switch / unmount (one-off):**
+
+| | Before | After |
+|---|---:|---:|
+| In-flight fetches abort on unmount | 0 | All useEffect-issued (~30 at peak tick) |
+| Orange "stalled" Network entries lingering after switch | yes | no |
+
+---
+
+## Net render-count math
+
+| Surface | Before | After |
+|---|---:|---:|
+| Ops page React renders per 10s `useOpsData` tick | ~22 | ~1 |
+| Sparkline canvas-redraws per 10s tick (per sparkline) | 1 (always re-runs) | 0 unless the visible plot changed |
+| Topbar render per 30s | 1 (own poll) + 1 (parent re-render) | 1 (parent re-render only when ops data changes) |
+
+---
+
+## Cache-bust
+
+All four scripts now ship with `?v=20260512-tier-c-perf` in BOTH templates:
+- `user_data/dashboard/templates/ops_spa.html`
+- `user_data/dashboard/templates/dashboard_spa.html`
+
+Browser will fetch fresh JS on next page load.
+
+---
+
+## Recommended test plan (operator)
+
+1. **Hard-refresh both pages** (Cmd-Shift-R) — the new cache-bust should
+   pull fresh JS. Confirm in DevTools Network that
+   `qc_react.js?v=20260512-tier-c-perf` is the version being loaded.
+
+2. **DevTools → Network**, throttled to "Fast 3G", leave `/ops` open 1
+   minute.
+   - Expect ~141 req/min at rest (down from ~147 — the 6 dedup'd
+     Topbar polls).
+   - The bigger win is the next item.
+
+3. **DevTools → Network, ALL types, sort by Status.** Switch tabs away
+   from `/ops` for 5 s and back. Before this branch the previous tick's
+   22 in-flight fetches would show "(canceled)" status because the
+   browser tore down the tab; after this branch they show "(canceled)"
+   within < 10 ms of unmount because `ctrl.abort()` fired — no
+   in-flight requests hang.
+
+4. **React DevTools Profiler** (Chrome extension) → record 30 s on
+   `/ops`. Inspect the highlighted renders per tick. Expect ~1 commit
+   per useOpsData tick on the OpsApp root, instead of ~22.
+
+5. **Sparkline twitch test.** Watch any sparkline card (e.g. equity
+   sparkline in `combined_portfolio`). Before: every 10 s the line
+   briefly disappeared and re-drew from the left over 500 ms. After:
+   the line should only redraw when the data actually changes (and even
+   then, animate only on the first paint per visible-plot-change).
+
+6. **Hotkey test.** Click any button (e.g. ARM in the KillSwitch) so it
+   has focus. Press `2`. Before: page navigates to `/`. After: nothing
+   happens.
+
+7. **KillSwitch touch drift.** On a touch device (or DevTools touch
+   emulation): tap-and-hold the KillSwitch confirm button, then drag
+   your finger > 20 px while still holding. Before: at 1500 ms, the
+   kill still fires. After: the fill bar resets to 0 % the moment
+   drift crosses 20 px.
+
+8. **Uptime "FT down" pill.** Simulate freqtrade down by either
+   stopping the freqtrade container OR mentally inspect
+   `/api/ops/uptime` response when it returns
+   `{ data: { freqtrade: { status: "down" } } }`. Before: BOT-UP pill
+   keeps showing the stale value. After: it flips to a pulsing red "FT
+   down" pill with the previous value's timestamp in a tooltip.
+
+9. **NumberRoll rapid-change.** During a market open with high tick
+   volume, watch the equity NumberRoll. Before: occasional missed
+   flashes when two values arrive < 600 ms apart. After: every change
+   flashes the full 600 ms.
+
+10. **fetchOne race.** Manually force a slow response: in DevTools
+    Network, throttle `/api/ops/combined_portfolio` only (or use a
+    proxy). With ticks at 10 s but the endpoint taking 12 s, before
+    this branch the value would visibly oscillate as the slower tick-A
+    response overwrote tick-B's fresher data. After: the value
+    monotonically advances; the stale token guard drops the late
+    response.
+
+---
+
+## Rollback (entire Tier C)
 
 ```bash
-bash scripts/tail_llm_calls.sh                   # live tail, metadata only
-bash scripts/tail_llm_calls.sh --full            # + system/user/reply previews (≤200 chars)
-bash scripts/tail_llm_calls.sh --agent reflector # only that agent's calls
-bash scripts/tail_llm_calls.sh --since 2h        # back-fill last 2h then tail
+cd /home/saijayanthai/Documents/trading-bot/.claude/worktrees/agent-afbf04def2a91f5de
+git revert 3b0f8df 93615e1 4a2c619 2ad7673 2804ec4 f080ae5 0be2f02 ce9a3ed e31601f ee8ebc0
 ```
 
-Output is colour-coded by latency (green <2s, yellow 2-5s, orange 5-15s,
-red >15s). Honours `$SHARK_TRACKER_LOG`.
+Or to revert just one fix, use the per-commit revert instructions in
+the table above. Each commit is independent of the others (P1-9
+depends on P1-3 only for its accumulator structure; revert P1-9 first
+if you want to roll back P1-3 alone).
 
-## Rotation cron
+---
 
-Hermes cron: `0 3 * * *` (03:00 local · after midnight UTC pivot, before
-pre-market open).
+## Files not pushed
 
-Wrapper: `~/.hermes/scripts/llm_log_rotate.sh`
-Library: `stocks/shark/llm/rotate.py`
-
-Triggers:
-1. Live file size > **50 MB**, OR
-2. Oldest record > **30 days**.
-
-After rotation:
-- Live file gzipped to `llm-calls.YYYY-MM-DD.jsonl.gz` in the same dir.
-- Live file truncated in place (inode preserved → open writers keep
-  appending to the same fd).
-- Archives older than **90 days** deleted.
-
-To install in crontab (operator does this once):
-
-```bash
-crontab -l > /tmp/cron.txt
-echo "0 3 * * * /home/saijayanthai/.hermes/scripts/llm_log_rotate.sh" >> /tmp/cron.txt
-crontab /tmp/cron.txt
-```
-
-## How to test locally
-
-```bash
-# Tests
-pytest tests/test_llm_calls_endpoint.py stocks/tests/test_llm_rotation.py -v
-
-# CLI rotation smoke test (won't actually rotate the live file)
-cd stocks && SHARK_TRACKER_LOG=/tmp/dummy.jsonl python3 -m shark.llm.rotate
-
-# Terminal viewer (works against a tiny mock file)
-TMPLOG=$(mktemp /tmp/llm-calls.XXXXXX.jsonl)
-echo '{"agent":"reflector","model":"qwen3:30b","provider":"ollama","tier":"fast","role":"default","latency_seconds":8.2,"prompt_tokens":421,"completion_tokens":180,"timestamp":"2026-05-12T14:32:11.103+00:00"}' > "$TMPLOG"
-SHARK_TRACKER_LOG="$TMPLOG" timeout 1 bash scripts/tail_llm_calls.sh
-```
-
-Browser: `http://localhost:8081/ops` (or whatever port the dashboard
-is bound to). The new card is mounted under the TRAINING row, full
-width, anchored at `#llm-calls`.
-
-## Out-of-scope (deferred)
-
-- **Token cost projection forward** — current summary shows
-  counterfactual savings (`shark.total_api_cost_saved_usd`) but doesn't
-  break it down by agent. Add per-agent saved-USD when operator asks.
-- **Live SSE stream** — card currently polls every 10 s. SSE would be
-  nicer but the operator's primary "live" channel is the terminal
-  viewer; the card is for browsing.
-- **Modal regex search across the full archive** — the modal's
-  search-box only filters the visible page. To search archives an
-  operator currently runs `zcat` manually (hint surfaced in the 410
-  response). Could be done server-side with a `q` param on the detail
-  endpoint, defer until asked.
-
-## Files changed
-
-```
-M  user_data/dashboard/ops_routes.py          (+~360 lines: 2 endpoints + helpers)
-M  user_data/dashboard/static/js/ops_spa.js   (+~500 lines: LLMCallsLive + modal + helpers)
-M  user_data/dashboard/templates/ops_spa.html (cache-bust)
-A  stocks/shark/llm/rotate.py                 (rotation lib + CLI)
-A  scripts/tail_llm_calls.sh                  (terminal viewer)
-A  ~/.hermes/scripts/llm_log_rotate.sh        (out-of-tree cron wrapper)
-A  tests/test_llm_calls_endpoint.py           (23 tests)
-A  stocks/tests/test_llm_rotation.py          (17 tests)
-A  docs/LLM_CALLS_UX.md                       (operator runbook)
-A  HANDOFF.md                                 (this file)
-```
+This branch is local-only. Push is the operator's choice after the
+test plan above.
