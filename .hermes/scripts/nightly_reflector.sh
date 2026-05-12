@@ -23,6 +23,13 @@
 
 set -uo pipefail
 
+# GPU reservation gate — yield to ModelForge training windows.
+if [[ -x "$HOME/.hermes/scripts/gpu_gate.sh" ]] && \
+   ! "$HOME/.hermes/scripts/gpu_gate.sh" check --caller nightly-reflector; then
+    echo "[$(date -Is)] gpu_gate: skipping nightly-reflector (GPU reserved)" >> "$HOME/.hermes/logs/gpu_gate.log"
+    exit 0
+fi
+
 # REPO defaults to two levels up from this script (so installed copies under
 # $HOME/.hermes/scripts/ keep working when REPO is set in cron env). Override
 # with TRADING_BOT_REPO=/abs/path if your checkout isn't at $HOME/.../trading-bot.
