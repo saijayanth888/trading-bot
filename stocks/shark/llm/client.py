@@ -435,6 +435,14 @@ def _resolve_ollama_model(role: str, tier: str) -> str:
 def _emit_tracker(
     agent: str, model: str, provider: str, elapsed: float,
     usage: dict, tier: str, role: str,
+    *,
+    # Full-text payload — always passed through. The tracker decides
+    # whether to persist them based on SHARK_LLM_LOG_FULL_TEXT. Keeping
+    # the call sites uniform means we don't fan out the flag check.
+    system_message: str | None = None,
+    user_message: str | None = None,
+    response_text: str | None = None,
+    messages: list[dict] | None = None,
 ) -> None:
     """Best-effort tracker emit — never let tracking break the agent path."""
     try:
@@ -453,6 +461,10 @@ def _emit_tracker(
                 or 0
             ),
             tier=tier, role=role,
+            system_message=system_message,
+            user_message=user_message,
+            response_text=response_text,
+            messages=messages,
         )
     except Exception as exc:  # pragma: no cover
         logger.debug("tracker emit failed: %s", exc)
@@ -568,7 +580,15 @@ def chat_json(
             elapsed = time.monotonic() - start
             primary_breaker.record_success(elapsed)
             _emit_tracker(agent, client.model, client.provider_name,
-                          elapsed, resp.usage, tier, role)
+                          elapsed, resp.usage, tier, role,
+                          system_message=system_prompt,
+                          user_message=user,
+                          response_text=resp.content,
+                          messages=[
+                              {"role": "system", "content": system_prompt},
+                              {"role": "user", "content": user},
+                              {"role": "assistant", "content": resp.content},
+                          ])
             return resp.content, resp.usage, client.model
         except Exception as exc:
             primary_breaker.record_failure(str(exc))
@@ -616,7 +636,15 @@ def chat_json(
         fallback_breaker.record_success(elapsed)
         _maybe_alert_fallback_active(agent, primary_breaker.get_status())
         _emit_tracker(agent, client.model, client.provider_name,
-                      elapsed, resp.usage, tier, role)
+                      elapsed, resp.usage, tier, role,
+                      system_message=system_prompt,
+                      user_message=user_message,
+                      response_text=resp.content,
+                      messages=[
+                          {"role": "system", "content": system_prompt},
+                          {"role": "user", "content": user_message},
+                          {"role": "assistant", "content": resp.content},
+                      ])
         return resp.content, resp.usage, client.model
     except Exception as exc:
         fallback_breaker.record_failure(str(exc))
@@ -646,7 +674,15 @@ def _direct_call(
     )
     elapsed = time.monotonic() - start
     _emit_tracker(agent, client.model, client.provider_name,
-                  elapsed, resp.usage, tier, role)
+                  elapsed, resp.usage, tier, role,
+                  system_message=system_prompt,
+                  user_message=user,
+                  response_text=resp.content,
+                  messages=[
+                      {"role": "system", "content": system_prompt},
+                      {"role": "user", "content": user},
+                      {"role": "assistant", "content": resp.content},
+                  ])
     return resp.content, resp.usage, client.model
 
 
