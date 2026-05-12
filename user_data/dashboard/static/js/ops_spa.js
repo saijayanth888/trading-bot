@@ -3823,6 +3823,34 @@
       document.documentElement.style.setProperty("--accent", "#7c5cff");
     }, []);
 
+    // Move #9 · Regime-aware page chrome.
+    // Tints the topbar's 2px bottom border with the current BTC regime so
+    // the operator gets ambient peripheral-vision regime tracking. Reads
+    // from the existing data.regime envelope (already polled every 10s by
+    // useOpsData) — ZERO new endpoint calls. Writes a CSS custom property
+    // (--regime-tint) on the .topbar element; the CSS rule in quanta.css
+    // picks it up. Default falls back to --line-2 so unknown / null /
+    // unmounted-yet keeps the original 2px hairline.
+    const regimeCurrent = (function () {
+      const env = envelopeData(data && data.regime);
+      return env && env.current ? String(env.current) : null;
+    })();
+    useEffect(() => {
+      const tintFor = (r) => {
+        switch (r) {
+          case "trending_up":     return "var(--up)";
+          case "trending_down":   return "var(--down)";
+          case "mean_reverting":  return "var(--warn)";
+          case "high_volatility": return "var(--accent)";
+          default:                return "var(--line-2)";
+        }
+      };
+      const tb = document.querySelector(".topbar");
+      if (!tb) return;
+      tb.style.setProperty("--regime-tint", tintFor(regimeCurrent));
+      tb.setAttribute("data-regime", regimeCurrent || "unknown");
+    }, [regimeCurrent]);
+
     return h(F, null,
       h("div", { className: "app" },
         h(Topbar, { killState, setKillState, active: "ops" }),
