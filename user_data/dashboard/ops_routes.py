@@ -4029,10 +4029,63 @@ def _read_jsonl_tail(path: Path, *, max_records: int) -> list[dict]:
     return out
 
 
+# Canonical-role mapping for the AgentFlow strip (dashboard SPA). Maps the
+# raw ``agent`` field written by the tracker to one of six canonical roles
+# the operator thinks in: regime_tagger → indicator_selector → bull_debater
+# → bear_debater → arbiter → reflector. Anything not listed here is filed
+# under its own raw name (still visible in the LLM activity list below the
+# strip). Cheap dict-lookup + prefix check, runs in the same single pass as
+# the rest of the summary so it adds < 1 ms even on 5k-row windows.
+_AGENT_ROLE_MAP = {
+    # Conceptual role  : list of agent-name prefixes that map to it
+    "regime_tagger": ("regime_tagger", "trading-regime-tagger"),
+    "indicator_selector": ("indicator_selector",),
+    "bull_debater": ("analyst_bull", "debate.bull"),
+    "bear_debater": ("analyst_bear", "debate.bear"),
+    "arbiter": (
+        "decision_arbiter",
+        "debate.arbiter",
+        "combined_analyst",  # the merged bull+bear+arbiter call
+        "risk_debate.judge",
+        "trade_reviewer",
+    ),
+    "reflector": ("outcome_resolver", "reflector"),
+}
+
+
+def _canonical_role(agent: str) -> str | None:
+    """Return the canonical AgentFlow role for ``agent``, or None if the
+    agent name doesn't fit any of the strip's six conceptual roles."""
+    a = (agent or "").lower()
+    for role, prefixes in _AGENT_ROLE_MAP.items():
+        for p in prefixes:
+            if a == p or a.startswith(p + ".") or a.startswith(p + "_"):
+                return role
+    return None
+
+
 def _summarise_llm_window(calls: list[dict]) -> dict[str, Any]:
     """Card-summary numbers — total calls, tokens, avg latency, ollama
     fraction, success-rate, by-agent counts. Mirrors what TodayScoreboard
-    does for trades but for LLM calls."""
+    does for trades but for LLM calls.
+
+    Also computes ``by_role_detail`` keyed by canonical AgentFlow roles
+    (regime_tagger, indicator_selector, bull_debater, bear_debater,
+    arbiter, reflector). Each entry is shaped like::
+
+        {
+          "count": int, "success": int, "fail": int,
+          "avg_latency_s": float, "p95_latency_s": float,
+          "last_ts": iso-string | None, "last_success": bool,
+          "last_gist": "first ~120 chars of response_text" | None,
+          "model": "most-common model for this role",
+          "raw_agents": ["analyst_bull", "debate.bull.r1", ...],
+        }
+
+    The AgentFlow strip on the ops dashboard renders one box per role from
+    this dict. Roles with zero calls are NOT included — the frontend pads
+    missing roles with placeholder boxes so the strip stays a fixed shape.
+    """
     if not calls:
         return {
             "total_calls": 0,
@@ -4048,6 +4101,7 @@ def _summarise_llm_window(calls: list[dict]) -> dict[str, Any]:
             "by_agent": {},
             "by_model": {},
             "by_tier": {"fast": 0, "deep": 0},
+            "by_role_detail": {},
         }
 
     by_agent: dict[str, int] = {}
@@ -4058,6 +4112,9 @@ def _summarise_llm_window(calls: list[dict]) -> dict[str, Any]:
     p_toks = 0
     c_toks = 0
     latencies: list[float] = []
+
+    # AgentFlow per-role accumulators. Keyed by canonical role name.
+    role_acc: dict[str, dict[str, Any]] = {}
 
     for c in calls:
         agent = c.get("agent", "unknown")
@@ -4073,13 +4130,45 @@ def _summarise_llm_window(calls: list[dict]) -> dict[str, Any]:
         # response; explicit ``success=false`` (added by future versions)
         # would flip this. For now, any record with completion_tokens > 0
         # OR no explicit ``error`` field counts as successful.
-        if c.get("success") is False or c.get("error"):
-            pass
-        else:
+        rec_success = not (c.get("success") is False or c.get("error"))
+        if rec_success:
             successes += 1
         p_toks += int(c.get("prompt_tokens") or 0)
         c_toks += int(c.get("completion_tokens") or 0)
         latencies.append(float(c.get("latency_seconds") or 0))
+
+        # ── AgentFlow per-role aggregation ────────────────────────────
+        role = _canonical_role(agent)
+        if role is None:
+            continue
+        slot = role_acc.setdefault(role, {
+            "count": 0, "success": 0, "fail": 0,
+            "latencies": [],
+            "last_ts": None, "last_success": True,
+            "last_gist": None, "last_agent": None,
+            "models": {}, "raw_agents": {},
+        })
+        slot["count"] += 1
+        if rec_success:
+            slot["success"] += 1
+        else:
+            slot["fail"] += 1
+        slot["latencies"].append(float(c.get("latency_seconds") or 0))
+        slot["models"][m] = slot["models"].get(m, 0) + 1
+        slot["raw_agents"][agent] = slot["raw_agents"].get(agent, 0) + 1
+        # The tail-reader returns newest-first, so the FIRST record we see
+        # per role is the most recent. Only set ``last_*`` on the first hit.
+        if slot["last_ts"] is None:
+            slot["last_ts"] = c.get("timestamp")
+            slot["last_success"] = rec_success
+            slot["last_agent"] = agent
+            resp = c.get("response_text") or ""
+            if resp:
+                # One-line gist: collapse whitespace + cap at 120 chars.
+                gist = " ".join(str(resp).split())
+                if len(gist) > 120:
+                    gist = gist[:117] + "…"
+                slot["last_gist"] = gist
 
     n = len(calls)
     avg_lat = sum(latencies) / n
@@ -4089,6 +4178,30 @@ def _summarise_llm_window(calls: list[dict]) -> dict[str, Any]:
     max_lat = max(latencies) if latencies else 0.0
     ollama_n = provider_counts.get("ollama", 0)
     anthropic_n = provider_counts.get("anthropic", 0)
+
+    # Reduce per-role accumulators to the public shape. Latencies become
+    # avg + p95 (matches the headline summary). Models reduces to the
+    # most-common single model string for the strip's "Model" line.
+    by_role_detail: dict[str, dict[str, Any]] = {}
+    for role, slot in role_acc.items():
+        lats = slot["latencies"]
+        avg_r = sum(lats) / len(lats) if lats else 0.0
+        ls = sorted(lats)
+        p95_r = ls[max(0, int(0.95 * len(ls)) - 1)] if ls else 0.0
+        top_model = max(slot["models"].items(), key=lambda kv: kv[1])[0] if slot["models"] else "?"
+        by_role_detail[role] = {
+            "count": slot["count"],
+            "success": slot["success"],
+            "fail": slot["fail"],
+            "avg_latency_s": round(avg_r, 2),
+            "p95_latency_s": round(p95_r, 2),
+            "last_ts": slot["last_ts"],
+            "last_success": slot["last_success"],
+            "last_gist": slot["last_gist"],
+            "last_agent": slot["last_agent"],
+            "model": top_model,
+            "raw_agents": dict(sorted(slot["raw_agents"].items(), key=lambda kv: -kv[1])),
+        }
 
     return {
         "total_calls": n,
@@ -4105,6 +4218,7 @@ def _summarise_llm_window(calls: list[dict]) -> dict[str, Any]:
         "by_model": dict(sorted(by_model.items(), key=lambda kv: -kv[1])),
         "by_tier": by_tier,
         "providers": provider_counts,
+        "by_role_detail": by_role_detail,
     }
 
 

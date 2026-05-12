@@ -728,6 +728,141 @@ table.t .row-strike td { color: var(--fg-3); }
 .tl-body { font-size: var(--t-sm); }
 .tl-source { font-family: var(--mono); font-size: var(--t-2xs); color: var(--fg-3); letter-spacing: .06em; text-transform: uppercase; }
 
+/* AgentFlow — horizontal strip of canonical-role boxes above the LLM
+   activity list. Reuses existing tokens (line-2/up-line/warn-line/down-line,
+   fg-1/2/3, mono, s-2/3, t-xs/2xs, r-sm). No shadows, no gradients, no
+   border-radius beyond --r-sm (2px). Strip is horizontally scrollable on
+   narrow viewports so the row of boxes never wraps (arrows would lie).   */
+.agent-flow {
+  display: flex;
+  align-items: stretch;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-1) var(--s-3);
+  overflow-x: auto;
+  overflow-y: visible;
+  scrollbar-width: thin;
+}
+.agent-flow::-webkit-scrollbar { height: 6px; }
+.agent-flow::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: var(--r-sm); }
+.agent-flow::-webkit-scrollbar-track { background: transparent; }
+
+.af-box {
+  flex: 0 0 auto;
+  min-width: 180px;
+  max-width: 220px;
+  min-height: 104px;
+  padding: 8px 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+              border-color var(--dur-fast) var(--ease);
+  font-family: var(--mono);
+}
+.af-box:hover { background: var(--bg-card-2); }
+.af-box:focus-visible {
+  outline: 1px solid var(--info-line);
+  outline-offset: 2px;
+}
+.af-box.is-fresh { border-color: var(--up-line); }
+.af-box.is-warm  { border-color: var(--warn-line); }
+.af-box.is-cold  { border-color: var(--line-2); }
+.af-box.is-fail  { border-color: var(--down-line); }
+.af-box.is-empty { border-color: var(--line-1); background: var(--bg-rail); }
+
+.af-title {
+  font-size: var(--t-xs);
+  color: var(--fg-1);
+  letter-spacing: .02em;
+}
+.af-model {
+  font-size: var(--t-2xs);
+  color: var(--fg-3);
+}
+.af-live {
+  font-size: var(--t-2xs);
+  color: var(--fg-2);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 12px;
+}
+.af-counts {
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+}
+.af-counts .af-ok   { color: var(--up); }
+.af-counts .af-bad  { color: var(--down); }
+.af-counts .af-sep  { color: var(--fg-4); margin: 0 4px; }
+.af-latency {
+  font-size: var(--t-2xs);
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+.af-gist {
+  font-size: var(--t-2xs);
+  color: var(--fg-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 1px;
+}
+.af-placeholder { color: var(--fg-4); }
+
+/* Connector — thin horizontal line between boxes with a hop-latency
+   chip centered above and a → glyph at the end. Sits between boxes by
+   being a sibling .af-arrow element rather than a pseudo-element so the
+   chip layout stays simple. */
+.af-arrow {
+  flex: 0 0 32px;
+  align-self: stretch;
+  position: relative;
+  min-width: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-4);
+  font-family: var(--mono);
+  font-size: var(--t-2xs);
+}
+.af-arrow .af-arrow-line {
+  position: absolute;
+  left: 0; right: 0; top: 50%;
+  height: 1px;
+  background: var(--line-2);
+}
+.af-arrow .af-hop {
+  position: relative;
+  z-index: 1;
+  background: var(--bg-page);
+  padding: 0 4px;
+  color: var(--fg-3);
+}
+.af-arrow .af-glyph {
+  position: absolute;
+  right: -2px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--fg-3);
+  font-size: var(--t-xs);
+  line-height: 1;
+}
+
+/* Pulse highlight applied to an LLM-activity row after a click on the
+   matching AgentFlow box. 800 ms one-shot — well under the project's
+   200 ms ceiling for animation tokens, but the spec explicitly calls
+   for this duration on the row-pulse so the operator's eye can follow. */
+@keyframes pulse-row {
+  0%   { background: var(--info-bg); }
+  100% { background: transparent; }
+}
+.af-pulse-row { animation: pulse-row 800ms var(--ease) 1; }
+
 /* responsive guard */
 @media (max-width: 1200px) {
   .app { grid-template-columns: 64px 1fr; }

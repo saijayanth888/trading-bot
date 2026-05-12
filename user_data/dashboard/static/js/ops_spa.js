@@ -3474,6 +3474,214 @@
     );
   }
 
+  // ─────────────── AgentFlow — pipeline strip above LLM Activity ───────────────
+  // Renders 5–6 boxes for the conceptual trading-bot LLM pipeline:
+  //   regime_tagger → indicator_selector? → bull_debater → bear_debater
+  //   → arbiter → reflector
+  // Piggybacks on the same /api/ops/llm_calls payload the existing LLM
+  // Activity card uses — server-side aggregates land in
+  // summary.by_role_detail. No new poll. Additive: the existing list below
+  // is untouched; operators still scan raw rows for forensic detail.
+  //
+  // Click → scrolls the LLM activity list to the role's most-recent row
+  // and pulses it for 800 ms. Implemented via a CustomEvent the
+  // LLMCallsLive component listens for — no shared state, no refactor of
+  // the existing component.
+  //
+  // Opt-out: localStorage.setItem("quanta.agent_flow", "0"); reload.
+
+  // Fixed order of strip slots — gaps are rendered as "no calls today"
+  // placeholder boxes (per spec edge-case) so the operator can see which
+  // pipeline stage isn't firing. ``indicator_selector`` is the one
+  // exception: if it has zero calls in the window we omit it entirely
+  // because today's bot doesn't emit it at all (per spec).
+  const AGENT_FLOW_ORDER = [
+    "regime_tagger",
+    "indicator_selector",
+    "bull_debater",
+    "bear_debater",
+    "arbiter",
+    "reflector",
+  ];
+
+  function _afAgeMs(iso) {
+    if (!iso) return Infinity;
+    const t = Date.parse(iso);
+    if (isNaN(t)) return Infinity;
+    return Date.now() - t;
+  }
+  function _afAgeLabel(iso) {
+    const ms = _afAgeMs(iso);
+    if (!isFinite(ms)) return "—";
+    const s = Math.round(ms / 1000);
+    if (s < 60) return s + "s ago";
+    const m = Math.round(s / 60);
+    if (m < 60) return m + "m ago";
+    const hr = Math.round(m / 60);
+    if (hr < 24) return hr + "h ago";
+    const d = Math.round(hr / 24);
+    return d + "d ago";
+  }
+  function _afFreshnessClass(detail) {
+    if (!detail || !detail.count) return "is-empty";
+    // Failure dominates over freshness — red wins even if latest call was
+    // < 5 min ago, per spec.
+    if (detail.last_success === false) return "is-fail";
+    const ageMs = _afAgeMs(detail.last_ts);
+    if (ageMs < 5 * 60_000) return "is-fresh";
+    if (ageMs < 60 * 60_000) return "is-warm";
+    return "is-cold";
+  }
+  function _afDotClass(detail) {
+    if (!detail || !detail.count) return "";
+    if (detail.last_success === false) return "down";
+    const ageMs = _afAgeMs(detail.last_ts);
+    if (ageMs < 5 * 60_000) return "up pulse";
+    if (ageMs < 60 * 60_000) return "warn";
+    return "";
+  }
+
+  function AgentFlowBox({ role, detail, onClick }) {
+    const empty = !detail || !detail.count;
+    const cls = "af-box " + _afFreshnessClass(detail);
+    const dotCls = _afDotClass(detail);
+    const ageLabel = empty ? "no calls today" : _afAgeLabel(detail.last_ts);
+    const ariaLabel = empty
+      ? role + " — no calls in 24h window"
+      : role + " — " + detail.count + " calls, last " + ageLabel;
+    return h("div", {
+      className: cls,
+      role: "button",
+      tabIndex: 0,
+      "aria-label": ariaLabel,
+      onClick: () => onClick(role, detail),
+      onKeyDown: (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onClick(role, detail);
+        }
+      },
+    },
+      h("div", { className: "af-title" }, role),
+      h("div", { className: "af-model" }, empty ? "—" : (detail.model || "—")),
+      h("div", { className: "af-live" },
+        dotCls && h("span", { className: "dot " + dotCls }),
+        h("span", null, ageLabel)
+      ),
+      empty
+        ? h("div", { className: "af-counts af-placeholder" }, "—")
+        : h("div", { className: "af-counts" },
+            h("span", { className: "af-ok" }, detail.success, " ✓"),
+            h("span", { className: "af-sep" }, "·"),
+            h("span", { className: "af-bad" }, detail.fail, " ✕")
+          ),
+      empty
+        ? h("div", { className: "af-latency af-placeholder" }, "—")
+        : h("div", { className: "af-latency" },
+            "avg ", (detail.avg_latency_s || 0).toFixed(1), "s · p95 ",
+            (detail.p95_latency_s || 0).toFixed(1), "s"),
+      h("div", { className: "af-gist", title: detail && detail.last_gist || "" },
+        empty ? "no calls today" : (detail.last_gist || "—"))
+    );
+  }
+
+  function AgentFlowArrow({ hopSec }) {
+    return h("div", { className: "af-arrow", "aria-hidden": "true" },
+      h("span", { className: "af-arrow-line" }),
+      hopSec != null && h("span", { className: "af-hop" }, hopSec.toFixed(1) + "s"),
+      h("span", { className: "af-glyph" }, "→")
+    );
+  }
+
+  function AgentFlow({ data }) {
+    const slot = slotState(data, "llm_calls");
+    const env = envelopeData(slot.env) || {};
+    const summary = env.summary || {};
+    const detailByRole = summary.by_role_detail || {};
+
+    // Opt-out — operator can hide the strip with one console line.
+    const [hidden, setHidden] = useState(() => {
+      try { return localStorage.getItem("quanta.agent_flow") === "0"; }
+      catch (_) { return false; }
+    });
+    useEffect(() => {
+      function onStorage(e) {
+        if (e.key === "quanta.agent_flow") {
+          setHidden(e.newValue === "0");
+        }
+      }
+      window.addEventListener("storage", onStorage);
+      return () => window.removeEventListener("storage", onStorage);
+    }, []);
+    if (hidden) return null;
+
+    // Skip indicator_selector when it has zero calls — today's bot doesn't
+    // emit it. The other five stay even when empty so gaps are visible.
+    const slots = AGENT_FLOW_ORDER.filter(r =>
+      !(r === "indicator_selector" && !detailByRole[r])
+    );
+
+    // Re-render every 30 s so the "Xm ago" labels stay current between
+    // 10 s data polls — does NOT fetch anything, just bumps state.
+    const [, _tick] = useState(0);
+    useEffect(() => {
+      const iv = setInterval(() => _tick(n => n + 1), 30_000);
+      return () => clearInterval(iv);
+    }, []);
+
+    const click = useCallback((role, detail) => {
+      // Fire a custom event the LLMCallsLive component listens for. We
+      // pass the role + raw agent names so the listener can pick the
+      // newest matching row in the unfiltered list. Decoupled from the
+      // component so existing LLMCallsLive doesn't need a refactor.
+      const evt = new CustomEvent("quanta:agent-flow-pick", {
+        detail: {
+          role,
+          rawAgents: detail && detail.raw_agents ? Object.keys(detail.raw_agents) : [],
+          lastTs: detail && detail.last_ts || null,
+        },
+      });
+      window.dispatchEvent(evt);
+    }, []);
+
+    // Loading / empty states — keep the strip visible but show a thin
+    // skeleton so the operator can tell the difference between
+    // "endpoint unreachable" and "no calls today".
+    const empty = !env || Object.keys(detailByRole).length === 0;
+    const subText = slot.phase === "loading" && empty
+      ? "loading…"
+      : slot.phase === "down"
+        ? "endpoint unavailable — placeholders only"
+        : empty
+          ? "no canonical-role calls in 24h window — strip shows pipeline shape"
+          : Object.keys(detailByRole).length + " of " + slots.length + " roles active · "
+            + (summary.total_calls || 0) + " calls in 24h";
+
+    // Build the box+arrow sequence. Each gap between adjacent boxes gets
+    // one arrow; hop latency is the avg latency of the destination box
+    // (proxy for "how long does this stage typically take"). When the
+    // destination is empty we omit the latency chip.
+    const children = [];
+    slots.forEach((role, idx) => {
+      const detail = detailByRole[role] || null;
+      children.push(h(AgentFlowBox, { key: "box_" + role, role, detail, onClick: click }));
+      if (idx < slots.length - 1) {
+        const next = detailByRole[slots[idx + 1]] || null;
+        const hopSec = next && next.count ? next.avg_latency_s : null;
+        children.push(h(AgentFlowArrow, { key: "arr_" + role, hopSec }));
+      }
+    });
+
+    return h(Card, {
+      num: "21a",
+      title: "Agent flow",
+      sub: subText,
+      right: cardRight(slot.fetchedAt),
+    },
+      h("div", { className: "agent-flow", id: "agent-flow-strip" }, children)
+    );
+  }
+
   function LLMCallsLive({ data }) {
     const slot = slotState(data, "llm_calls");
     const env = envelopeData(slot.env) || {};
@@ -3516,6 +3724,46 @@
       document.addEventListener("keydown", onKey);
       return () => document.removeEventListener("keydown", onKey);
     }, []);
+
+    // Listen for AgentFlow box clicks. Scrolls the table to the newest
+    // matching row (by raw agent name) and pulses it for 800 ms. Falls
+    // back to clearing the agent filter so the matching row is visible
+    // if it was hidden by a previous filter. Additive integration — does
+    // not change row behavior in any other code path.
+    useEffect(() => {
+      function onPick(e) {
+        const d = (e && e.detail) || {};
+        const raws = Array.isArray(d.rawAgents) ? d.rawAgents : [];
+        // If a filter is set and it doesn't match any of the role's raw
+        // agents, drop it so the scroll target becomes visible.
+        if (agentFilter && !raws.includes(agentFilter)) setAgentFilter("");
+        // Defer DOM lookup to next paint so the (possibly-reset) filter
+        // has a chance to re-render.
+        requestAnimationFrame(() => {
+          let target = null;
+          if (d.lastTs) {
+            target = document.querySelector('[data-llm-ts="' + d.lastTs.replace(/"/g, '\\"') + '"]');
+          }
+          if (!target && raws.length) {
+            // First (newest) row with a matching agent. The list is
+            // already newest-first.
+            for (const raw of raws) {
+              const nodes = document.querySelectorAll('[data-llm-agent="' + raw.replace(/"/g, '\\"') + '"]');
+              if (nodes.length) { target = nodes[0]; break; }
+            }
+          }
+          if (!target) return;
+          target.scrollIntoView({ behavior: "smooth", block: "center" });
+          target.classList.remove("af-pulse-row");
+          // Force reflow so the animation restarts when clicked twice.
+          void target.offsetWidth;
+          target.classList.add("af-pulse-row");
+          setTimeout(() => target.classList.remove("af-pulse-row"), 900);
+        });
+      }
+      window.addEventListener("quanta:agent-flow-pick", onPick);
+      return () => window.removeEventListener("quanta:agent-flow-pick", onPick);
+    }, [agentFilter]);
 
     // Click a row → fetch full record (include_text=1) for the modal.
     const openCall = useCallback((rec) => {
@@ -3754,6 +4002,8 @@
                 const statusCls = failed ? "down" : "up";
                 return h("div", {
                   key: c.timestamp + "_" + i,
+                  "data-llm-ts": c.timestamp,
+                  "data-llm-agent": c.agent || "",
                   onClick: () => openCall(c),
                   tabIndex: 0,
                   role: "button",
@@ -4043,7 +4293,12 @@
           // the top stays uncrowded — operator clicks a row to see the full
           // prompt + response (provided SHARK_LLM_LOG_FULL_TEXT=1 was on
           // when the call was logged).
+          //
+          // AgentFlow strip sits ABOVE the activity list — same data, but
+          // a per-role pipeline view (regime_tagger → … → reflector). Both
+          // consume the same /api/ops/llm_calls response; no extra poll.
           h("div", { id: "llm-calls", className: "anchor", style: { gridColumn: "span 12" } },
+            h(AgentFlow, { data }),
             h(LLMCallsLive, { data })
           ),
           // AGENT TIMELINE + RESEARCH FEED
