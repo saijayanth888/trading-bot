@@ -819,6 +819,55 @@ def _run_full(dry_run: bool = False) -> bool:
     symbols_traded: list[str] = []
     trades_placed = 0
 
+    # ── Optional: two-tier parallel graph (stage/14-15) ─────────────────
+    # Operator opt-in via SHARK_USE_GRAPH=1. Pre-resolves analyses for the
+    # full candidate slate in parallel via the LangGraph-style 12-node DAG
+    # (grunts on hermes3:8b, judges on hermes3:70b). The per-symbol loop
+    # below then reads straight from the cache instead of doing serial
+    # analyze_symbol calls. Falls back silently to the legacy path on error.
+    _graph_results: dict[str, dict] = {}
+    if os.environ.get("SHARK_USE_GRAPH", "false").lower() in ("1", "true", "yes"):
+        graph_inputs: list[dict] = []
+        for _sym in candidates[: max_trades * 2]:  # cap headroom
+            _c_pre = _collect_candidate_data(
+                symbol=_sym,
+                existing_symbols=existing_symbols,
+                account_for_guardrails=account_for_guardrails,
+                portfolio_value=portfolio_value,
+                peak_equity=peak_equity,
+                regime_str=regime_str,
+                regime_rules=regime_rules,
+                regime_mult=regime_mult,
+                macro_mult=macro_mult,
+                stop_width=stop_width,
+                guardrails=guardrails,
+                weekly_count=weekly_count,
+                candidates_so_far=0,
+            )
+            if not _c_pre:
+                continue
+            graph_inputs.append({
+                "symbol": _sym,
+                "market_data": _c_pre.get("technicals", {}),
+                "perplexity_intel": _c_pre.get("perplexity_intel", {}),
+                "risk_check": _c_pre.get("risk_check", {"approved": True}),
+            })
+        if graph_inputs:
+            try:
+                from shark.graph import run_candidates_parallel_sync
+                _graph_results = run_candidates_parallel_sync(
+                    graph_inputs,
+                    max_parallel=int(os.environ.get("SHARK_GRAPH_PARALLEL", "5")),
+                )
+                logger.info(
+                    "Two-tier graph evaluated %d candidates", len(_graph_results),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Two-tier graph failed (%s) — falling back to legacy path", exc,
+                )
+                _graph_results = {}
+
     for symbol in candidates:
         if trades_placed >= max_trades:
             break
@@ -855,7 +904,12 @@ def _run_full(dry_run: bool = False) -> bool:
             "violations": [],
         }
 
-        analysis = analyze_symbol(symbol, technicals, bars, c["perplexity_intel"], risk)
+        # Prefer the two-tier graph result when SHARK_USE_GRAPH=1; otherwise
+        # use the legacy combined_analyst path. Same return contract.
+        if symbol in _graph_results:
+            analysis = _graph_results[symbol]
+        else:
+            analysis = analyze_symbol(symbol, technicals, bars, c["perplexity_intel"], risk)
         decision = analysis["decision"]
 
         if decision["decision"] != "BUY":
