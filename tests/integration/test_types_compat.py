@@ -270,19 +270,28 @@ async def test_metadata_passthrough_drops_internal_keys(
 
 
 class _NoopStrategy(Strategy):
-    name = "noop"
-    symbols: list[Symbol] = [SYMBOL]
-    timeframes: list[Timeframe] = ["1m"]
+    """Minimal Strategy that implements only the mandatory abstract hook.
 
-    async def on_candle(self, bar: Bar, ctx: object) -> list[OrderProposal]:
+    Per DESIGN-LOCK §5, Strategy ABC is SYNC. ``on_candle`` is the only
+    abstract method; ``on_tick``/``on_fill``/``on_start``/``on_stop`` have
+    no-op defaults on the base class.
+    """
+
+    name = "noop"
+
+    def on_candle(self, bar: Bar) -> list[OrderProposal]:
         return []
 
 
-@pytest.mark.anyio
-async def test_strategy_default_hooks_return_empty_lists() -> None:
-    """``on_tick`` and ``on_fill`` defaults must return [] so dispatcher
-    can iterate them without a ``None`` check."""
-    s = _NoopStrategy()
+def test_strategy_default_hooks_return_empty_lists() -> None:
+    """Reconciled Strategy ABC contract (DESIGN-LOCK §5):
+
+    * ``on_candle`` is abstract + sync, returns a sequence of proposals.
+    * ``on_tick`` default returns ``()`` (sequence-compatible with ``[]``).
+    * ``on_fill`` / ``on_start`` / ``on_stop`` default to no-op (``None``).
+    """
+    # Reconciled Strategy ABC requires ``ctx`` + ``config`` at construction.
+    s = _NoopStrategy(ctx=object(), config={})  # type: ignore[arg-type]
     bar = Bar(
         symbol=SYMBOL,
         timeframe="1m",
@@ -309,13 +318,13 @@ async def test_strategy_default_hooks_return_empty_lists() -> None:
         fee=Decimal("0"),
     )
 
-    assert await s.on_candle(bar, ctx=None) == []
-    assert await s.on_tick(tick, ctx=None) == []
-    assert await s.on_fill(fill, ctx=None) == []
-    # on_start / on_stop return None (default no-ops). We call them for
-    # side-effect coverage; awaiting them must not raise.
-    await s.on_start(ctx=None)
-    await s.on_stop(ctx=None)
+    assert s.on_candle(bar) == []
+    # on_tick default returns () — sequence-compatible with [].
+    assert list(s.on_tick(tick)) == []
+    # No-op hooks return None implicitly.
+    assert s.on_fill(fill) is None
+    assert s.on_start() is None
+    assert s.on_stop() is None
 
 
 # ---------------------------------------------------------------------------
