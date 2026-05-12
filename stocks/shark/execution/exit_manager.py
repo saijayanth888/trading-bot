@@ -54,6 +54,23 @@ def evaluate_exits(
 
     for pos in positions:
         symbol = pos.get("symbol", "UNKNOWN")
+
+        # Asset-class gate (Shark/Wheel isolation, 2026-05-12 leak):
+        # Shark MUST NOT manage options or other non-equity positions. The
+        # Wheel subsystem owns CSPs/CCs on the same Alpaca account; if we
+        # don't skip here, evaluate_exits will fire a -7% hard stop on a
+        # short put (a perfectly normal option drawdown), violating
+        # stocks/CLAUDE.md "NO OPTIONS. EVER."
+        asset_class = pos.get("asset_class", "us_equity")
+        if asset_class != "us_equity":
+            logger.warning(
+                "[shark.exit_manager] skipping non-equity position %s "
+                "(asset_class=%s) — managed by wheel or other subsystem, "
+                "NOT Shark's concern",
+                symbol, asset_class,
+            )
+            continue
+
         qty = int(pos.get("qty", 0))
         plpc = float(pos.get("unrealized_plpc", 0.0))
         current_price = float(pos.get("current_price", 0.0))
