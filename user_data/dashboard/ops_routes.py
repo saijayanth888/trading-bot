@@ -681,6 +681,9 @@ _RANGES = {
     "trending_up_trail_distance": (-0.10, 0.0),
     "tft_min_confidence":         (0.0, 1.0),
     "meta_min_confidence":        (0.0, 1.0),
+    # Hours a regime must persist before the strategy acts on it.
+    # 0 = no gate; 24 = full-day cooldown. Strategy default is 2.0h.
+    "regime_min_stable_hours":    (0.0, 24.0),
 }
 
 CONFIG_PATH = Path(os.environ.get(

@@ -292,3 +292,121 @@ def test_bearer_token_still_works_from_any_peer(monkeypatch):
     assert ops_routes.require_mcp_key(
         request=req, authorization="Bearer test-key-for-b17"
     ) is None
+
+
+# --------------------------------------------------------------------------
+# Regime config editor — POST /api/ops/regime_config
+# --------------------------------------------------------------------------
+
+
+class _FakeRegimeReq:
+    """Minimal stand-in for fastapi.Request used by regime_config_post."""
+
+    def __init__(self, body: dict):
+        self._body = body
+        self.headers = {"content-length": str(len(json.dumps(body)))}
+
+    async def json(self):
+        return self._body
+
+
+def _stub_httpx_async_client(monkeypatch):
+    """Neutralise the best-effort freqtrade /reload_config POST inside
+    regime_config_post so the test doesn't need a live freqtrade. The handler
+    swallows exceptions and records them in reload_status, so we just need
+    the call to not block forever / not network out."""
+
+    class _Resp:
+        status_code = 200
+
+    class _Client:
+        def __init__(self, *a, **kw): ...
+        async def __aenter__(self): return self
+        async def __aexit__(self, *exc): return False
+        async def post(self, *a, **kw): return _Resp()
+        async def get(self, *a, **kw): return _Resp()
+
+    monkeypatch.setattr(ops_routes.httpx, "AsyncClient", _Client)
+
+    async def _fake_jwt(client, force_refresh: bool = False):
+        return "fake-jwt-token"
+
+    monkeypatch.setattr(ops_routes, "_ensure_jwt", _fake_jwt)
+
+
+@pytest.mark.asyncio
+async def test_regime_min_stable_hours_roundtrips(tmp_path, monkeypatch):
+    """`regime_min_stable_hours` must be accepted by the dashboard validator
+    and round-trip via the GET handler. Regression: before this fix, POST
+    rejected the param with 'unknown param: regime_min_stable_hours'."""
+    # Seed a config.json with an existing regime_gating block (matching the
+    # shape the strategy reads — including a stale value we will overwrite).
+    cfg_path = tmp_path / "config.json"
+    initial_cfg = {
+        "regime_gating": {
+            "_doc": "operator-tunable",
+            "entry_delta": {"trending_up": 0.0, "trending_down": None},
+            "exit_delta": {"trending_up": 0.0},
+            "high_vol_stake_factor": 0.5,
+            "high_vol_min_confidence": 0.6,
+            "mean_rev_take_profit": 0.02,
+            "trending_up_trail_trigger": 0.01,
+            "trending_up_trail_distance": -0.005,
+            "tft_min_confidence": 0.5,
+            "meta_min_confidence": 0.5,
+            "regime_min_stable_hours": 2.0,
+        }
+    }
+    cfg_path.write_text(json.dumps(initial_cfg, indent=4))
+
+    monkeypatch.setattr(ops_routes, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(ops_routes, "USER_DATA_ROOT_FOR_BACKUPS", tmp_path)
+    _stub_httpx_async_client(monkeypatch)
+
+    # POST a new value for regime_min_stable_hours alongside another known param.
+    new_value = 3.5
+    req = _FakeRegimeReq({"regime_gating": {
+        "regime_min_stable_hours": new_value,
+        "mean_rev_take_profit": 0.03,
+    }})
+    env = await ops_routes.regime_config_post(req)
+
+    # 200 OK envelope, status='ok', and the change must be in the diff list.
+    _assert_envelope(env)
+    assert env["status"] == "ok"
+    changes = env["data"]["changes"]
+    assert any("regime_min_stable_hours" in c for c in changes), (
+        f"expected regime_min_stable_hours in changes, got {changes!r}"
+    )
+
+    # On-disk config now reflects the new value.
+    written = json.loads(cfg_path.read_text())
+    assert written["regime_gating"]["regime_min_stable_hours"] == new_value
+
+    # And GET surfaces it back through the handler (round-trip).
+    got = ops_routes.regime_config_get()
+    _assert_envelope(got)
+    assert got["status"] == "ok"
+    assert got["data"]["regime_gating"]["regime_min_stable_hours"] == new_value
+    # Schema exposes the range so the UI can render bounds.
+    assert "regime_min_stable_hours" in got["data"]["schema"]["scalar_ranges"]
+    lo, hi = got["data"]["schema"]["scalar_ranges"]["regime_min_stable_hours"]
+    assert lo == 0.0 and hi == 24.0
+
+
+@pytest.mark.asyncio
+async def test_regime_min_stable_hours_out_of_range_rejected(tmp_path, monkeypatch):
+    """Values outside [0, 24] must 400 — sanity-range enforcement."""
+    from fastapi import HTTPException
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"regime_gating": {"regime_min_stable_hours": 2.0}}))
+    monkeypatch.setattr(ops_routes, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(ops_routes, "USER_DATA_ROOT_FOR_BACKUPS", tmp_path)
+    _stub_httpx_async_client(monkeypatch)
+
+    req = _FakeRegimeReq({"regime_gating": {"regime_min_stable_hours": 48.0}})
+    with pytest.raises(HTTPException) as exc:
+        await ops_routes.regime_config_post(req)
+    assert exc.value.status_code == 400
+    assert "regime_min_stable_hours" in str(exc.value.detail)
