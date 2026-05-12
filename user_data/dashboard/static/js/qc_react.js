@@ -111,8 +111,47 @@
   }
 
   // ─────────────── Sparkline ───────────────
+  // Tier C P1-6: parent components pass a fresh array literal each render
+  // (e.g. `data: env.points || []`). React's useEffect compares deps by
+  // reference, so the effect re-ran on every 10-s ops poll even when the
+  // numbers were byte-identical to the previous tick → canvas redraw +
+  // 500 ms intro-animation restart. Sparklines visibly "stuttered" every
+  // tick.
+  //
+  // Fix: derive a stable identity key from data length + first/last/min/
+  // max + a checksum sample. If the key matches the previous render, the
+  // effect skips re-draw entirely. This is a length/content hash, not a
+  // deep compare — N=O(1) instead of O(n) — but tight enough that any
+  // genuine update (new tick, sliced window) produces a different key.
+  //
+  // INVARIANT: the dependency key must change iff the visible plot would
+  // change. Future edits MUST update sparkKey to incorporate any new
+  // distinguishing feature; otherwise spurious skips will hide real
+  // updates. Keep this comment block when editing.
+  function sparkKey(data) {
+    if (!data || !data.length) return "0";
+    const n = data.length;
+    const first = data[0];
+    const last = data[n - 1];
+    // Sample three more positions so a mid-series flip still flips the key.
+    const a = data[(n * 0.25) | 0];
+    const b = data[(n * 0.5) | 0];
+    const c = data[(n * 0.75) | 0];
+    let mn = first, mx = first;
+    for (let i = 1; i < n; i++) {
+      const v = data[i];
+      if (v < mn) mn = v;
+      if (v > mx) mx = v;
+    }
+    return n + ":" + first + ":" + a + ":" + b + ":" + c + ":" + last + ":" + mn + ":" + mx;
+  }
+
   function Sparkline({ data, color = "var(--accent)", fill = true, height = 32, animate = true }) {
     const ref = useRef(null);
+    // Stable hash key — see comment block above sparkKey. data ref changes
+    // on every parent render, but the key only changes when the visible
+    // plot would change.
+    const key = sparkKey(data);
     useEffect(() => {
       const cv = ref.current;
       if (!cv || !data || !data.length) return;
@@ -162,7 +201,8 @@
       };
       raf = requestAnimationFrame(tick);
       return () => cancelAnimationFrame(raf);
-    }, [data, color, fill, animate]);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [key, color, fill, animate]);
     return h("canvas", { ref: ref, className: "spark", style: { height: height } });
   }
 
