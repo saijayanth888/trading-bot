@@ -46,9 +46,11 @@ Default limits (override in config.json):
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
+import tempfile
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -70,16 +72,49 @@ logger = logging.getLogger(__name__)
 # tempfile + rename.
 #
 # Path can be overridden by RISK_GOVERNOR_ANCHORS_PATH for tests.
+#
+# Bug 2 (2026-05-12): backtest/hyperopt processes USED to read the live
+# anchor file. A stale ``paused_for_drawdown: true`` would block every
+# trade in the backtest, making the simulation a no-op while the live
+# bot kept trading normally. Fix: backtest-class runmodes use a
+# per-process transient anchor under /tmp that is auto-deleted on
+# normal exit. Live / dry-run continue to use the persistent anchor.
+# RISK_GOVERNOR_ANCHORS_PATH overrides BOTH for tests.
 # ---------------------------------------------------------------------------
 
 _DEFAULT_ANCHOR_PATH = (
     Path(__file__).resolve().parents[1] / "state" / "risk_governor_anchors.json"
 )
 
+# Freqtrade runmodes that should NOT touch the live anchor file. ``edge``
+# is included because it walks the historical book the same way backtest
+# does and would similarly pollute the live state if it persisted.
+_BACKTEST_RUNMODES = frozenset({"backtest", "hyperopt", "edge"})
 
-def _anchor_path() -> Path:
+
+def _resolve_anchor_path(runmode: str | None = None) -> Path:
+    """Resolve the anchor file path for the current run.
+
+    Priority:
+      1. ``RISK_GOVERNOR_ANCHORS_PATH`` env var (test-grade override; honoured
+         in every mode so test fixtures keep working).
+      2. ``/tmp/risk_governor_backtest_<pid>.json`` for backtest / hyperopt
+         / edge runmodes — transient, per-process, auto-deleted on exit.
+      3. ``user_data/state/risk_governor_anchors.json`` (default; live + dry).
+    """
     override = os.environ.get("RISK_GOVERNOR_ANCHORS_PATH", "").strip()
-    return Path(override) if override else _DEFAULT_ANCHOR_PATH
+    if override:
+        return Path(override)
+    if runmode and runmode.lower() in _BACKTEST_RUNMODES:
+        return Path(tempfile.gettempdir()) / f"risk_governor_backtest_{os.getpid()}.json"
+    return _DEFAULT_ANCHOR_PATH
+
+
+# Back-compat shim: existing callers (and the test fixture) call
+# ``_anchor_path()`` with no arguments. Route to the resolver with
+# ``runmode=None`` so live behaviour is unchanged.
+def _anchor_path(runmode: str | None = None) -> Path:
+    return _resolve_anchor_path(runmode)
 
 
 # ---------------------------------------------------------------------------
@@ -182,9 +217,35 @@ class RiskGovernor:
         stake = decision.suggested_stake
     """
 
-    def __init__(self, config: RiskConfig | None = None, *, now_fn=None) -> None:
+    def __init__(
+        self,
+        config: RiskConfig | None = None,
+        *,
+        now_fn=None,
+        runmode: str | None = None,
+    ) -> None:
         self.config = config or RiskConfig()
         self._now = now_fn or (lambda: datetime.now(timezone.utc))
+        # Bug 2 (2026-05-12): in backtest/hyperopt/edge we MUST NOT touch
+        # the live anchor file. Stash the runmode so every _anchor_path()
+        # call here resolves to the transient /tmp path for this PID.
+        # Normalised to lowercase string; None means "live/dry" default.
+        self._runmode: str | None = (runmode.lower() if isinstance(runmode, str) else None)
+
+        # If we're in a backtest-class runmode, schedule the transient
+        # anchor for cleanup on normal interpreter exit. Best-effort; if
+        # the process is killed hard the file is still safely confined
+        # to /tmp and a reboot reclaims it.
+        if self._runmode in _BACKTEST_RUNMODES:
+            transient = _resolve_anchor_path(self._runmode)
+
+            def _cleanup_transient_anchor(_p: Path = transient) -> None:
+                try:
+                    _p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+            atexit.register(_cleanup_transient_anchor)
 
         # Equity tracking
         self._peak_equity: float = 0.0
@@ -227,7 +288,7 @@ class RiskGovernor:
 
     def _load_anchors(self) -> None:
         """Restore daily anchor + pause flag from the state file, if any."""
-        path = _anchor_path()
+        path = _resolve_anchor_path(self._runmode)
         if not path.exists():
             return
         try:
@@ -276,7 +337,7 @@ class RiskGovernor:
 
     def _persist_anchors(self) -> None:
         """Atomic write of the anchor state (tempfile + rename)."""
-        path = _anchor_path()
+        path = _resolve_anchor_path(self._runmode)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -321,7 +382,19 @@ class RiskGovernor:
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any]) -> "RiskGovernor":
-        return cls(RiskConfig.from_dict(config.get("risk_management", {})))
+        # Bug 2 (2026-05-12): extract freqtrade's runmode so the governor
+        # writes to a transient anchor when invoked under backtest /
+        # hyperopt / edge. The config["runmode"] value is normally a
+        # freqtrade.enums.RunMode (has .value attr); fall back to str()
+        # when it's already a plain string (test configs).
+        rm_obj = config.get("runmode")
+        runmode: str | None = None
+        if rm_obj is not None:
+            runmode = getattr(rm_obj, "value", None) or str(rm_obj)
+        return cls(
+            RiskConfig.from_dict(config.get("risk_management", {})),
+            runmode=runmode,
+        )
 
     @classmethod
     def from_config_file(cls, path: str | Path) -> "RiskGovernor":
