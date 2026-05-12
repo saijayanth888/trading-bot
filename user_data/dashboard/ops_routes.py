@@ -3462,3 +3462,409 @@ async def backtest_gates():
         error=("one or more reports are >8d old — weekly cron may have failed"
                if any_stale else None),
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# /api/ops/llm_calls — the "LLM activity" dashboard card
+# /api/ops/llm_calls/{call_id} — single-record drill-down for the modal
+#
+# Reads ``stocks/memory/llm-calls.jsonl`` (the same file the LLM tracker
+# appends to). The list endpoint returns metadata-only by default to keep
+# the response small even when the file has SHARK_LLM_LOG_FULL_TEXT=1 lines
+# (which can be 1-4 KB each). The detail endpoint always returns the full
+# record. Both are read-only, no auth dep — matches the rest of the ops
+# read endpoints.
+#
+# call_id is the URL-encoded ISO timestamp. The tracker doesn't generate
+# a UUID per call but the timestamps include microseconds, so collisions
+# are effectively impossible in practice.
+# ──────────────────────────────────────────────────────────────────────────
+
+import re as _llm_re
+from urllib.parse import unquote as _llm_unquote
+
+
+def _llm_log_paths() -> list[Path]:
+    """The live JSONL is searched in two candidate locations: bind-mount
+    path inside the dashboard container, plus the host path. First match
+    wins. Mirrors the pattern used by shark_override_health."""
+    return [
+        STOCKS_ROOT / "memory" / "llm-calls.jsonl",
+        Path("/home/saijayanthai/Documents/trading-bot/stocks/memory/llm-calls.jsonl"),
+        Path(__file__).resolve().parents[2] / "stocks" / "memory" / "llm-calls.jsonl",
+    ]
+
+
+def _resolve_llm_log() -> Path | None:
+    for p in _llm_log_paths():
+        if p.is_file():
+            return p
+    return None
+
+
+# Strip the heavy text fields when ``include_text=0`` so the index payload
+# stays under a few KB even if every record was written with the flag on.
+_LLM_HEAVY_FIELDS = ("prompt", "system_message", "response_text", "messages")
+
+
+def _strip_heavy(rec: dict) -> dict:
+    return {k: v for k, v in rec.items() if k not in _LLM_HEAVY_FIELDS}
+
+
+def _read_jsonl_tail(path: Path, *, max_records: int) -> list[dict]:
+    """Read up to ``max_records`` lines from the tail of the file.
+
+    Reverse-line read so we don't slurp a 50 MB file just to get the
+    last 50 records. Works in chunks from the end of the file, finds
+    line boundaries, and parses only the relevant tail.
+
+    Note: order returned is *most-recent-first* — callers can reverse
+    if they want oldest-first. The dashboard wants newest-first anyway.
+    """
+    if not path.is_file() or max_records <= 0:
+        return []
+    out: list[dict] = []
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            file_size = fh.tell()
+            chunk = 65536
+            buf = b""
+            pos = file_size
+            while pos > 0 and len(out) < max_records:
+                read = min(chunk, pos)
+                pos -= read
+                fh.seek(pos)
+                buf = fh.read(read) + buf
+                # Split into complete lines. The first element may be a
+                # partial line if we haven't reached the file start, so
+                # keep it in buf and process the rest.
+                lines = buf.split(b"\n")
+                if pos > 0:
+                    buf = lines[0]
+                    lines = lines[1:]
+                else:
+                    buf = b""
+                # Walk newest → oldest within this chunk
+                for line in reversed(lines):
+                    if not line.strip():
+                        continue
+                    try:
+                        out.append(json.loads(line.decode("utf-8")))
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+                    if len(out) >= max_records:
+                        break
+    except OSError as exc:
+        logger.warning("llm_calls: tail read failed for %s: %s", path, exc)
+        return out
+    return out
+
+
+def _summarise_llm_window(calls: list[dict]) -> dict[str, Any]:
+    """Card-summary numbers — total calls, tokens, avg latency, ollama
+    fraction, success-rate, by-agent counts. Mirrors what TodayScoreboard
+    does for trades but for LLM calls."""
+    if not calls:
+        return {
+            "total_calls": 0,
+            "total_prompt_tokens": 0,
+            "total_completion_tokens": 0,
+            "total_tokens": 0,
+            "avg_latency_s": 0.0,
+            "p95_latency_s": 0.0,
+            "max_latency_s": 0.0,
+            "ollama_pct": 0.0,
+            "anthropic_pct": 0.0,
+            "success_pct": 100.0,
+            "by_agent": {},
+            "by_model": {},
+            "by_tier": {"fast": 0, "deep": 0},
+        }
+
+    by_agent: dict[str, int] = {}
+    by_model: dict[str, int] = {}
+    by_tier = {"fast": 0, "deep": 0}
+    provider_counts: dict[str, int] = {}
+    successes = 0
+    p_toks = 0
+    c_toks = 0
+    latencies: list[float] = []
+
+    for c in calls:
+        agent = c.get("agent", "unknown")
+        by_agent[agent] = by_agent.get(agent, 0) + 1
+        m = c.get("model", "?")
+        by_model[m] = by_model.get(m, 0) + 1
+        t = c.get("tier", "deep")
+        if t in by_tier:
+            by_tier[t] += 1
+        prov = c.get("provider", "unknown")
+        provider_counts[prov] = provider_counts.get(prov, 0) + 1
+        # Success heuristic: a record exists ⇒ the tracker captured a
+        # response; explicit ``success=false`` (added by future versions)
+        # would flip this. For now, any record with completion_tokens > 0
+        # OR no explicit ``error`` field counts as successful.
+        if c.get("success") is False or c.get("error"):
+            pass
+        else:
+            successes += 1
+        p_toks += int(c.get("prompt_tokens") or 0)
+        c_toks += int(c.get("completion_tokens") or 0)
+        latencies.append(float(c.get("latency_seconds") or 0))
+
+    n = len(calls)
+    avg_lat = sum(latencies) / n
+    lat_sorted = sorted(latencies)
+    p95_idx = max(0, int(0.95 * n) - 1)
+    p95 = lat_sorted[p95_idx] if lat_sorted else 0.0
+    max_lat = max(latencies) if latencies else 0.0
+    ollama_n = provider_counts.get("ollama", 0)
+    anthropic_n = provider_counts.get("anthropic", 0)
+
+    return {
+        "total_calls": n,
+        "total_prompt_tokens": p_toks,
+        "total_completion_tokens": c_toks,
+        "total_tokens": p_toks + c_toks,
+        "avg_latency_s": round(avg_lat, 2),
+        "p95_latency_s": round(p95, 2),
+        "max_latency_s": round(max_lat, 2),
+        "ollama_pct": round(100.0 * ollama_n / n, 1),
+        "anthropic_pct": round(100.0 * anthropic_n / n, 1),
+        "success_pct": round(100.0 * successes / n, 1),
+        "by_agent": dict(sorted(by_agent.items(), key=lambda kv: -kv[1])),
+        "by_model": dict(sorted(by_model.items(), key=lambda kv: -kv[1])),
+        "by_tier": by_tier,
+        "providers": provider_counts,
+    }
+
+
+@router.get("/llm_calls")
+async def llm_calls(
+    limit: int = 50,
+    agent: str | None = None,
+    since: str | None = None,
+    q: str | None = None,
+    include_text: int = 0,
+    model: str | None = None,
+    min_latency: float | None = None,
+    max_latency: float | None = None,
+):
+    """LLM activity feed — paginated list of recent LLM calls.
+
+    Query parameters
+    ----------------
+    limit         : int, default 50, max 500
+    agent         : substring filter (case-insensitive) on the ``agent`` field
+    model         : substring filter on the ``model`` field
+    since         : ISO timestamp; only calls newer than this are returned
+    q             : regex filter; matches against agent + model + tier + role.
+                    If ``include_text=1`` is also set, the regex is ALSO
+                    applied to prompt + system_message + response_text.
+    include_text  : 0 (default) → strip prompt/system/response from the
+                    response (tiny payload). 1 → keep them.
+    min_latency   : seconds; reject calls faster than this
+    max_latency   : seconds; reject calls slower than this
+
+    Response: ``{status, data, error, checked_at}`` where ``data`` is::
+
+        {
+          "calls": [<record>, ...],          # newest first
+          "total_in_window": <int>,          # before pagination
+          "summary": {...},                  # 24h-window aggregates
+          "log_path": "...",                 # for the empty-state hint
+          "log_size_bytes": <int>,
+        }
+    """
+    limit = max(1, min(500, int(limit)))
+    include_full = int(include_text or 0) == 1
+
+    log_path = _resolve_llm_log()
+    if log_path is None:
+        return _envelope(
+            "degraded",
+            data={
+                "calls": [],
+                "total_in_window": 0,
+                "summary": _summarise_llm_window([]),
+                "log_path": str(_llm_log_paths()[0]),
+                "log_size_bytes": 0,
+                "include_text": include_full,
+            },
+            error="llm-calls.jsonl not found — tracker has not written yet",
+        )
+
+    # Read enough tail to satisfy the largest reasonable request. Cap at
+    # 5000 so the summary numbers stay stable but we don't churn the
+    # whole disk if the file is large.
+    tail_records = _read_jsonl_tail(log_path, max_records=5000)
+    # Tail returns newest-first; preserve that order for the API.
+
+    # ── Filters ──────────────────────────────────────────────────────
+    cutoff_ts: float | None = None
+    if since:
+        try:
+            cutoff_ts = datetime.fromisoformat(since.replace("Z", "+00:00")).timestamp()
+        except (ValueError, TypeError):
+            cutoff_ts = None
+
+    pattern = None
+    if q:
+        try:
+            pattern = _llm_re.compile(q, _llm_re.IGNORECASE)
+        except _llm_re.error as exc:
+            return _envelope("down", data=None, error=f"bad regex: {exc}")
+
+    filtered: list[dict] = []
+    for rec in tail_records:
+        if agent and agent.lower() not in str(rec.get("agent", "")).lower():
+            continue
+        if model and model.lower() not in str(rec.get("model", "")).lower():
+            continue
+        if min_latency is not None and float(rec.get("latency_seconds") or 0) < float(min_latency):
+            continue
+        if max_latency is not None and float(rec.get("latency_seconds") or 0) > float(max_latency):
+            continue
+        if cutoff_ts is not None:
+            ts_str = rec.get("timestamp") or ""
+            try:
+                ts = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00")).timestamp()
+            except (ValueError, TypeError):
+                continue
+            if ts < cutoff_ts:
+                continue
+        if pattern is not None:
+            hay = " ".join(str(rec.get(k, "")) for k in ("agent", "model", "tier", "role"))
+            if include_full:
+                hay += " " + " ".join(
+                    str(rec.get(k) or "") for k in ("prompt", "system_message", "response_text")
+                )
+            if not pattern.search(hay):
+                continue
+        filtered.append(rec)
+
+    total_in_window = len(filtered)
+    page = filtered[:limit]
+    if not include_full:
+        page = [_strip_heavy(r) for r in page]
+
+    # Summary uses the FULL 24h window (not just the filtered page) so the
+    # card's "calls / tokens / avg lat" numbers don't shrink when the user
+    # types a search term — operator wants the search to filter the rows
+    # but keep the headline numbers honest about overall activity.
+    cutoff_24h = datetime.now(timezone.utc).timestamp() - 86400
+    window_24h: list[dict] = []
+    for rec in tail_records:
+        ts_str = rec.get("timestamp") or ""
+        try:
+            ts = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00")).timestamp()
+        except (ValueError, TypeError):
+            continue
+        if ts >= cutoff_24h:
+            window_24h.append(rec)
+
+    summary = _summarise_llm_window(window_24h)
+
+    return _envelope(
+        "ok",
+        data={
+            "calls": page,
+            "total_in_window": total_in_window,
+            "total_24h": len(window_24h),
+            "summary": summary,
+            "log_path": str(log_path),
+            "log_size_bytes": file_size_or_zero(log_path),
+            "include_text": include_full,
+        },
+    )
+
+
+def file_size_or_zero(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+@router.get("/llm_calls/{call_id:path}")
+async def llm_call_detail(call_id: str):
+    """Single-record drill-down for the modal.
+
+    ``call_id`` is the URL-encoded ISO timestamp (the tracker doesn't
+    generate UUIDs; timestamps have microsecond resolution so collisions
+    are practically impossible).
+
+    Status codes:
+      200 — record found in the live file (full payload)
+      404 — record not found anywhere (live + archives both miss it)
+      410 — record is in an archive (file rotated); returns the archive
+            path in ``data.archive_path`` so operator can grep manually
+    """
+    target = _llm_unquote(call_id).strip()
+    if not target:
+        raise HTTPException(status_code=400, detail="empty call_id")
+
+    log_path = _resolve_llm_log()
+
+    # Live file first — walk the whole file (don't truncate to a tail) so
+    # an older record from earlier in the day still resolves.
+    if log_path is not None and log_path.is_file():
+        try:
+            with log_path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if str(rec.get("timestamp")) == target:
+                        return _envelope("ok", data={"call": rec, "source": "live"})
+        except OSError as exc:
+            logger.warning("llm_call_detail: live read failed: %s", exc)
+
+    # Archives — delegate to the rotator helper so the archive format
+    # (.jsonl.gz) and live format (.jsonl) live in one place.
+    try:
+        # Import lazily so the dashboard process doesn't pay the cost
+        # at module load — the archive code is rarely hit.
+        import sys as _sys
+        repo_root = Path(__file__).resolve().parents[2]
+        stocks_path = repo_root / "stocks"
+        if str(stocks_path) not in _sys.path:
+            _sys.path.insert(0, str(stocks_path))
+        from shark.llm.rotate import find_record_in_archives  # type: ignore
+    except ImportError as exc:
+        logger.warning("llm_call_detail: rotate import failed: %s", exc)
+        raise HTTPException(
+            status_code=404,
+            detail=f"record {target} not in live log; archive search unavailable: {exc}",
+        )
+
+    if log_path is None:
+        log_path = _llm_log_paths()[0]
+
+    rec, archive = find_record_in_archives(log_path, target)
+    if rec is not None:
+        # Found in archive — operator still wants the data, but flag it.
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "error": "record rotated to archive",
+                "archive_path": str(archive),
+                "call": rec,
+                "hint": f"grep manually: zcat '{archive}' | jq 'select(.timestamp==\"{target}\")'",
+            },
+        )
+    if archive is not None:
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "error": "record not in live log; likely rotated",
+                "newest_archive": str(archive),
+                "hint": f"try: zcat '{archive}' | grep '{target}'",
+            },
+        )
+
+    raise HTTPException(status_code=404, detail=f"call_id {target} not found")
