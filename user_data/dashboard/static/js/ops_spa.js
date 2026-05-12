@@ -1368,6 +1368,190 @@
     );
   }
 
+  // ─────────────── Move #6 · Traffic-light pill row ────────────────────────
+  // Replacement layout for the per-pair gate-strip. Each pill shows:
+  //   [ regime ✓ 14m ]   (gate name · pass/fail glyph · time-since-last-flip)
+  // Click expands to show the underlying value vs threshold (existing detail).
+  //
+  // Feature-flagged via localStorage["quanta.entry_gates_v2"] (default ON).
+  // The legacy GateDotGrid is rendered next to it when the flag is OFF so the
+  // operator can A/B-test instantly:
+  //
+  //   localStorage.removeItem("quanta.entry_gates_v2"); location.reload();
+  //
+  // Flip-timestamp source: ops_spa.js's in-memory ring buffer (see
+  // gateFlipTracker below). The /api/ops/gates payload does NOT include a
+  // per-gate last_flip_ts field, so we derive it by diffing successive
+  // snapshots in the SPA. First-render falls through to "now".
+  //
+  // Time formatting: fmtAgoShort gives 5s / 14m / 2h / 1d — Bloomberg-tight.
+  function fmtAgoShort(ts) {
+    if (ts == null) return "—";
+    const ms = Date.now() - ts;
+    if (!Number.isFinite(ms) || ms < 0) return "now";
+    const s = Math.floor(ms / 1000);
+    if (s < 5)    return "now";
+    if (s < 60)   return s + "s";
+    if (s < 3600) return Math.floor(s / 60) + "m";
+    if (s < 86400)return Math.floor(s / 3600) + "h";
+    return Math.floor(s / 86400) + "d";
+  }
+
+  // Module-scope ring buffer keyed by pair+gate → last observed pass state +
+  // when that state was first seen. The map persists across renders so
+  // 10-second polls accumulate flip history; bounded by the active gate set
+  // so it cannot grow unbounded (a removed pair drops out within minutes).
+  const __gateFlipTracker = (function () {
+    // key = pair + "|" + gate. value = { state, since: <ms> }
+    const m = new Map();
+    return {
+      observe(pair, gate, state) {
+        const key = pair + "|" + gate;
+        const prev = m.get(key);
+        const now = Date.now();
+        if (!prev || prev.state !== state) {
+          m.set(key, { state, since: now });
+          return now;
+        }
+        return prev.since;
+      },
+      // GC every observe-sweep: caller passes the active key set, anything
+      // not in it gets dropped so dead pairs don't leak.
+      retain(activeKeys) {
+        if (m.size < 200) return;
+        for (const k of m.keys()) {
+          if (!activeKeys.has(k)) m.delete(k);
+        }
+      },
+    };
+  })();
+
+  function TrafficLightPillRow({ pair, gates }) {
+    const [open, setOpen] = useState(null);
+    // Observe flips for every gate this render. Side-effect-free: map writes
+    // only happen when state actually changed; otherwise we read the cached
+    // since-ms. This is safe to call during render (no setState).
+    const activeKeys = new Set();
+    const rows = (gates || []).map((g, gi) => {
+      activeKeys.add(pair + "|" + g.gate);
+      const since = __gateFlipTracker.observe(pair, g.gate, g.pass);
+      return Object.assign({}, g, { since });
+    });
+    __gateFlipTracker.retain(activeKeys);
+
+    return h("div", { className: "tlpill-row" },
+      rows.map((g, gi) => {
+        const cls = g.pass === true ? "pass" : g.pass === false ? "block" : "na";
+        const glyph = g.pass === true ? "✓" : g.pass === false ? "✕" : "·";
+        const isOpen = open === gi;
+        return h("span", {
+          key: gi,
+          className: "tlpill " + cls + (isOpen ? " open" : ""),
+          onClick: (e) => { e.stopPropagation(); setOpen(isOpen ? null : gi); },
+          title: g.gate + " — " + (g.pass === true ? "PASS" : g.pass === false ? "BLOCK" : "n/a")
+                 + (g.detail ? " · " + g.detail : ""),
+        },
+          h("span", { className: "tlp-name" }, g.gate),
+          h("span", { className: "tlp-glyph" }, glyph),
+          h("span", { className: "tlp-ts" }, fmtAgoShort(g.since))
+        );
+      }),
+      open !== null && rows[open] && h("div", { className: "tlpill-detail", key: "exp" },
+        h("span", { className: "tlpd-name" }, rows[open].gate),
+        h("span", { className: "tlpd-detail" }, rows[open].detail || "—")
+      )
+    );
+  }
+
+  // ─────────────── Move #7 · Global blocker banner ─────────────────────────
+  // Single-line summary mounted under the topbar, above TodayScoreboard.
+  // Aggregates /api/ops/gates data into one prominent line:
+  //
+  //   🚦 6/8 pairs blocked on regime=trending_down  ·  2/8 blocked on
+  //      vol_floor  ·  newest blocker: tft<0.40 (12m ago)
+  //
+  // Click expands to a per-pair breakdown (uses the same p.gates data the
+  // EntryGatesLive modal already renders). When zero blockers exist, the
+  // component returns null and consumes zero footprint.
+  //
+  // ZERO new endpoint calls — reads from the existing data.gates slot the
+  // SPA already polls every 10s.
+  function BlockerBanner({ data }) {
+    const [expand, setExpand] = useState(false);
+    const slot = slotState(data, "gates");
+    if (slot.phase !== "ok") return null;
+    const env = envelopeData(slot.env) || {};
+    const crypto = env.crypto || [];
+    const stocks = env.stocks || [];
+    const all = crypto.concat(stocks).map(r => ({
+      sym: r.pair,
+      blocking: r.n_blocking || 0,
+      first_blocker: r.first_blocker,
+      gates: r.gates || [],
+    }));
+    const total = all.length;
+    const blocked = all.filter(p => (p.blocking || 0) > 0);
+    if (blocked.length === 0 || total === 0) return null;
+
+    // Tally most common blockers across the universe.
+    const counts = {};
+    blocked.forEach(p => {
+      (p.gates || []).filter(g => g.pass === false).forEach(g => {
+        counts[g.gate] = (counts[g.gate] || 0) + 1;
+      });
+    });
+    const topCauses = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 3);
+
+    // "Newest blocker" — read flip-time from the same ring buffer Move #6
+    // uses. Lowest "since" (most recent flip to blocked) wins.
+    let newest = null;
+    blocked.forEach(p => {
+      (p.gates || []).filter(g => g.pass === false).forEach(g => {
+        const since = __gateFlipTracker.observe(p.sym, g.gate, g.pass);
+        if (!newest || since > newest.since) newest = { gate: g.gate, since, sym: p.sym };
+      });
+    });
+
+    return h(F, null,
+      h("div", {
+        className: "blocker-banner",
+        role: "button",
+        tabIndex: 0,
+        onClick: () => setExpand(!expand),
+        onKeyDown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setExpand(!expand); } },
+        title: "Click for per-pair breakdown",
+      },
+        h("span", { className: "bb-glyph", "aria-hidden": "true" }, "🚦"),
+        h("span", { className: "bb-summary" },
+          h("span", { className: "bb-warn" }, blocked.length + "/" + total),
+          " pairs blocked",
+          topCauses.length > 0 && h(F, null,
+            h("span", { className: "bb-sep" }, "·"),
+            topCauses.map(([cause, n], i) => h(F, { key: cause },
+              i > 0 && h("span", { className: "bb-sep" }, "·"),
+              h("span", null, n + "/" + total + " on "),
+              h("span", { className: "bb-warn" }, cause)
+            ))
+          ),
+          newest && h(F, null,
+            h("span", { className: "bb-sep" }, "·"),
+            h("span", { className: "bb-dim" }, "newest blocker: "),
+            h("span", null, newest.gate),
+            h("span", { className: "bb-dim" }, " (" + fmtAgoShort(newest.since) + " ago)")
+          )
+        ),
+        h("span", { className: "bb-caret" }, expand ? "▾" : "▸")
+      ),
+      expand && h("div", { className: "blocker-banner-detail" },
+        blocked.map(p => h("div", { key: p.sym, className: "bb-row" },
+          h("span", { className: "bb-sym" }, p.sym),
+          " ",
+          h("span", { className: "bb-cause" }, p.first_blocker || ("× " + p.blocking))
+        ))
+      )
+    );
+  }
+
   function EntryGatesLive({ data }) {
     const [expand, setExpand] = useState(null);
     const slot = slotState(data, "gates");
@@ -1444,8 +1628,18 @@
                 h("strong", { style: { color: "var(--fg-1)" } }, p.sym),
                 h("span", { className: "pill " + (p.regime === "trending_up" ? "up" : p.regime === "trending_down" ? "down" : "info"),
                   style: { height: 18, justifySelf: "start" } }, p.regime || "—"),
-                h("span", { style: { display: "inline-flex", gap: 4, alignItems: "center", flexWrap: "wrap" } },
-                  p.gates.map((g, gi) => h(GateDot, { key: gi, state: g.pass, label: g.gate, detail: g.detail }))),
+                // Move #6 · render Pill-row by default; legacy dot-grid when
+                // localStorage["quanta.entry_gates_v2"] is explicitly removed.
+                // Both code paths read the same p.gates data — no extra fetch.
+                (function () {
+                  let flag = true;
+                  try { flag = localStorage.getItem("quanta.entry_gates_v2") !== "0"; } catch (_) {}
+                  return flag
+                    ? h("span", { style: { display: "inline-flex", alignItems: "center" } },
+                        h(TrafficLightPillRow, { pair: p.sym, gates: p.gates }))
+                    : h("span", { style: { display: "inline-flex", gap: 4, alignItems: "center", flexWrap: "wrap" } },
+                        p.gates.map((g, gi) => h(GateDot, { key: gi, state: g.pass, label: g.gate, detail: g.detail })));
+                })(),
                 h("span", { className: "mono dim", style: { fontSize: "var(--t-2xs)" } },
                   (p.gates.length - p.blocking) + "/" + p.gates.length + " pass"),
                 h("span", { className: p.first_blocker ? "mono" : "dim", style: { fontSize: "var(--t-xs)", color: p.first_blocker ? "var(--down)" : undefined } },
@@ -1716,10 +1910,33 @@
   }
 
   // ─────────────── POSITIONS — live trades + wheel ───────────────
+  // Bonus #1 · row-flash on new fill. We detect "new" by comparing each
+  // row's synthetic trade key against the previous render's set; rows that
+  // weren't there before get a one-shot 200ms CSS animation class
+  // (flash-buy or flash-sell). Pure CSS, no animation lib. The first-ever
+  // render seeds the set, so a hard-refresh does NOT flash every existing
+  // row (operator was clear: flash on NEW fills only).
+  function tradeRowKey(t) {
+    return [t.label, t.kind, t.subkind, t.opened_at, t.entry].filter(Boolean).join("|");
+  }
   function PositionsLive({ data }) {
     const slot = slotState(data, "live_trades");
     const env = envelopeData(slot.env) || {};
     const trades = env.trades || [];
+
+    const prevKeysRef = useRef(null);   // null = first render; seed on next paint
+    const newKeys = useMemo(() => {
+      const cur = new Set(trades.map(tradeRowKey));
+      if (prevKeysRef.current === null) {
+        // first render → no flash, just seed
+        prevKeysRef.current = cur;
+        return new Set();
+      }
+      const fresh = new Set();
+      cur.forEach(k => { if (!prevKeysRef.current.has(k)) fresh.add(k); });
+      prevKeysRef.current = cur;
+      return fresh;
+    }, [trades]);
 
     if (slot.phase === "down") {
       return h(Card, {
@@ -1747,17 +1964,23 @@
         h("tbody", null,
           trades.length === 0
             ? h("tr", null, h("td", { colSpan: 8, className: "dim", style: { fontSize: "var(--t-xs)", padding: "var(--s-3)" } }, "no open positions"))
-            : trades.map((t, i) => h("tr", { key: i },
-                h("td", null, h("strong", { className: "mono" }, t.label)),
-                h("td", { className: "dim" }, t.kind === "crypto" ? "Coinbase" : t.kind === "wheel" ? "Alpaca" : t.kind),
-                h("td", { className: "mono " + ((t.subkind || "").includes("short") ? "down" : "up") }, (t.subkind || "—").toUpperCase()),
-                h("td", { className: "num", style: { textAlign: "right" } }, t.qty != null ? t.qty : "—"),
-                h("td", { className: "num", style: { textAlign: "right" } }, t.entry != null ? fmtUSD(t.entry, t.entry < 10 ? 4 : 2) : "—"),
-                h("td", { className: "num", style: { textAlign: "right" } }, t.current != null ? fmtUSD(t.current, t.current < 10 ? 4 : 2) : "—"),
-                h("td", { className: "num " + ((t.pnl_pct || 0) >= 0 ? "up" : "down"), style: { textAlign: "right" } },
-                  t.pnl_pct != null ? fmtPct(t.pnl_pct) : "—"),
-                h("td", { className: "dim", style: { fontSize: "var(--t-xs)" } }, t.extra || "")
-              ))
+            : trades.map((t, i) => {
+                const key = tradeRowKey(t);
+                const isShort = (t.subkind || "").includes("short");
+                const isNew = newKeys.has(key);
+                const flashCls = isNew ? (isShort ? "flash-sell" : "flash-buy") : "";
+                return h("tr", { key: key || i, className: flashCls },
+                  h("td", null, h("strong", { className: "mono" }, t.label)),
+                  h("td", { className: "dim" }, t.kind === "crypto" ? "Coinbase" : t.kind === "wheel" ? "Alpaca" : t.kind),
+                  h("td", { className: "mono " + (isShort ? "down" : "up") }, (t.subkind || "—").toUpperCase()),
+                  h("td", { className: "num", style: { textAlign: "right" } }, t.qty != null ? t.qty : "—"),
+                  h("td", { className: "num", style: { textAlign: "right" } }, t.entry != null ? fmtUSD(t.entry, t.entry < 10 ? 4 : 2) : "—"),
+                  h("td", { className: "num", style: { textAlign: "right" } }, t.current != null ? fmtUSD(t.current, t.current < 10 ? 4 : 2) : "—"),
+                  h("td", { className: "num " + ((t.pnl_pct || 0) >= 0 ? "up" : "down"), style: { textAlign: "right" } },
+                    t.pnl_pct != null ? fmtPct(t.pnl_pct) : "—"),
+                  h("td", { className: "dim", style: { fontSize: "var(--t-xs)" } }, t.extra || "")
+                );
+              })
         )
       )
     );
@@ -3738,6 +3961,35 @@
     // every 30s on top of useOpsData's 10s. With these three envelopes as
     // props, Topbar's local fetch path is skipped — only /api/ops/uptime
     // (the one endpoint NOT in FAST_ENDPOINTS) is still polled by Topbar.
+
+    // Move #9 · Regime-aware page chrome.
+    // Tints the topbar's 2px bottom border with the current BTC regime so
+    // the operator gets ambient peripheral-vision regime tracking. Reads
+    // from the existing data.regime envelope (already polled every 10s by
+    // useOpsData) — ZERO new endpoint calls. Writes a CSS custom property
+    // (--regime-tint) on the .topbar element; the CSS rule in quanta.css
+    // picks it up. Default falls back to --line-2 so unknown / null /
+    // unmounted-yet keeps the original 2px hairline.
+    const regimeCurrent = (function () {
+      const env = envelopeData(data && data.regime);
+      return env && env.current ? String(env.current) : null;
+    })();
+    useEffect(() => {
+      const tintFor = (r) => {
+        switch (r) {
+          case "trending_up":     return "var(--up)";
+          case "trending_down":   return "var(--down)";
+          case "mean_reverting":  return "var(--warn)";
+          case "high_volatility": return "var(--accent)";
+          default:                return "var(--line-2)";
+        }
+      };
+      const tb = document.querySelector(".topbar");
+      if (!tb) return;
+      tb.style.setProperty("--regime-tint", tintFor(regimeCurrent));
+      tb.setAttribute("data-regime", regimeCurrent || "unknown");
+    }, [regimeCurrent]);
+
     return h(F, null,
       h("div", { className: "app" },
         h(Topbar, {
@@ -3754,6 +4006,10 @@
             h("span", { className: "tb-spacer", style: { flex: 1 } }),
             h("span", { className: "mono dim", style: { fontSize: "var(--t-xs)" } }, "scroll · sections snap to view")
           ),
+          // Move #7 · BLOCKER BANNER — global "why isn't anything trading?"
+          // summary. Only renders when blockers exist; zero footprint at rest.
+          // Reads from the existing data.gates slot — no new endpoint.
+          h(BlockerBanner, { data }),
           // TODAY SCOREBOARD — operator's at-a-glance: capital, day P&L,
           // trades done, open positions, drawdown. Mounted ABOVE the hero
           // so it's the first thing the eye lands on (top of the page).
