@@ -72,51 +72,22 @@ from freqaimodels.tft_architecture import (   # noqa: E402
     TemporalFusionTransformer,
     pinball_loss,
 )
+# TFTTrainerWrapper lives in a regular package module so its class identity
+# survives FreqAI's IResolver re-importing this file via
+# importlib.util.spec_from_file_location("TFTModel", ...). See
+# tft_pickle.py for the full rationale. Without this indirection, torch.save
+# raises PicklingError on every retrain because the wrapper class object
+# differs between the import that built the instance and the one resolved via
+# sys.modules["TFTModel"].TFTTrainerWrapper.
+from freqaimodels.tft_pickle import (   # noqa: E402
+    TFTTrainerWrapper,
+    _set_inference_mode,
+    _set_training_mode,
+)
 
 logger = logging.getLogger(__name__)
 
 QUANTILE_LEVELS: tuple[float, ...] = (0.1, 0.5, 0.9)
-
-
-def _set_inference_mode(module: nn.Module) -> None:
-    """Equivalent of `module.eval()` — uses .train(False) to avoid hook false positives."""
-    module.train(False)
-
-
-def _set_training_mode(module: nn.Module) -> None:
-    module.train(True)
-
-
-# ---------------------------------------------------------------------------
-# Trainer wrapper — minimal surface area FreqAI's BasePyTorchClassifier needs:
-# a `model` (nn.Module) and a `model_meta_data` dict, plus save +
-# load_from_checkpoint hooks.
-# ---------------------------------------------------------------------------
-
-
-class TFTTrainerWrapper:
-    def __init__(self, model: nn.Module, model_meta_data: dict[str, Any]):
-        self.model = model
-        self.model_meta_data = model_meta_data
-        self.optimizer = None  # populated by fit() — kept for save() round-trip
-
-    def save(self, path: Path) -> None:
-        torch.save(
-            {
-                "model_state_dict": self.model.state_dict(),
-                "model_meta_data": self.model_meta_data,
-                "pytrainer": self,
-                "optimizer_state_dict": (
-                    self.optimizer.state_dict() if self.optimizer is not None else None
-                ),
-            },
-            path,
-        )
-
-    def load_from_checkpoint(self, checkpoint: dict) -> "TFTTrainerWrapper":
-        self.model.load_state_dict(checkpoint["model_state_dict"])
-        self.model_meta_data = checkpoint["model_meta_data"]
-        return self
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +203,23 @@ class TFTModel(BasePyTorchClassifier):
         if not self.class_name_to_index:
             self.init_class_names_to_index_mapping(class_names)
 
+        # Graceful degradation: if the sidecars failed to land on disk (e.g.
+        # an earlier save aborted partway), FreqAI may hand us a kitchen
+        # whose feature_pipeline is missing or empty. In that case we return
+        # an all-flat / zero-confidence prediction frame instead of raising,
+        # so the strategy can skip the pair on this candle and keep trading
+        # the other pairs.
+        feature_pipeline = getattr(dk, "feature_pipeline", None)
+        if feature_pipeline is None or not hasattr(feature_pipeline, "transform"):
+            pair = getattr(dk, "pair", "<unknown>")
+            logger.warning(
+                "[%s] feature_pipeline missing or invalid - returning neutral "
+                "TFT predictions for this cycle. Check that "
+                "{model_filename}_feature_pipeline.pkl exists on disk.",
+                pair,
+            )
+            return self._neutral_predictions(unfiltered_df, dk, class_names)
+
         dk.find_features(unfiltered_df)
         filtered_df, _ = dk.filter_features(
             unfiltered_df, dk.training_features_list, training_filter=False,
@@ -326,6 +314,37 @@ class TFTModel(BasePyTorchClassifier):
     # ---------------------------------------------------------------
     # Helpers
     # ---------------------------------------------------------------
+
+    def _neutral_predictions(
+        self,
+        unfiltered_df: DataFrame,
+        dk: FreqaiDataKitchen,
+        class_names: list[str],
+    ) -> tuple[DataFrame, npt.NDArray[np.int_]]:
+        """Return a probabilities-only frame with uniform class probs and
+        zero confidence. Used when the on-disk sidecars are missing so that
+        FreqAI doesn't crash and the strategy can simply skip this pair on
+        this candle (do_predict=0 everywhere)."""
+        n_rows = len(unfiltered_df)
+        n_classes = len(class_names)
+        uniform = 1.0 / max(1, n_classes)
+        probs = np.full((n_rows, n_classes), uniform, dtype=np.float32)
+        # Pick "flat" if available, else the first class.
+        try:
+            flat_idx = class_names.index("flat")
+        except ValueError:
+            flat_idx = 0
+        predicted_classes_str = [class_names[flat_idx]] * n_rows
+        pred_df_prob = pd.DataFrame(probs, columns=class_names)
+        label_col = dk.label_list[0] if dk.label_list else "&-class"
+        pred_df = pd.DataFrame(predicted_classes_str, columns=[label_col])
+        pred_df = pd.concat([pred_df, pred_df_prob], axis=1)
+        pred_df["tft_confidence"] = np.zeros(n_rows, dtype=np.float32)
+        # do_predict = 0 -> strategy ignores this candle for this pair.
+        do_predict = np.zeros(n_rows, dtype=np.int64)
+        dk.do_predict = do_predict
+        dk.DI_values = np.zeros(n_rows)
+        return pred_df, do_predict
 
     def _underlying_module(self) -> nn.Module:
         """Return the bare nn.Module even if torch.compile wrapped it."""
@@ -712,16 +731,41 @@ class TFTModel(BasePyTorchClassifier):
 #     mod   = importlib.util.module_from_spec(spec)
 #     spec.loader.exec_module(mod)
 # WITHOUT registering ``mod`` in ``sys.modules``. So at save() time
-# torch.save's serializer raises:
+# torch.save's serializer raised:
 #     Can't pickle <class 'TFTModel.TFTTrainerWrapper'>: No module named 'TFTModel'
-# because the wrapper's __module__ is "TFTModel" (file stem) and that
-# name isn't in sys.modules.
+# because the wrapper's __module__ used to be "TFTModel" (file stem) and that
+# name wasn't in sys.modules.
 #
 # Without the model save, freqai never writes pair_dictionary.json and
 # load_data() returns null predictions for every pair forever.
 #
-# Fix: at end-of-file (after all class definitions), build a proxy module
-# from the current globals() and register it as sys.modules["TFTModel"].
+# The previous patch built a proxy module from globals() on first import only
+# (the ``if "TFTModel" not in sys.modules`` guard). On every subsequent
+# retrain, IResolver re-exec'd this file: brand-new class objects were created
+# (incl. a fresh TFTTrainerWrapper class), but the cached proxy still pointed
+# at the *original* class. Pickle then resolved the wrapper through the
+# proxy, found the V1 class, compared it to the wrapper instance's V2 class,
+# and raised:
+#     Can't pickle <class 'TFTModel.TFTTrainerWrapper'>: it's not the same
+#         object as TFTModel.TFTTrainerWrapper
+# That's the intermittent failure that lost the model.zip + every sidecar
+# (metadata.json, feature_pipeline.pkl, label_pipeline.pkl, trained_dates_df.pkl,
+# trained_df.pkl) on the affected pairs.
+#
+# Current fix (split across two files):
+#   1. TFTTrainerWrapper now lives in tft_pickle.py — a regular package module
+#      cached by sys.modules, so its class identity is stable across all
+#      future IResolver re-exec's. New saves serialize the wrapper with
+#      __module__ == "freqaimodels.tft_pickle", which pickle finds via the
+#      normal import path.
+#   2. We still register a sys.modules["TFTModel"] proxy below so that *old*
+#      model.zip files (pickled with __module__ == "TFTModel" before this
+#      patch) can still be unpickled — pickle's find_class() resolves the
+#      class by string lookup, and any existing instance dict is assigned to
+#      a fresh new-class instance with no migration needed.
+#   3. The proxy is refreshed on every re-exec (no first-import guard) so
+#      that any future class addition to TFTModel.py automatically picks up
+#      its current identity.
 #
 # IMPORTANT: do NOT change ``TFTModel.__module__`` — freqai's
 # IResolver._search_object validates the loaded class via
@@ -733,12 +777,21 @@ import types as _types
 
 
 def _register_module_aliases() -> None:
-    if "TFTModel" not in _sys.modules:
+    """Expose this module under the bare name ``TFTModel`` so legacy pickles
+    (whose classes have ``__module__ == "TFTModel"``) can still be resolved.
+
+    Always refreshes the proxy with the *current* globals so that we never
+    serve a stale class object back to pickle — and crucially, it points
+    TFTTrainerWrapper at the canonical class from freqaimodels.tft_pickle,
+    which is stable across re-imports.
+    """
+    proxy = _sys.modules.get("TFTModel")
+    if proxy is None or not isinstance(proxy, _types.ModuleType):
         proxy = _types.ModuleType("TFTModel")
-        for k, v in globals().items():
-            if not k.startswith("_"):
-                proxy.__dict__[k] = v
         _sys.modules["TFTModel"] = proxy
+    for k, v in globals().items():
+        if not k.startswith("_"):
+            proxy.__dict__[k] = v
 
 
 _register_module_aliases()
