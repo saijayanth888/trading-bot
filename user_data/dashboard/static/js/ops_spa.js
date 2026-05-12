@@ -1276,8 +1276,8 @@
     // tiny inline dot used in EntryGatesLive's per-pair gate-strip. hover
     // title surfaces gate name + detail so operator gets per-gate context
     // without expanding the row.
-    const color = state === true ? "var(--c-up)"
-      : state === false ? "var(--c-down)"
+    const color = state === true ? "var(--up)"
+      : state === false ? "var(--down)"
       : "color-mix(in srgb, var(--fg-3) 60%, transparent)";
     return h("span", {
       title: label + " — " + (state === true ? "PASS" : state === false ? "BLOCK" : "n/a") + (detail ? " · " + detail : ""),
@@ -1333,8 +1333,8 @@
       // ── aggregate banner: tells operator "why is everything off" in one line ──
       blocked > 0 && topBlockers.length > 0 && h("div", {
         style: { fontSize: "var(--t-xs)", padding: "var(--s-2) var(--s-3)",
-          marginBottom: "var(--s-2)", borderLeft: "2px solid var(--c-down)",
-          background: "color-mix(in srgb, var(--c-down) 6%, transparent)" }
+          marginBottom: "var(--s-2)", borderLeft: "2px solid var(--down)",
+          background: "color-mix(in srgb, var(--down) 6%, transparent)" }
       },
         h("span", { style: { color: "var(--fg-1)" } }, blocked + " of " + all.length + " pairs blocked"),
         h("span", { className: "dim", style: { marginLeft: 8 } }, "most common: "),
@@ -1365,7 +1365,7 @@
                   p.gates.map((g, gi) => h(GateDot, { key: gi, state: g.pass, label: g.gate, detail: g.detail }))),
                 h("span", { className: "mono dim", style: { fontSize: "var(--t-2xs)" } },
                   (p.gates.length - p.blocking) + "/" + p.gates.length + " pass"),
-                h("span", { className: p.first_blocker ? "mono" : "dim", style: { fontSize: "var(--t-xs)", color: p.first_blocker ? "var(--c-down)" : undefined } },
+                h("span", { className: p.first_blocker ? "mono" : "dim", style: { fontSize: "var(--t-xs)", color: p.first_blocker ? "var(--down)" : undefined } },
                   p.first_blocker || "—"),
                 h("span", { className: "dim mono", style: { fontSize: "var(--t-xs)" } }, expand === i ? "▾" : "▸")
               ),
@@ -2765,8 +2765,8 @@
         h("div", { style: { display: "flex", flexDirection: "column", gap: "var(--s-1)" } },
           portfolioConditions.map((c, i) => h("div", { key: i,
             style: { display: "flex", alignItems: "center", gap: 8, fontSize: "var(--t-xs)",
-              padding: "var(--s-1) var(--s-2)", borderLeft: "2px solid " + (c.tripped ? "var(--c-down)" : "var(--c-up)"),
-              background: c.tripped ? "color-mix(in srgb, var(--c-down) 7%, transparent)" : "transparent" } },
+              padding: "var(--s-1) var(--s-2)", borderLeft: "2px solid " + (c.tripped ? "var(--down)" : "var(--up)"),
+              background: c.tripped ? "color-mix(in srgb, var(--down) 7%, transparent)" : "transparent" } },
             h(GateBadge, { state: c.tripped ? "BLOCK" : "PASS" }),
             h("span", { style: { color: "var(--fg-1)" } }, c.name),
             h("span", { className: "tb-spacer", style: { flex: 1 } }),
@@ -2890,7 +2890,7 @@
                       h(GateBadge, { state: g.pass === true ? "PASS" : g.pass === false ? "BLOCK" : "NA" }),
                       h("span", { style: { color: "var(--fg-1)", minWidth: 160 } }, g.gate),
                       h("span", { className: "mono", style: { fontSize: "var(--t-xs)",
-                          color: g.pass ? "var(--c-up)" : "var(--c-down)", minWidth: 70, textAlign: "right" } },
+                          color: g.pass ? "var(--up)" : "var(--down)", minWidth: 70, textAlign: "right" } },
                         formatGateValue(g.value)),
                       h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } },
                         " / " + formatGateValue(g.threshold)),
@@ -3126,7 +3126,7 @@
               onClick: () => doCopy("prompt", call.prompt || promptTxt),
               style: {
                 background: "transparent", border: "1px solid var(--line-2)",
-                color: copied === "prompt" ? "var(--c-up)" : "var(--fg-2)",
+                color: copied === "prompt" ? "var(--up)" : "var(--fg-2)",
                 padding: "2px 8px", cursor: "pointer",
                 fontFamily: "var(--mono)", fontSize: "var(--t-2xs)", borderRadius: 4,
               }
@@ -3147,7 +3147,7 @@
               onClick: () => doCopy("response", call.response_text || respTxt),
               style: {
                 background: "transparent", border: "1px solid var(--line-2)",
-                color: copied === "response" ? "var(--c-up)" : "var(--fg-2)",
+                color: copied === "response" ? "var(--up)" : "var(--fg-2)",
                 padding: "2px 8px", cursor: "pointer",
                 fontFamily: "var(--mono)", fontSize: "var(--t-2xs)", borderRadius: 4,
               }
@@ -3489,7 +3489,7 @@
       modalRec && modalError && h("div", {
         style: {
           position: "fixed", top: 12, right: 12,
-          background: "var(--bg-card)", color: "var(--c-warn)",
+          background: "var(--bg-card)", color: "var(--warn)",
           border: "1px solid var(--line-2)", padding: "4px 10px",
           fontFamily: "var(--mono)", fontSize: "var(--t-2xs)",
           borderRadius: 4, zIndex: 110,
