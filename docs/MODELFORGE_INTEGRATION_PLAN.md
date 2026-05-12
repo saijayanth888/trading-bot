@@ -227,3 +227,40 @@ class ReflectorEvalBackend:
 ModelForge (`apps/api/src/`): `agents/evolution_graph.py` · `agents/training_backend.py` (OpenOrca hardcode at L301) · `agents/eval_backend.py` (`EvalBackend` Protocol L285) · `agents/runner.py` (`_select_backends` L48) · `agents/forge_agent.py` · `services/{data_curator,pareto_selector,peft_inference,adapter_serve,model_registry,lineage_db}.py` · `api/routes/{evolution,forge,adapters,inference,models,evaluation}.py` · `api/schemas/{evolution,inference,models,evaluation}.py` · `config/settings.py`.
 
 Trading-bot: `stocks/memory/{llm-calls.jsonl,decisions.md,override_verify.schema.json}` · `stocks/kb/daily/*.json` · `user_data/backtest_results/`.
+
+---
+
+## EPT retirement (2026-05-12)
+
+The in-tree EPT evolution loop (`user_data/modules/ept_evolution.py`,
+`user_data/scripts/run_ept_generation.py`) and its two Hermes crons are
+**retired**. ModelForge's `evolution_graph` + `AutomationEngine` supersede them.
+
+| Component | State | Notes |
+|---|---|---|
+| `~/.hermes/scripts/ept_training_daily.sh` | replaced with deprecation no-op | exits 0 with pointer message |
+| `~/.hermes/scripts/ept_eval_breeding.sh`  | replaced with deprecation no-op | same |
+| Hermes cron `ept_training_daily`  (`0ef7e5d701df`) | **paused** | resumable |
+| Hermes cron `ept_eval_breeding`   (`79cebcba8474`) | **paused** | resumable |
+| `user_data/modules/ept_evolution.py`              | **kept**  | still imported by `hermes-mcp/server.py`, `user_data/dashboard/{mcp_local,ops_routes}.py`, and `tests/test_ept_evolution.py`. Do not delete without removing those call sites. |
+| `user_data/scripts/run_ept_generation.py`         | **kept**  | invoked synchronously by the MCP `trigger_evolution_cycle` tool. |
+
+**Why retired.** The cron ran `run_ept_generation.py --mode mock` every night
+at 02:00 ET. `mock_eval_fn` is a deterministic function of the genome and the
+runner re-seeds from `seed=42` on each fire, so the output was identical
+across 4+ consecutive runs (champion `gen0-011`, fitness `0.7540`). It also
+crashed on `train_fn` for every member with `No module named 'torch'` —
+because the cron runs outside the freqtrade container. Net result: misleading
+Slack/Telegram delivery, wasted cron tick, zero learning signal.
+
+**Revive path.** Per-agent paper-trading instances must exist (one bot per
+population member, trade_journal rows tagged by `agent_id`) before live-mode
+scoring can produce differentiated fitness. Then:
+
+```bash
+hermes cron resume 0ef7e5d701df  # ept_training_daily
+hermes cron resume 79cebcba8474  # ept_eval_breeding
+```
+
+The original shell-script bodies are preserved in git history; restore from
+the commit prior to the cleanup branch.
