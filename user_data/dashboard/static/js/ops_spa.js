@@ -157,6 +157,11 @@
     // WeeklyTrainingLive card under TodayScoreboard. Degrades soft when
     // model-forge is offline (card still renders with local-only fields).
     weekly_training: "/api/ops/weekly_training",
+    // LLM activity feed — last N calls from stocks/memory/llm-calls.jsonl
+    // with summary aggregates (tokens, avg latency, ollama % share).
+    // Default page is metadata-only (include_text=0) so the polling payload
+    // stays small even with SHARK_LLM_LOG_FULL_TEXT=1 lines on disk.
+    llm_calls: "/api/ops/llm_calls?limit=50",
   };
   const SLOW_ENDPOINTS = {
     ept_champion: { url: "/api/ops/mcp/get_champion_genome", method: "POST", body: {} },
@@ -2913,6 +2918,586 @@
     return String(v);
   }
 
+  // ─────────────── LLM CALLS — activity feed + drill-down modal ───────────
+  // Operator's complaint (2026-05-12): the raw JSONL at
+  // stocks/memory/llm-calls.jsonl was "very ugly" — no way to read it
+  // without `cat`, and with SHARK_LLM_LOG_FULL_TEXT=1 each line is 1–4 KB
+  // of dense JSON. This card surfaces the feed with:
+  //   • headline summary: calls / tokens / avg latency / ollama share
+  //   • filter dropdown (by agent) + regex search box
+  //   • per-row table with latency color-coded (green/yellow/orange/red)
+  //   • click any row → slide-over modal with the FULL prompt + response,
+  //     copy-to-clipboard, ESC to close
+  // Polling: 30s via FAST_ENDPOINTS (the index payload is metadata-only).
+  function fmtLatencyClass(s) {
+    // Color spec from operator:
+    //   green   <2s   (fast)
+    //   yellow  2-5s
+    //   orange  5-15s
+    //   red     >15s
+    const v = Number(s) || 0;
+    if (v < 2) return "up";
+    if (v < 5) return "warn";
+    if (v < 15) return "warn-strong";
+    return "down";
+  }
+  function fmtHHMMSS(iso) {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "—";
+    return d.toTimeString().slice(0, 8);  // HH:MM:SS
+  }
+  function fmtTokensCount(n) {
+    if (n == null || isNaN(n)) return "—";
+    if (n < 1000) return String(n);
+    if (n < 1_000_000) return (n / 1000).toFixed(1) + "k";
+    return (n / 1_000_000).toFixed(2) + "M";
+  }
+
+  // ── helper: pretty-print a JSON-ish blob; fall back to the raw string
+  function maybePrettyJSON(text) {
+    if (!text) return "";
+    const s = String(text).trim();
+    if (!s) return "";
+    // Heuristic: starts with { or [ → try to parse + pretty-print.
+    if (s[0] === "{" || s[0] === "[") {
+      try {
+        return JSON.stringify(JSON.parse(s), null, 2);
+      } catch (_e) { /* fallthrough */ }
+    }
+    return s;
+  }
+
+  // ── helper: copy-to-clipboard with graceful fallback for HTTP origins
+  // (clipboard API requires HTTPS; the dashboard runs on plain HTTP on the
+  // LAN, so document.execCommand is the realistic path on Chrome/Firefox).
+  function copyToClipboard(text) {
+    if (!text) return Promise.resolve(false);
+    if (navigator && navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text).then(() => true, () => false);
+    }
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus(); ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return Promise.resolve(ok);
+    } catch (_e) {
+      return Promise.resolve(false);
+    }
+  }
+
+  function LLMCallModal({ call, onClose }) {
+    const [copied, setCopied] = useState(null);  // "prompt" | "response" | null
+    const promptRef = useRef(null);
+
+    // ESC to close + Cmd-F focuses the search bar in the parent (handled there).
+    // Trap focus inside the modal for accessibility — start by focusing the
+    // close button on mount.
+    const closeBtnRef = useRef(null);
+    useEffect(() => {
+      function onKey(e) {
+        if (e.key === "Escape") { e.preventDefault(); onClose(); }
+      }
+      document.addEventListener("keydown", onKey);
+      if (closeBtnRef.current) closeBtnRef.current.focus();
+      // Prevent body scroll while modal is open
+      const prev = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+      return () => {
+        document.removeEventListener("keydown", onKey);
+        document.body.style.overflow = prev;
+      };
+    }, [onClose]);
+
+    if (!call) return null;
+
+    const lat = Number(call.latency_seconds || 0);
+    const latCls = fmtLatencyClass(lat);
+    const sys = maybePrettyJSON(call.system_message);
+    const promptTxt = maybePrettyJSON(call.prompt);
+    const respTxt = maybePrettyJSON(call.response_text);
+    const hasAnyText = !!(sys || promptTxt || respTxt);
+
+    function doCopy(key, text) {
+      copyToClipboard(text).then(ok => {
+        setCopied(ok ? key : null);
+        setTimeout(() => setCopied(null), 1400);
+      });
+    }
+
+    const overlay = {
+      position: "fixed", inset: 0, background: "rgba(0,0,0,.55)",
+      zIndex: 100, display: "flex", justifyContent: "flex-end",
+    };
+    const panel = {
+      width: "min(720px, 92vw)", height: "100vh", overflowY: "auto",
+      background: "var(--bg-card)", borderLeft: "1px solid var(--line-3)",
+      padding: "var(--s-4) var(--s-5)", display: "flex", flexDirection: "column",
+      gap: "var(--s-3)",
+    };
+    const sectionHead = {
+      display: "flex", alignItems: "baseline", gap: "var(--s-3)",
+      borderBottom: "1px solid var(--line-1)", paddingBottom: 4,
+      marginBottom: 6,
+    };
+    const block = {
+      background: "var(--bg-inset)", border: "1px solid var(--line-1)",
+      borderRadius: 4, padding: "var(--s-2) var(--s-3)",
+      fontFamily: "var(--mono)", fontSize: "var(--t-xs)",
+      whiteSpace: "pre-wrap", wordBreak: "break-word",
+      maxHeight: 320, overflow: "auto", lineHeight: 1.5,
+    };
+    const lbl = (t) => h("span", { className: "metric-label" }, t);
+
+    const meta = (k, v) => h("div", { style: { display: "flex", gap: 6, fontSize: "var(--t-xs)" } },
+      h("span", { className: "dim mono", style: { minWidth: 130 } }, k),
+      h("span", { className: "num", style: { fontFamily: "var(--mono)" } }, v == null ? "—" : String(v))
+    );
+
+    return h("div", {
+      style: overlay,
+      role: "dialog",
+      "aria-modal": "true",
+      "aria-label": "LLM call detail",
+      onClick: (e) => { if (e.target === e.currentTarget) onClose(); }
+    },
+      h("div", { style: panel },
+        h("div", { style: { display: "flex", alignItems: "baseline", gap: "var(--s-3)" } },
+          h("h2", { style: { fontSize: "var(--t-lg)", fontWeight: 500, letterSpacing: "-.01em", margin: 0 } },
+            call.agent || "unknown"),
+          h("span", { className: "pill " + latCls, style: { height: 18 } },
+            h("span", { className: "dot " + latCls }), " ", lat.toFixed(2) + "s"),
+          h("span", { className: "tb-spacer", style: { flex: 1 } }),
+          h("button", {
+            ref: closeBtnRef,
+            type: "button",
+            onClick: onClose,
+            "aria-label": "Close modal",
+            title: "Close (Esc)",
+            style: {
+              background: "transparent", border: "1px solid var(--line-2)",
+              color: "var(--fg-2)", padding: "4px 10px", cursor: "pointer",
+              fontFamily: "var(--mono)", fontSize: "var(--t-xs)", borderRadius: 4,
+            }
+          }, "✕  esc")
+        ),
+
+        // ── METADATA TABLE ────────────────────────────────────────
+        h("div", null,
+          h("div", { style: sectionHead }, lbl("METADATA")),
+          h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 } },
+            meta("timestamp", call.timestamp),
+            meta("provider", call.provider),
+            meta("model", call.model),
+            meta("tier", call.tier),
+            meta("role", call.role),
+            meta("latency", lat.toFixed(3) + "s"),
+            meta("prompt tokens", call.prompt_tokens),
+            meta("completion tokens", call.completion_tokens),
+            meta("total tokens", (call.prompt_tokens || 0) + (call.completion_tokens || 0)),
+            meta("redacted count", call.redacted_count)
+          )
+        ),
+
+        // ── SYSTEM MESSAGE ────────────────────────────────────────
+        sys && h("div", null,
+          h("div", { style: sectionHead },
+            lbl("SYSTEM MESSAGE"),
+            h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } },
+              sys.length + " chars")
+          ),
+          h("pre", { style: block, ref: promptRef }, sys)
+        ),
+
+        // ── USER PROMPT ───────────────────────────────────────────
+        promptTxt && h("div", null,
+          h("div", { style: sectionHead },
+            lbl("USER PROMPT"),
+            h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } },
+              promptTxt.length + " chars"),
+            h("span", { className: "tb-spacer", style: { flex: 1 } }),
+            h("button", {
+              type: "button",
+              onClick: () => doCopy("prompt", call.prompt || promptTxt),
+              style: {
+                background: "transparent", border: "1px solid var(--line-2)",
+                color: copied === "prompt" ? "var(--c-up)" : "var(--fg-2)",
+                padding: "2px 8px", cursor: "pointer",
+                fontFamily: "var(--mono)", fontSize: "var(--t-2xs)", borderRadius: 4,
+              }
+            }, copied === "prompt" ? "✓ copied" : "copy prompt")
+          ),
+          h("pre", { style: block }, promptTxt)
+        ),
+
+        // ── ASSISTANT RESPONSE ────────────────────────────────────
+        respTxt && h("div", null,
+          h("div", { style: sectionHead },
+            lbl("ASSISTANT RESPONSE"),
+            h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } },
+              respTxt.length + " chars"),
+            h("span", { className: "tb-spacer", style: { flex: 1 } }),
+            h("button", {
+              type: "button",
+              onClick: () => doCopy("response", call.response_text || respTxt),
+              style: {
+                background: "transparent", border: "1px solid var(--line-2)",
+                color: copied === "response" ? "var(--c-up)" : "var(--fg-2)",
+                padding: "2px 8px", cursor: "pointer",
+                fontFamily: "var(--mono)", fontSize: "var(--t-2xs)", borderRadius: 4,
+              }
+            }, copied === "response" ? "✓ copied" : "copy response")
+          ),
+          h("pre", { style: block }, respTxt)
+        ),
+
+        // ── EMPTY-STATE NOTE WHEN FLAG WAS OFF AT WRITE TIME ──────
+        !hasAnyText && h("div", { className: "dim", style: { fontSize: "var(--t-xs)" } },
+          h("strong", null, "No prompt/response on this record."),
+          h("br"),
+          "This call was written while ", h("code", { className: "mono" }, "SHARK_LLM_LOG_FULL_TEXT"),
+          " was unset. Future calls will include the text once the flag is enabled. ",
+          "Existing metadata above is the full content of the record."
+        )
+      )
+    );
+  }
+
+  function LLMCallsLive({ data }) {
+    const slot = slotState(data, "llm_calls");
+    const env = envelopeData(slot.env) || {};
+    const summary = env.summary || {};
+    const callsAll = env.calls || [];
+    const logSize = env.log_size_bytes || 0;
+
+    // Local UI state — filter + search are client-side so the operator
+    // doesn't pay an extra round-trip per keystroke. Server-side filtering
+    // is still available via the same endpoint params for the modal's
+    // "search across the whole window" flow.
+    const [agentFilter, setAgentFilter] = useState("");
+    const [search, setSearch] = useState("");
+    const [shown, setShown] = useState(50);  // "load more" pagination
+    const [selectedTs, setSelectedTs] = useState(null);
+    const [modalRec, setModalRec] = useState(null);
+    const [modalLoading, setModalLoading] = useState(false);
+    const [modalError, setModalError] = useState(null);
+    const searchRef = useRef(null);
+
+    // Cmd-F / Ctrl-F focuses the search input (within this card only —
+    // we don't fight the browser shortcut globally).
+    useEffect(() => {
+      function onKey(e) {
+        if ((e.metaKey || e.ctrlKey) && e.key === "f") {
+          // Only intercept when the LLM card is in viewport — otherwise
+          // let browser find-in-page handle it as normal.
+          const card = document.getElementById("llm-calls-card");
+          if (!card) return;
+          const rect = card.getBoundingClientRect();
+          if (rect.bottom < 0 || rect.top > window.innerHeight) return;
+          e.preventDefault();
+          if (searchRef.current) searchRef.current.focus();
+        }
+      }
+      document.addEventListener("keydown", onKey);
+      return () => document.removeEventListener("keydown", onKey);
+    }, []);
+
+    // Click a row → fetch full record (include_text=1) for the modal.
+    const openCall = useCallback((rec) => {
+      if (!rec || !rec.timestamp) return;
+      setSelectedTs(rec.timestamp);
+      setModalLoading(true); setModalError(null); setModalRec(rec);  // optimistic
+      const url = "/api/ops/llm_calls/" + encodeURIComponent(rec.timestamp);
+      fetch(url)
+        .then(r => {
+          if (r.ok) return r.json();
+          if (r.status === 410) {
+            return r.json().then(j => {
+              const detail = j.detail || {};
+              if (detail.call) return { status: "ok", data: { call: detail.call, source: "archive", archive_path: detail.archive_path } };
+              throw new Error("record archived: " + (detail.hint || detail.error || ""));
+            });
+          }
+          throw new Error("HTTP " + r.status);
+        })
+        .then(env => {
+          const c = (env && env.data && env.data.call) || rec;
+          setModalRec(c);
+          setModalLoading(false);
+        })
+        .catch(err => {
+          // Fallback: render the row data we have (metadata-only) and
+          // surface the error so operator knows full text isn't available.
+          setModalRec(rec);
+          setModalError(String(err && err.message || err));
+          setModalLoading(false);
+        });
+    }, []);
+
+    const closeModal = useCallback(() => {
+      setSelectedTs(null);
+      setModalRec(null);
+      setModalError(null);
+    }, []);
+
+    // ── Filter rows client-side ──────────────────────────────────
+    const agentOptions = useMemo(() => {
+      const set = new Set();
+      callsAll.forEach(c => { if (c.agent) set.add(c.agent); });
+      return Array.from(set).sort();
+    }, [callsAll]);
+
+    const filtered = useMemo(() => {
+      let pat = null;
+      if (search) {
+        try { pat = new RegExp(search, "i"); }
+        catch (_e) { pat = null; }
+      }
+      return callsAll.filter(c => {
+        if (agentFilter && c.agent !== agentFilter) return false;
+        if (pat) {
+          const hay = [c.agent, c.model, c.tier, c.role, c.provider]
+            .filter(Boolean).join(" ");
+          if (!pat.test(hay)) return false;
+        }
+        return true;
+      });
+    }, [callsAll, agentFilter, search]);
+
+    // Skeleton — only show loading on first paint; subsequent polls
+    // re-use the previous data so the table doesn't flash.
+    if (slot.phase === "loading" && callsAll.length === 0) {
+      return h(Card, {
+        num: "21", title: "LLM activity · last 24h",
+        sub: "loading…",
+        right: cardRight(slot.fetchedAt),
+      }, h(LoadingState));
+    }
+    if (slot.phase === "down" && callsAll.length === 0) {
+      return h(Card, {
+        num: "21", title: "LLM activity · last 24h",
+        sub: "endpoint unavailable",
+        right: cardRight(slot.fetchedAt),
+      }, h(EmptyState, { reason: slot.reason, fetchedAt: slot.fetchedAt, period: 30 }));
+    }
+
+    // ── Layout ───────────────────────────────────────────────────
+    const stat = (lbl, val, cls) => h("div", { style: { display: "flex", flexDirection: "column", gap: 2, minWidth: 100 } },
+      h("div", { className: "dim2 mono", style: { fontSize: "var(--t-2xs)", letterSpacing: ".08em", textTransform: "uppercase" } }, lbl),
+      h("div", { className: "num " + (cls || ""), style: { fontSize: "var(--t-md)", fontFamily: "var(--mono)", fontVariantNumeric: "tabular-nums" } }, val)
+    );
+
+    const ollamaPct = Number(summary.ollama_pct || 0);
+    const ollamaCls = ollamaPct >= 80 ? "up" : ollamaPct >= 50 ? "warn" : "down";
+    const successCls = Number(summary.success_pct || 100) >= 99 ? "up"
+                    : Number(summary.success_pct || 100) >= 95 ? "warn" : "down";
+    const isEmpty = callsAll.length === 0;
+
+    const rightPill = h("span", { className: "pill info", style: { height: 18 } },
+      h("span", { className: "dot info" + (isEmpty ? "" : " pulse") }), " ",
+      isEmpty ? "NO CALLS YET" : (summary.total_calls || 0) + " · 24H");
+
+    return h(F, null,
+      h("div", { id: "llm-calls-card" },
+        h(Card, {
+          num: "21", title: "LLM activity · last 24h",
+          sub: isEmpty
+            ? "No calls written yet — tracker hasn't fired or log file missing"
+            : "feed · " + (summary.total_calls || 0) + " calls · "
+              + fmtTokensCount(summary.total_tokens) + " tokens · "
+              + (logSize ? Math.round(logSize / 1024) + " KB on disk" : "—"),
+          right: cardRight(slot.fetchedAt, rightPill),
+        },
+          // ── HEADLINE NUMBERS ─────────────────────────────────────
+          h("div", {
+            style: {
+              display: "flex", flexWrap: "wrap", gap: "var(--s-5)",
+              alignItems: "baseline", paddingBottom: "var(--s-3)",
+              borderBottom: "1px solid var(--line-1)",
+            }
+          },
+            stat("Calls", summary.total_calls || 0),
+            stat("Tokens", fmtTokensCount(summary.total_tokens)),
+            stat("Avg lat", (summary.avg_latency_s || 0).toFixed(2) + "s",
+              fmtLatencyClass(summary.avg_latency_s)),
+            stat("P95 lat", (summary.p95_latency_s || 0).toFixed(2) + "s",
+              fmtLatencyClass(summary.p95_latency_s)),
+            stat("Ollama", ollamaPct.toFixed(0) + "%", ollamaCls),
+            stat("Success", (summary.success_pct || 100).toFixed(1) + "%", successCls)
+          ),
+
+          // ── FILTERS ─────────────────────────────────────────────
+          h("div", {
+            style: {
+              display: "flex", gap: "var(--s-2)", alignItems: "center",
+              padding: "var(--s-3) 0", flexWrap: "wrap",
+            }
+          },
+            h("label", { className: "dim mono", style: { fontSize: "var(--t-2xs)", letterSpacing: ".08em" } }, "AGENT"),
+            h("select", {
+              value: agentFilter,
+              onChange: (e) => setAgentFilter(e.target.value),
+              style: {
+                background: "var(--bg-inset)", color: "var(--fg-1)",
+                border: "1px solid var(--line-2)", borderRadius: 4,
+                padding: "4px 6px", fontFamily: "var(--mono)",
+                fontSize: "var(--t-xs)", minWidth: 160,
+              }
+            },
+              h("option", { value: "" }, "all agents (" + agentOptions.length + ")"),
+              agentOptions.map(a => h("option", { key: a, value: a }, a))
+            ),
+            h("label", { className: "dim mono", style: { fontSize: "var(--t-2xs)", letterSpacing: ".08em", marginLeft: "var(--s-3)" } }, "SEARCH"),
+            h("input", {
+              ref: searchRef,
+              type: "text",
+              value: search,
+              onChange: (e) => setSearch(e.target.value),
+              placeholder: "regex over agent/model/tier · ⌘F to focus",
+              style: {
+                background: "var(--bg-inset)", color: "var(--fg-1)",
+                border: "1px solid var(--line-2)", borderRadius: 4,
+                padding: "4px 8px", fontFamily: "var(--mono)",
+                fontSize: "var(--t-xs)", minWidth: 260, flex: 1, maxWidth: 360,
+              }
+            }),
+            (agentFilter || search) && h("button", {
+              type: "button",
+              onClick: () => { setAgentFilter(""); setSearch(""); },
+              style: {
+                background: "transparent", border: "1px solid var(--line-2)",
+                color: "var(--fg-2)", padding: "3px 8px", cursor: "pointer",
+                fontFamily: "var(--mono)", fontSize: "var(--t-2xs)", borderRadius: 4,
+              }
+            }, "clear"),
+            h("span", { className: "tb-spacer", style: { flex: 1 } }),
+            h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } },
+              filtered.length + " / " + callsAll.length + " rows")
+          ),
+
+          // ── TABLE ───────────────────────────────────────────────
+          isEmpty
+            ? h("div", {
+                className: "dim",
+                style: {
+                  fontSize: "var(--t-xs)", padding: "var(--s-4) 0",
+                  textAlign: "center",
+                },
+              },
+                "No LLM calls captured yet. The tracker writes ",
+                h("code", { className: "mono" }, "stocks/memory/llm-calls.jsonl"),
+                " on every chat_json call — first record appears within minutes of the next agent run."
+              )
+            : h(F, null,
+              // Column header
+              h("div", {
+                style: {
+                  display: "grid",
+                  gridTemplateColumns: "76px 1fr 130px 64px 90px 22px",
+                  gap: "var(--s-2)", alignItems: "center",
+                  fontSize: "var(--t-2xs)", fontFamily: "var(--mono)",
+                  color: "var(--fg-3)", textTransform: "uppercase",
+                  letterSpacing: ".08em", padding: "4px 6px",
+                  borderBottom: "1px solid var(--line-1)",
+                }
+              },
+                h("span", null, "time"),
+                h("span", null, "agent"),
+                h("span", null, "model · tier"),
+                h("span", { style: { textAlign: "right" } }, "lat"),
+                h("span", { style: { textAlign: "right" } }, "tokens"),
+                h("span", null, "")
+              ),
+              filtered.slice(0, shown).map((c, i) => {
+                const lat = Number(c.latency_seconds || 0);
+                const latCls = fmtLatencyClass(lat);
+                const pTok = c.prompt_tokens || 0;
+                const cTok = c.completion_tokens || 0;
+                const isOpen = selectedTs === c.timestamp;
+                // Status dot: success unless ``success===false`` (future); we
+                // also treat completion_tokens===0 + latency===0 as failed
+                // because a real round-trip should produce at least one of
+                // them.
+                const failed = c.success === false || (lat === 0 && cTok === 0);
+                const statusCls = failed ? "down" : "up";
+                return h("div", {
+                  key: c.timestamp + "_" + i,
+                  onClick: () => openCall(c),
+                  tabIndex: 0,
+                  role: "button",
+                  "aria-label": "Open call " + c.agent + " " + c.timestamp,
+                  onKeyDown: (e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault(); openCall(c);
+                    }
+                  },
+                  style: {
+                    display: "grid",
+                    gridTemplateColumns: "76px 1fr 130px 64px 90px 22px",
+                    gap: "var(--s-2)", alignItems: "center",
+                    fontSize: "var(--t-xs)", fontFamily: "var(--mono)",
+                    padding: "5px 6px",
+                    borderBottom: "1px solid var(--line-1)",
+                    cursor: "pointer",
+                    background: isOpen ? "var(--bg-inset)" : "transparent",
+                  }
+                },
+                  h("span", { className: "dim" }, fmtHHMMSS(c.timestamp)),
+                  h("span", { style: { color: "var(--fg-1)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
+                    c.agent || "—"),
+                  h("span", { className: "dim", style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
+                    (c.model || "—") + " · " + (c.tier || "?")),
+                  h("span", { className: latCls, style: { textAlign: "right" } },
+                    lat.toFixed(2) + "s"),
+                  h("span", { className: "dim", style: { textAlign: "right" } },
+                    pTok + "/" + cTok),
+                  h("span", { className: "dot " + statusCls, style: { justifySelf: "end" } })
+                );
+              }),
+              filtered.length > shown && h("div", { style: { padding: "var(--s-3) 0", textAlign: "center" } },
+                h("button", {
+                  type: "button",
+                  onClick: () => setShown(n => n + 50),
+                  style: {
+                    background: "transparent", border: "1px solid var(--line-2)",
+                    color: "var(--fg-2)", padding: "5px 14px", cursor: "pointer",
+                    fontFamily: "var(--mono)", fontSize: "var(--t-xs)", borderRadius: 4,
+                  }
+                }, "load more (" + (filtered.length - shown) + " more)")
+              ),
+              h("div", { className: "dim mono", style: { fontSize: "var(--t-2xs)", padding: "6px 6px 0" } },
+                "click any row · Esc closes modal · ⌘F focuses search"
+              )
+            )
+        )
+      ),
+      modalRec && h(LLMCallModal, { call: modalRec, onClose: closeModal }),
+      modalRec && modalLoading && h("div", {
+        style: {
+          position: "fixed", top: 12, right: 12,
+          background: "var(--bg-card)", color: "var(--fg-1)",
+          border: "1px solid var(--line-2)", padding: "4px 10px",
+          fontFamily: "var(--mono)", fontSize: "var(--t-2xs)",
+          borderRadius: 4, zIndex: 110,
+        }
+      }, "loading full text…"),
+      modalRec && modalError && h("div", {
+        style: {
+          position: "fixed", top: 12, right: 12,
+          background: "var(--bg-card)", color: "var(--c-warn)",
+          border: "1px solid var(--line-2)", padding: "4px 10px",
+          fontFamily: "var(--mono)", fontSize: "var(--t-2xs)",
+          borderRadius: 4, zIndex: 110,
+        }
+      }, "full text unavailable: " + modalError)
+    );
+  }
+
   // ─────────────── DECISION AUDIT — per-pair why-trade rationale ───────────────
   // Mirrors the legacy /ops "Decision audit" card. Fetches the pair list from
   // /api/pairs and the last 5 decisions for the selected pair from
@@ -3082,6 +3667,14 @@
           h("div", { id: "training", className: "grid g-12 anchor", style: { gap: "var(--gap-grid)" } },
             h("div", { style: { gridColumn: "span 6" } }, h(TrainingCardLive, { data })),
             h("div", { style: { gridColumn: "span 6" } }, h(StocksMLLive, { data }))
+          ),
+          // LLM ACTIVITY — live feed of stocks/memory/llm-calls.jsonl with
+          // drill-down modal. Mounted below the training row per spec so
+          // the top stays uncrowded — operator clicks a row to see the full
+          // prompt + response (provided SHARK_LLM_LOG_FULL_TEXT=1 was on
+          // when the call was logged).
+          h("div", { id: "llm-calls", className: "anchor", style: { gridColumn: "span 12" } },
+            h(LLMCallsLive, { data })
           ),
           // AGENT TIMELINE + RESEARCH FEED
           h("div", { id: "agent", className: "grid g-12 anchor", style: { gap: "var(--gap-grid)" } },
