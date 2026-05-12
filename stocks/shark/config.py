@@ -105,6 +105,9 @@ class Settings:
     debate_rounds: int            # 0 = single-call (legacy), 1+ = adversarial rounds
     llm_risk_review: bool         # enable LLM-powered risk debate after guardrails
     risk_debate_rounds: int       # rounds per risk perspective (aggressive/conservative/neutral)
+    inject_past_lessons: bool     # append past-lessons block (decisions.md) to debate prompts
+    past_lessons_k_same: int      # how many same-symbol realized reflections to inject
+    past_lessons_k_cross: int     # how many cross-symbol realized reflections to inject
 
     # ----- Trading mode -----
     trading_mode: str                    # "paper" or "live"
@@ -310,6 +313,9 @@ def _load_from_env() -> Settings:
         debate_rounds=_env_int("SHARK_DEBATE_ROUNDS", 1),
         llm_risk_review=_env_str("SHARK_LLM_RISK_REVIEW", "false").lower() in ("true", "1", "yes"),
         risk_debate_rounds=_env_int("SHARK_RISK_DEBATE_ROUNDS", 1),
+        inject_past_lessons=_env_str("INJECT_PAST_LESSONS", "true").lower() in ("true", "1", "yes"),
+        past_lessons_k_same=_env_int("PAST_LESSONS_K_SAME", 5),
+        past_lessons_k_cross=_env_int("PAST_LESSONS_K_CROSS", 3),
 
         # Regime
         regime_atr_high_vol_pct=_env_float("REGIME_ATR_HIGH_VOL_PCT", 2.5),

@@ -28,6 +28,35 @@ except ImportError:
 
 from shark.agents.trade_reviewer import get_recent_lessons
 
+try:
+    # Optional: injects past realized REFLECTIONs from stocks/memory/decisions.md
+    # into the arbiter's system prompt. Behind INJECT_PAST_LESSONS (default True).
+    from shark.memory import get_past_context as _get_past_context
+except Exception:  # pragma: no cover
+    _get_past_context = None
+
+
+def _arbiter_system_prompt(symbol: str) -> str:
+    """Base arbiter prompt + (optional) past-lessons block from decisions.md."""
+    base = _ARBITER_SYSTEM
+    if _get_past_context is None:
+        return base
+    try:
+        s = get_settings()
+        if not getattr(s, "inject_past_lessons", True):
+            return base
+        block = _get_past_context(
+            symbol,
+            k_same_symbol=getattr(s, "past_lessons_k_same", 5),
+            k_cross_symbol=getattr(s, "past_lessons_k_cross", 3),
+        )
+        if not block:
+            return base
+        return f"{base}\n\n{block}"
+    except Exception as exc:
+        logger.debug("arbiter past-lessons injection failed for %s: %s", symbol, exc)
+        return base
+
 
 # ---------------------------------------------------------------------------
 # System prompts — each analyst has a distinct persona
@@ -277,7 +306,7 @@ Rules:
 
     try:
         raw, _usage, _model = chat_json(
-            system_prompt=_ARBITER_SYSTEM,
+            system_prompt=_arbiter_system_prompt(symbol),
             user_message=prompt,
             max_tokens=1000,
             temperature=0.2,
