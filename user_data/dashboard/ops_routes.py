@@ -3086,3 +3086,122 @@ async def stock_regime():
     if age is not None and age > 86400:
         return _envelope("degraded", data=payload, error=f"SPY data {age}s old")
     return _envelope("ok", data=payload)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Backtest quality gates — written by the weekly bt_quality_gates.sh cron.
+#
+# Schema mirrors the JSON written by `scripts/backtest_with_gates.py`.
+# We just glob the *_latest.json files and surface them, so the operator
+# sees one row per strategy with 5 gate badges + an overall promotion-
+# eligible flag.
+#
+# Read endpoint only (no mutation): no auth dep.
+# ──────────────────────────────────────────────────────────────────────────
+
+# Bind-mount path inside the dashboard container; falls back to the host
+# path so the same endpoint works when the dashboard is run on the host
+# (operator does this for local dev).
+BACKTEST_RESULTS_DIR = Path(os.environ.get(
+    "BACKTEST_RESULTS_DIR",
+    "/freqtrade/user_data/backtest_results",
+))
+
+
+@router.get("/backtest_gates")
+async def backtest_gates():
+    """Latest gates_report per strategy + a promotion_eligible boolean.
+
+    Walks ``BACKTEST_RESULTS_DIR`` for files matching
+    ``gates_report_<strategy>_latest.json`` (written by the weekly Hermes
+    cron). Each file is parsed and returned as a row in ``data.strategies``;
+    cards on /ops_spa render one badge strip per row.
+
+    The cron writes both a timestamped report and a stable *_latest.json
+    pointer; we only read the pointer here so the endpoint never sees a
+    partially-written file (the cron uses copy-then-rename atomicity).
+
+    Stale = report older than 8 days (cron runs Sundays; 8d gives 1 missed
+    week of grace before we surface the strategy as "stale").
+    """
+    results_dir = BACKTEST_RESULTS_DIR
+    # Try the in-container path first; fall back to host path. Mirrors the
+    # /api/universe pattern documented in the dashboard's path-lookup notes.
+    if not results_dir.is_dir():
+        alt = Path("/home/saijayanthai/Documents/trading-bot/user_data/backtest_results")
+        if alt.is_dir():
+            results_dir = alt
+    if not results_dir.is_dir():
+        return _envelope("down",
+                         error=f"backtest_results dir not found: {BACKTEST_RESULTS_DIR}",
+                         data={"strategies": [], "any_eligible": False, "results_dir": str(results_dir)})
+
+    rows: list[dict[str, Any]] = []
+    now_ts = datetime.now(timezone.utc).timestamp()
+    STALE_S = 8 * 24 * 3600
+
+    for f in sorted(results_dir.glob("gates_report_*_latest.json")):
+        try:
+            payload = json.loads(f.read_text())
+        except Exception as exc:  # noqa: BLE001 — malformed file shouldn't 500 the card
+            logger.warning("backtest_gates: failed to parse %s: %s", f, exc)
+            continue
+        try:
+            mtime = f.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        age_s = max(0.0, now_ts - mtime)
+        rows.append({
+            "strategy": payload.get("strategy") or f.stem.replace("gates_report_", "").replace("_latest", ""),
+            "promotion_eligible": bool(payload.get("promotion_eligible")),
+            "n_trades": payload.get("n_trades"),
+            "evaluated_at": payload.get("evaluated_at"),
+            "timerange": payload.get("timerange"),
+            "trades_per_year_estimate": payload.get("trades_per_year_estimate"),
+            "thresholds": payload.get("thresholds") or {},
+            "config": payload.get("config") or {},
+            # Strip nested diagnostics from the gate list — the card uses
+            # the simple {gate, pass, value, threshold, detail} shape and
+            # the bootstrap_diag/windows trees would bloat the payload.
+            "gates": [
+                {
+                    "gate": g.get("gate"),
+                    "pass": g.get("pass"),
+                    "value": g.get("value"),
+                    "threshold": g.get("threshold"),
+                    "detail": g.get("detail"),
+                }
+                for g in (payload.get("gates") or [])
+            ],
+            "report_age_seconds": int(age_s),
+            "stale": age_s > STALE_S,
+            "report_file": f.name,
+        })
+
+    any_eligible = any(r["promotion_eligible"] for r in rows)
+    any_stale = any(r["stale"] for r in rows)
+    summary = {
+        "n_strategies": len(rows),
+        "n_eligible": sum(1 for r in rows if r["promotion_eligible"]),
+        "n_stale": sum(1 for r in rows if r["stale"]),
+    }
+
+    if not rows:
+        return _envelope(
+            "degraded",
+            data={"strategies": [], "summary": summary, "any_eligible": False, "any_stale": False,
+                  "results_dir": str(results_dir)},
+            error="no gates_report_*_latest.json files yet — cron has not run, or wrong results dir",
+        )
+    return _envelope(
+        "degraded" if any_stale else "ok",
+        data={
+            "strategies": rows,
+            "summary": summary,
+            "any_eligible": any_eligible,
+            "any_stale": any_stale,
+            "results_dir": str(results_dir),
+        },
+        error=("one or more reports are >8d old — weekly cron may have failed"
+               if any_stale else None),
+    )

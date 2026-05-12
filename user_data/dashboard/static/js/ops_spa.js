@@ -141,6 +141,7 @@
     stocks: "/api/ops/stocks",
     ollama_health: "/api/ops/ollama_health",
     circuit_breakers: "/api/ops/circuit_breakers",
+    backtest_gates: "/api/ops/backtest_gates",
     llm_stats: "/api/ops/llm_stats",
     mcp: "/api/ops/mcp",
     sentiment: "/api/ops/sentiment",
@@ -2376,6 +2377,133 @@
     );
   }
 
+  // ─────────────── BACKTEST QUALITY GATES — strategy promotion eligibility ───
+  // Reads /api/ops/backtest_gates which is written by the weekly Hermes cron
+  // bt_quality_gates.sh (Sun 4am ET). Each row = one strategy with 5 gate
+  // badges. Click a row to expand the numeric values + thresholds. A
+  // strategy is "promotion eligible" only when all 5 gates pass — even
+  // then, no automatic flip to live happens; this is operator-decision
+  // surface, not automation.
+  function BacktestGatesLive({ data }) {
+    const [expand, setExpand] = useState(null);
+    const slot = slotState(data, "backtest_gates");
+    const env = envelopeData(slot.env) || {};
+    const strategies = env.strategies || [];
+    const summary = env.summary || {};
+    const anyEligible = !!env.any_eligible;
+    const anyStale = !!env.any_stale;
+
+    // Card title pill — global state at-a-glance.
+    let pillCls = "info"; let pillText = "no data";
+    if (strategies.length > 0) {
+      if (anyStale) { pillCls = "warn"; pillText = "STALE"; }
+      else if (anyEligible) { pillCls = "up"; pillText = (summary.n_eligible || 0) + " ELIGIBLE"; }
+      else { pillCls = "down"; pillText = "NONE ELIGIBLE"; }
+    }
+
+    if (slot.phase !== "ok") {
+      return h(Card, {
+        num: "16b", title: "Backtest quality gates",
+        sub: slot.phase === "loading" ? "loading…" : "endpoint unavailable",
+        right: cardRight(slot.fetchedAt)
+      },
+        slot.phase === "loading" ? h(LoadingState)
+          : h(EmptyState, { reason: slot.reason, fetchedAt: slot.fetchedAt, period: 10 })
+      );
+    }
+
+    return h(Card, {
+      num: "16b", title: "Backtest quality gates",
+      sub: strategies.length === 0
+        ? "no reports yet — weekly cron has not run"
+        : (summary.n_eligible || 0) + "/" + strategies.length + " strategies eligible for promotion"
+        + (anyStale ? " · " + (summary.n_stale || 0) + " stale" : ""),
+      right: cardRight(slot.fetchedAt,
+        h("span", { className: "pill " + pillCls, style: { height: 18 } },
+          h("span", { className: "dot " + pillCls + (anyEligible ? " pulse" : "") }), " ",
+          pillText))
+    },
+      strategies.length === 0
+        ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)", padding: "var(--s-3)" } },
+            "No gates_report_*_latest.json on disk. Sunday 4am ET cron will populate.")
+        : h("div", { style: { display: "flex", flexDirection: "column", gap: 0 } },
+            strategies.map((s, i) => {
+              const gates = s.gates || [];
+              const passing = gates.filter(g => g.pass === true).length;
+              const eligible = !!s.promotion_eligible;
+              const stale = !!s.stale;
+              const ageH = Math.round((s.report_age_seconds || 0) / 3600);
+              const ageStr = ageH < 24 ? (ageH + "h") : (Math.round(ageH / 24) + "d");
+              return h(F, { key: s.strategy }, [
+                h("div", {
+                  key: "row",
+                  onClick: () => setExpand(expand === i ? null : i),
+                  style: { cursor: "pointer", display: "grid",
+                    gridTemplateColumns: "minmax(140px,2fr) minmax(120px,1.5fr) minmax(80px,1fr) minmax(80px,1fr) 18px",
+                    gap: "var(--s-2)", alignItems: "center",
+                    padding: "var(--s-2) var(--s-2)",
+                    borderBottom: "1px solid var(--line-1)",
+                    fontSize: "var(--t-xs)" }
+                },
+                  h("strong", { style: { color: "var(--fg-1)" } }, s.strategy),
+                  h("span", { style: { display: "inline-flex", gap: 4, alignItems: "center", flexWrap: "wrap" } },
+                    gates.map((g, gi) => h(GateDot, {
+                      key: gi, state: g.pass, label: g.gate, detail: g.detail
+                    }))),
+                  h("span", { className: "mono dim", style: { fontSize: "var(--t-2xs)" } },
+                    passing + "/" + gates.length + " pass"),
+                  h("span", { className: "pill " + (eligible ? "up" : (stale ? "warn" : "down")),
+                    style: { height: 18, justifySelf: "start" } },
+                    eligible ? "PROMOTE OK" : (stale ? ("STALE " + ageStr) : "BLOCKED")),
+                  h("span", { className: "dim mono", style: { fontSize: "var(--t-xs)" } },
+                    expand === i ? "▾" : "▸")
+                ),
+                expand === i && h("div", {
+                  key: "exp",
+                  style: { background: "var(--bg-inset)", padding: "var(--s-3) var(--s-4)",
+                    borderBottom: "1px solid var(--line-1)" }
+                },
+                  h("div", { className: "dim2 mono", style: { fontSize: "var(--t-2xs)",
+                      letterSpacing: ".08em", textTransform: "uppercase",
+                      marginBottom: "var(--s-2)" } },
+                    s.timerange ? "timerange " + s.timerange : "timerange n/a",
+                    " · n_trades " + (s.n_trades ?? "—"),
+                    " · evaluated " + (s.evaluated_at || "—"),
+                    " · age " + ageStr),
+                  h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--s-2) var(--s-4)" } },
+                    gates.map((g, gi) => h("div", { key: gi,
+                      style: { display: "flex", alignItems: "center", gap: 8, fontSize: "var(--t-xs)" } },
+                      h(GateBadge, { state: g.pass === true ? "PASS" : g.pass === false ? "BLOCK" : "NA" }),
+                      h("span", { style: { color: "var(--fg-1)", minWidth: 160 } }, g.gate),
+                      h("span", { className: "mono", style: { fontSize: "var(--t-xs)",
+                          color: g.pass ? "var(--c-up)" : "var(--c-down)", minWidth: 70, textAlign: "right" } },
+                        formatGateValue(g.value)),
+                      h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } },
+                        " / " + formatGateValue(g.threshold)),
+                      h("span", { className: "dim", style: { fontSize: "var(--t-2xs)", flex: 1, textAlign: "right" } },
+                        g.detail || "")
+                    )))
+                ),
+              ].filter(Boolean));
+            })
+          ),
+      h("div", { className: "dim", style: { fontSize: "var(--t-2xs)", padding: "var(--s-2) var(--s-2) 0",
+          fontFamily: "var(--mono)" } },
+        "promotion-eligible = recommendation surface only · operator must flip live by hand")
+    );
+  }
+
+  function formatGateValue(v) {
+    if (v == null) return "—";
+    if (typeof v === "string") return v;  // "inf", "-inf", "nan"
+    if (typeof v === "number") {
+      if (!isFinite(v)) return v > 0 ? "inf" : "-inf";
+      if (Number.isInteger(v)) return String(v);
+      return v.toFixed(4);
+    }
+    return String(v);
+  }
+
   // ─────────────── DECISION AUDIT — per-pair why-trade rationale ───────────────
   // Mirrors the legacy /ops "Decision audit" card. Fetches the pair list from
   // /api/pairs and the last 5 decisions for the selected pair from
@@ -2574,6 +2702,12 @@
           h("div", { id: "config", className: "grid g-12 anchor", style: { gap: "var(--gap-grid)" } },
             h("div", { style: { gridColumn: "span 6" } }, h(CircuitBreakersLive, { data })),
             h("div", { style: { gridColumn: "span 6" } }, h(QuickActions, { killState, setKillState }))
+          ),
+          // BACKTEST QUALITY GATES — full-width under breakers/quick-actions row.
+          // Sits in the risk-gates section per stage/18 spec; clicking a row
+          // expands to show numeric values vs thresholds.
+          h("div", { id: "backtest-gates", className: "anchor", style: { gridColumn: "span 12" } },
+            h(BacktestGatesLive, { data })
           ),
           // Agent C · 5 new cards (data-num 17..21). TrainingCard moved
           // to top training row alongside StocksML; ReadinessCard keeps

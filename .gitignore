@@ -119,6 +119,7 @@ user_data/config-private.json.tmp
 .hermes/scripts/*
 !.hermes/scripts/stocks_ml_train.sh
 !.hermes/scripts/ept_training_daily.sh
+!.hermes/scripts/bt_quality_gates.sh
 
 # Unified risk peak — runtime state, regenerates on first call
 user_data/data/unified_risk_peak.json
