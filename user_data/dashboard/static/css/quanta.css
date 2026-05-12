@@ -731,3 +731,66 @@ table.t .row-strike td { color: var(--fg-3); }
   .brand .brand-text { display: none; }
   .nav-item span.label { display: none; }
 }
+
+/* ============================================================
+   TIER-B DESIGN MOVES (2026-05-12) — PURE ADDITIVE
+   See FRONTEND_AUDIT_2026-05-12.md §6 + §9 and HANDOFF.md.
+   All new rules consume only existing semantic tokens.
+   ============================================================ */
+
+/* Move #6 — Traffic-light pill row (gate state + last-flip ts).
+   Feature-flagged via localStorage["quanta.entry_gates_v2"] (default ON).
+   Operator A/B-disable: localStorage.removeItem(...); location.reload(); */
+.tlpill-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.tlpill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 20px;
+  padding: 0 8px;
+  background: var(--bg-inset);
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--t-2xs);
+  color: var(--fg-2);
+  letter-spacing: .02em;
+  cursor: pointer;
+  transition: border-color 120ms cubic-bezier(0.2, 0, 0, 1),
+              background 120ms cubic-bezier(0.2, 0, 0, 1);
+  user-select: none;
+}
+.tlpill:hover { border-color: var(--line-3); }
+.tlpill.pass  { border-color: var(--up-line);   background: var(--up-bg); }
+.tlpill.block { border-color: var(--down-line); background: var(--down-bg); }
+.tlpill.na    { border-color: var(--line-2);    background: var(--bg-inset); }
+.tlpill .tlp-name  { color: var(--fg-2); text-transform: lowercase; }
+.tlpill.pass  .tlp-name  { color: var(--fg-1); }
+.tlpill.block .tlp-name  { color: var(--fg-1); }
+.tlpill .tlp-glyph { font-weight: 600; line-height: 1; }
+.tlpill.pass  .tlp-glyph { color: var(--up); }
+.tlpill.block .tlp-glyph { color: var(--down); }
+.tlpill.na    .tlp-glyph { color: var(--fg-3); }
+.tlpill .tlp-ts { color: var(--fg-3); font-size: var(--t-2xs); }
+.tlpill.open { border-color: var(--accent-line); background: var(--accent-bg); }
+.tlpill-detail {
+  grid-column: 1 / -1;
+  margin: 4px 0 var(--s-1);
+  padding: 6px var(--s-3);
+  background: var(--bg-inset);
+  border-left: 2px solid var(--accent-line);
+  font-family: var(--mono);
+  font-size: var(--t-2xs);
+  color: var(--fg-2);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tlpill-detail .tlpd-name { color: var(--fg-1); }
+.tlpill-detail .tlpd-detail { color: var(--fg-3); }

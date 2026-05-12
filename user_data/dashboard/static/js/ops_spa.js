@@ -1285,6 +1285,101 @@
     });
   }
 
+  // ─────────────── Move #6 · Traffic-light pill row ────────────────────────
+  // Replacement layout for the per-pair gate-strip. Each pill shows:
+  //   [ regime ✓ 14m ]   (gate name · pass/fail glyph · time-since-last-flip)
+  // Click expands to show the underlying value vs threshold (existing detail).
+  //
+  // Feature-flagged via localStorage["quanta.entry_gates_v2"] (default ON).
+  // The legacy GateDotGrid is rendered next to it when the flag is OFF so the
+  // operator can A/B-test instantly:
+  //
+  //   localStorage.removeItem("quanta.entry_gates_v2"); location.reload();
+  //
+  // Flip-timestamp source: ops_spa.js's in-memory ring buffer (see
+  // gateFlipTracker below). The /api/ops/gates payload does NOT include a
+  // per-gate last_flip_ts field, so we derive it by diffing successive
+  // snapshots in the SPA. First-render falls through to "now".
+  //
+  // Time formatting: fmtAgoShort gives 5s / 14m / 2h / 1d — Bloomberg-tight.
+  function fmtAgoShort(ts) {
+    if (ts == null) return "—";
+    const ms = Date.now() - ts;
+    if (!Number.isFinite(ms) || ms < 0) return "now";
+    const s = Math.floor(ms / 1000);
+    if (s < 5)    return "now";
+    if (s < 60)   return s + "s";
+    if (s < 3600) return Math.floor(s / 60) + "m";
+    if (s < 86400)return Math.floor(s / 3600) + "h";
+    return Math.floor(s / 86400) + "d";
+  }
+
+  // Module-scope ring buffer keyed by pair+gate → last observed pass state +
+  // when that state was first seen. The map persists across renders so
+  // 10-second polls accumulate flip history; bounded by the active gate set
+  // so it cannot grow unbounded (a removed pair drops out within minutes).
+  const __gateFlipTracker = (function () {
+    // key = pair + "|" + gate. value = { state, since: <ms> }
+    const m = new Map();
+    return {
+      observe(pair, gate, state) {
+        const key = pair + "|" + gate;
+        const prev = m.get(key);
+        const now = Date.now();
+        if (!prev || prev.state !== state) {
+          m.set(key, { state, since: now });
+          return now;
+        }
+        return prev.since;
+      },
+      // GC every observe-sweep: caller passes the active key set, anything
+      // not in it gets dropped so dead pairs don't leak.
+      retain(activeKeys) {
+        if (m.size < 200) return;
+        for (const k of m.keys()) {
+          if (!activeKeys.has(k)) m.delete(k);
+        }
+      },
+    };
+  })();
+
+  function TrafficLightPillRow({ pair, gates }) {
+    const [open, setOpen] = useState(null);
+    // Observe flips for every gate this render. Side-effect-free: map writes
+    // only happen when state actually changed; otherwise we read the cached
+    // since-ms. This is safe to call during render (no setState).
+    const activeKeys = new Set();
+    const rows = (gates || []).map((g, gi) => {
+      activeKeys.add(pair + "|" + g.gate);
+      const since = __gateFlipTracker.observe(pair, g.gate, g.pass);
+      return Object.assign({}, g, { since });
+    });
+    __gateFlipTracker.retain(activeKeys);
+
+    return h("div", { className: "tlpill-row" },
+      rows.map((g, gi) => {
+        const cls = g.pass === true ? "pass" : g.pass === false ? "block" : "na";
+        const glyph = g.pass === true ? "✓" : g.pass === false ? "✕" : "·";
+        const isOpen = open === gi;
+        return h("span", {
+          key: gi,
+          className: "tlpill " + cls + (isOpen ? " open" : ""),
+          onClick: (e) => { e.stopPropagation(); setOpen(isOpen ? null : gi); },
+          title: g.gate + " — " + (g.pass === true ? "PASS" : g.pass === false ? "BLOCK" : "n/a")
+                 + (g.detail ? " · " + g.detail : ""),
+        },
+          h("span", { className: "tlp-name" }, g.gate),
+          h("span", { className: "tlp-glyph" }, glyph),
+          h("span", { className: "tlp-ts" }, fmtAgoShort(g.since))
+        );
+      }),
+      open !== null && rows[open] && h("div", { className: "tlpill-detail", key: "exp" },
+        h("span", { className: "tlpd-name" }, rows[open].gate),
+        h("span", { className: "tlpd-detail" }, rows[open].detail || "—")
+      )
+    );
+  }
+
   function EntryGatesLive({ data }) {
     const [expand, setExpand] = useState(null);
     const slot = slotState(data, "gates");
@@ -1361,8 +1456,18 @@
                 h("strong", { style: { color: "var(--fg-1)" } }, p.sym),
                 h("span", { className: "pill " + (p.regime === "trending_up" ? "up" : p.regime === "trending_down" ? "down" : "info"),
                   style: { height: 18, justifySelf: "start" } }, p.regime || "—"),
-                h("span", { style: { display: "inline-flex", gap: 4, alignItems: "center", flexWrap: "wrap" } },
-                  p.gates.map((g, gi) => h(GateDot, { key: gi, state: g.pass, label: g.gate, detail: g.detail }))),
+                // Move #6 · render Pill-row by default; legacy dot-grid when
+                // localStorage["quanta.entry_gates_v2"] is explicitly removed.
+                // Both code paths read the same p.gates data — no extra fetch.
+                (function () {
+                  let flag = true;
+                  try { flag = localStorage.getItem("quanta.entry_gates_v2") !== "0"; } catch (_) {}
+                  return flag
+                    ? h("span", { style: { display: "inline-flex", alignItems: "center" } },
+                        h(TrafficLightPillRow, { pair: p.sym, gates: p.gates }))
+                    : h("span", { style: { display: "inline-flex", gap: 4, alignItems: "center", flexWrap: "wrap" } },
+                        p.gates.map((g, gi) => h(GateDot, { key: gi, state: g.pass, label: g.gate, detail: g.detail })));
+                })(),
                 h("span", { className: "mono dim", style: { fontSize: "var(--t-2xs)" } },
                   (p.gates.length - p.blocking) + "/" + p.gates.length + " pass"),
                 h("span", { className: p.first_blocker ? "mono" : "dim", style: { fontSize: "var(--t-xs)", color: p.first_blocker ? "var(--c-down)" : undefined } },
