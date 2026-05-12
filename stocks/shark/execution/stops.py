@@ -83,6 +83,15 @@ def manage_stops(positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     api = _get_client()
     actions: list[dict[str, Any]] = []
 
+    # Load Shark's owned-symbols set once per call (Fix 3).
+    try:
+        from shared.subsystem_ownership import load_owned
+        _shark_owned: set[str] = load_owned("shark")
+    except Exception as exc:
+        logger.warning("[shark.stops] ownership lookup failed (%s) — degrading to asset_class-only mode", exc)
+        _shark_owned = set()
+    _ownership_active = bool(_shark_owned)
+
     for position in positions:
         symbol: str = position.get("symbol", "")
 
@@ -97,6 +106,17 @@ def manage_stops(positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "(asset_class=%s) — managed by wheel or other subsystem, "
                 "NOT Shark's concern",
                 symbol, asset_class,
+            )
+            continue
+
+        # Ownership gate (Shark/Wheel isolation, Fix 3): equity row but
+        # not in Shark's owned set — almost certainly a Wheel assigned
+        # share. Don't bolt a Shark trailing stop onto it.
+        if _ownership_active and symbol.upper() not in _shark_owned:
+            logger.warning(
+                "[shark.stops] skipping %s — equity but not in Shark's "
+                "owned set (probably opened by Wheel or another subsystem)",
+                symbol,
             )
             continue
 

@@ -134,6 +134,15 @@ def run(dry_run: bool = False) -> bool:
             logger.exception("Exit manager action failed for %s", symbol)
 
     # === PHASE 2: Legacy hard stop check (safety net) ===
+    # Load Shark's owned-symbols set once for the rest of the phase.
+    try:
+        from shared.subsystem_ownership import load_owned as _load_owned
+        _shark_owned: set[str] = _load_owned("shark")
+    except Exception as exc:
+        logger.warning("[shark.midday] ownership lookup failed (%s) — degrading to asset_class-only mode", exc)
+        _shark_owned = set()
+    _ownership_active = bool(_shark_owned)
+
     for pos in positions:
         symbol = pos["symbol"]
         if symbol in cut_symbols:
@@ -150,6 +159,15 @@ def run(dry_run: bool = False) -> bool:
                 "(asset_class=%s) — managed by wheel or other subsystem, "
                 "NOT Shark's concern",
                 symbol, asset_class,
+            )
+            continue
+
+        # Ownership gate (Shark/Wheel isolation, Fix 3).
+        if _ownership_active and symbol.upper() not in _shark_owned:
+            logger.warning(
+                "[shark.midday.phase2] skipping %s — equity but not in "
+                "Shark's owned set (probably opened by Wheel or another "
+                "subsystem)", symbol,
             )
             continue
 
@@ -233,6 +251,15 @@ def run(dry_run: bool = False) -> bool:
             )
             continue
 
+        # Ownership gate (Shark/Wheel isolation, Fix 3).
+        if _ownership_active and symbol.upper() not in _shark_owned:
+            logger.warning(
+                "[shark.midday.phase4] skipping %s — equity but not in "
+                "Shark's owned set",
+                symbol,
+            )
+            continue
+
         try:
             bars = get_bars(symbol, timeframe="1Day", limit=30)
             technicals = compute_indicators(bars)
@@ -259,6 +286,15 @@ def run(dry_run: bool = False) -> bool:
                 "[shark.midday.phase5] skipping non-equity position %s "
                 "(asset_class=%s) — thesis-break exits are equity-only",
                 symbol, asset_class,
+            )
+            continue
+
+        # Ownership gate (Shark/Wheel isolation, Fix 3).
+        if _ownership_active and symbol.upper() not in _shark_owned:
+            logger.warning(
+                "[shark.midday.phase5] skipping %s — equity but not in "
+                "Shark's owned set",
+                symbol,
             )
             continue
 

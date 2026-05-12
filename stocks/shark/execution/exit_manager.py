@@ -52,6 +52,19 @@ def evaluate_exits(
     """
     actions: list[dict[str, Any]] = []
 
+    # Load Shark's owned-symbols set once per call (cheap file read).
+    # Empty set means cold-start or unbootstrapped — in that case we
+    # fall back to "trust asset_class only" to avoid bricking the
+    # operator who hasn't run migrate_ownership_bootstrap yet. Once the
+    # bootstrap is run, this becomes the real cross-subsystem firewall.
+    try:
+        from shared.subsystem_ownership import load_owned
+        _shark_owned: set[str] = load_owned("shark")
+    except Exception as exc:
+        logger.warning("[shark.exit_manager] ownership lookup failed (%s) — degrading to asset_class-only mode", exc)
+        _shark_owned = set()
+    _ownership_active = bool(_shark_owned)
+
     for pos in positions:
         symbol = pos.get("symbol", "UNKNOWN")
 
@@ -68,6 +81,17 @@ def evaluate_exits(
                 "(asset_class=%s) — managed by wheel or other subsystem, "
                 "NOT Shark's concern",
                 symbol, asset_class,
+            )
+            continue
+
+        # Ownership gate (Shark/Wheel isolation, Fix 3): equity row but
+        # not opened by Shark — probably a Wheel-assignment share. Skip.
+        # Only enforced once the ownership set is non-empty (bootstrapped).
+        if _ownership_active and symbol.upper() not in _shark_owned:
+            logger.warning(
+                "[shark.exit_manager] skipping %s — equity but not in Shark's "
+                "owned set (probably opened by Wheel or another subsystem)",
+                symbol,
             )
             continue
 
