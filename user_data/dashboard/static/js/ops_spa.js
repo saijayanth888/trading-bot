@@ -193,7 +193,19 @@
     // 22 in-flight fetches leak per unmount (page tab switch, hot reload).
     const ctrlRef = useRef(null);
 
-    const fetchOne = useCallback((key, urlOrSpec, signal) => {
+    // Tier C P1-3: batch many parallel fetches into one setState per
+    // refresh-cycle. Previously each of the 22 FAST_ENDPOINTS' fetches
+    // resolved at different times and each called setState → 22 ops-page
+    // renders per 10s tick. Now resolves are accumulated in a local object
+    // and flushed in a single setState after Promise.allSettled finishes
+    // for that batch.
+    //
+    // INVARIANT: setState must be called AT MOST ONCE per refetchFast /
+    // refetchSlow call (and at most twice total per tick when both fast +
+    // slow fire on mount). Future edits: do not move setState back inside
+    // the per-fetch then/catch.
+
+    const buildOne = useCallback((key, urlOrSpec, signal) => {
       const isSpec = typeof urlOrSpec === "object";
       const url = isSpec ? urlOrSpec.url : urlOrSpec;
       const opts = isSpec
@@ -203,31 +215,48 @@
             signal }
         : { signal };
       return safeJsonFetch(url, opts)
-        .then(env => {
-          if (signal && signal.aborted) return;
-          setState(s => Object.assign({}, s, {
-            [key]: env,
-            [key + "_fetched_at"]: new Date().toISOString(),
-            [key + "_error"]: null,
-          }));
-        })
-        .catch(err => {
+        .then(env => ({ key, ok: true, env }))
+        .catch(err => ({ key, ok: false, err }));
+    }, []);
+
+    const flushBatch = useCallback((results) => {
+      const patch = {};
+      const now = new Date().toISOString();
+      let touched = 0;
+      results.forEach(rv => {
+        // Skip the resolved-but-aborted case
+        if (!rv) return;
+        const { key, ok, env, err } = rv;
+        if (ok) {
+          patch[key] = env;
+          patch[key + "_fetched_at"] = now;
+          patch[key + "_error"] = null;
+          touched++;
+        } else {
           if (isAbortError(err)) return;
-          setState(s => Object.assign({}, s, {
-            [key + "_fetched_at"]: new Date().toISOString(),
-            [key + "_error"]: String(err && err.message || err),
-          }));
-        });
+          patch[key + "_fetched_at"] = now;
+          patch[key + "_error"] = String(err && err.message || err);
+          touched++;
+        }
+      });
+      if (touched === 0) return;
+      setState(s => Object.assign({}, s, patch));
     }, []);
 
     const refetchFast = useCallback(() => {
       const sig = ctrlRef.current && ctrlRef.current.signal;
-      Object.entries(FAST_ENDPOINTS).forEach(([k, u]) => fetchOne(k, u, sig));
-    }, [fetchOne]);
+      const ps = Object.entries(FAST_ENDPOINTS).map(([k, u]) => buildOne(k, u, sig));
+      return Promise.allSettled(ps).then(arr =>
+        flushBatch(arr.map(s => s.status === "fulfilled" ? s.value : null))
+      );
+    }, [buildOne, flushBatch]);
     const refetchSlow = useCallback(() => {
       const sig = ctrlRef.current && ctrlRef.current.signal;
-      Object.entries(SLOW_ENDPOINTS).forEach(([k, spec]) => fetchOne(k, spec, sig));
-    }, [fetchOne]);
+      const ps = Object.entries(SLOW_ENDPOINTS).map(([k, spec]) => buildOne(k, spec, sig));
+      return Promise.allSettled(ps).then(arr =>
+        flushBatch(arr.map(s => s.status === "fulfilled" ? s.value : null))
+      );
+    }, [buildOne, flushBatch]);
 
     useEffect(() => {
       const ctrl = new AbortController();
