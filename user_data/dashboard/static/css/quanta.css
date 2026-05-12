@@ -788,11 +788,46 @@ table.t .row-strike td { color: var(--fg-3); }
   align-self: flex-start;
 }
 
+.af-titlerow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 18px;
+}
 .af-title {
   font-size: var(--t-xs);
   color: var(--fg-1);
   letter-spacing: .02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1 1 auto;
+  min-width: 0;
 }
+/* Role-monogram avatar — 18×18 square, 10px tabular mono glyph, role-tinted
+   background. Subtle: 12% alpha fill so it reads as a chip not a button. */
+.af-avatar {
+  flex: 0 0 18px;
+  height: 18px;
+  width: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-2);
+  color: var(--fg-1);
+  background: var(--bg-card-2);
+  user-select: none;
+}
+.af-avatar-up      { color: var(--up);     border-color: var(--up-line);     background: color-mix(in srgb, var(--up) 12%, transparent); }
+.af-avatar-down    { color: var(--down);   border-color: var(--down-line);   background: color-mix(in srgb, var(--down) 12%, transparent); }
+.af-avatar-info    { color: var(--info);   border-color: var(--info-line);   background: color-mix(in srgb, var(--info) 12%, transparent); }
+.af-avatar-warn    { color: var(--warn);   border-color: var(--warn-line);   background: color-mix(in srgb, var(--warn) 12%, transparent); }
+.af-avatar-neutral { color: var(--fg-2);   border-color: var(--line-2);      background: var(--bg-card-2); }
 .af-model {
   font-size: var(--t-2xs);
   color: var(--fg-3);

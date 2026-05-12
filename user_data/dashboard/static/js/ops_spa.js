@@ -1628,12 +1628,14 @@
                 h("strong", { style: { color: "var(--fg-1)" } }, p.sym),
                 h("span", { className: "pill " + (p.regime === "trending_up" ? "up" : p.regime === "trending_down" ? "down" : "info"),
                   style: { height: 18, justifySelf: "start" } }, p.regime || "—"),
-                // Move #6 · render Pill-row by default; legacy dot-grid when
-                // localStorage["quanta.entry_gates_v2"] is explicitly removed.
+                // Move #6 · legacy gate-dot grid is now the DEFAULT (operator
+                // feedback 2026-05-12: pill row felt cluttered next to the
+                // expanded detail rows). Opt-in to the v2 pill view with:
+                //   localStorage.setItem("quanta.entry_gates_v2", "1"); location.reload();
                 // Both code paths read the same p.gates data — no extra fetch.
                 (function () {
-                  let flag = true;
-                  try { flag = localStorage.getItem("quanta.entry_gates_v2") !== "0"; } catch (_) {}
+                  let flag = false;
+                  try { flag = localStorage.getItem("quanta.entry_gates_v2") === "1"; } catch (_) {}
                   return flag
                     ? h("span", { style: { display: "inline-flex", alignItems: "center" } },
                         h(TrafficLightPillRow, { pair: p.sym, gates: p.gates }))
@@ -3541,6 +3543,25 @@
     return "";
   }
 
+  // Per-role agent avatar — 18×18 monogram chip with role-tinted background,
+  // shown next to the box title so the operator can identify the role at a
+  // glance without reading the lowercase snake_case label. Monograms match
+  // the operator's mental model:
+  //   regime_tagger       → "RT"  (gray)
+  //   indicator_selector  → "IS"  (gray)
+  //   bull_debater        → "B↑"  (green)
+  //   bear_debater        → "B↓"  (red)
+  //   arbiter             → "AR"  (blue)
+  //   reflector           → "RF"  (amber)
+  const _AF_AVATARS = {
+    regime_tagger:      { glyph: "RT", tone: "neutral" },
+    indicator_selector: { glyph: "IS", tone: "neutral" },
+    bull_debater:       { glyph: "B↑", tone: "up" },
+    bear_debater:       { glyph: "B↓", tone: "down" },
+    arbiter:            { glyph: "AR", tone: "info" },
+    reflector:          { glyph: "RF", tone: "warn" },
+  };
+
   // Strip JSON syntax noise from a response gist so it renders as flat
   // human-readable text. Bot responses often start with `{` and embed
   // quoted keys; raw rendering looks like `{ "grade": "C", "pattern":...`
@@ -3588,7 +3609,16 @@
     },
       // Title row stays for every box so the strip is identifiable when
       // empty too. Everything else collapses on the empty path.
-      h("div", { className: "af-title" }, role),
+      (function () {
+        const av = _AF_AVATARS[role];
+        return h("div", { className: "af-titlerow" },
+          av && h("span", {
+            className: "af-avatar af-avatar-" + av.tone,
+            "aria-hidden": "true",
+          }, av.glyph),
+          h("span", { className: "af-title" }, role)
+        );
+      })(),
       empty
         ? // Single-line empty state — keeps the box visible in the flow
           // but visually quiet. Operator can still click to open the
