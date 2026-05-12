@@ -1,10 +1,8 @@
 """Smoke tests that every subpackage imports cleanly.
 
-These exist so the package's import graph is exercised; placeholders are
-filled in by sibling build agents (post-reconciliation we have execution,
-exchanges, live, risk, models, observability, util filled in). Foundation-
-owned placeholders (agents/backtest/hermes/ledger/lora) still have an
-empty ``__all__``.
+These exist so the package's import graph is exercised. Post wave-2 the
+agents/backtest/hermes/ledger packages are filled in; only ``lora`` is
+still a placeholder until the trainer integration lands.
 """
 
 from __future__ import annotations
@@ -13,19 +11,19 @@ import importlib
 
 import pytest
 
-# Foundation-owned placeholders — still empty post-reconciliation.
+# Foundation-owned placeholders — still empty post wave-2.
 PLACEHOLDER_PACKAGES = [
-    "quanta_core.agents",
-    "quanta_core.backtest",
-    "quanta_core.hermes",
-    "quanta_core.ledger",
     "quanta_core.lora",
 ]
 
-# Filled-in packages from sibling build agents.
+# Filled-in packages from sibling build agents (wave 1 + wave 2).
 FILLED_PACKAGES = [
+    "quanta_core.agents",
+    "quanta_core.backtest",
     "quanta_core.exchanges",
     "quanta_core.execution",
+    "quanta_core.hermes",
+    "quanta_core.ledger",
     "quanta_core.live",
     "quanta_core.models",
     "quanta_core.observability",
