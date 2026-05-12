@@ -85,6 +85,21 @@ def manage_stops(positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     for position in positions:
         symbol: str = position.get("symbol", "")
+
+        # Asset-class gate (Shark/Wheel isolation, 2026-05-12 leak):
+        # Trailing-stop sell orders on equities don't apply to options.
+        # Wheel-owned short puts/calls must not have a Shark trailing stop
+        # bolted on; that would cancel Wheel's own exit logic.
+        asset_class = position.get("asset_class", "us_equity")
+        if asset_class != "us_equity":
+            logger.warning(
+                "[shark.stops] skipping non-equity position %s "
+                "(asset_class=%s) — managed by wheel or other subsystem, "
+                "NOT Shark's concern",
+                symbol, asset_class,
+            )
+            continue
+
         qty: int = int(position.get("qty", 0))
         current_price: float = float(position.get("current_price", 0))
         unrealized_plpc: float = float(position.get("unrealized_plpc", 0))
