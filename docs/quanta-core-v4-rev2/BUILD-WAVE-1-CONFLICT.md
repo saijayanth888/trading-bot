@@ -1,10 +1,11 @@
 # V4 Build Wave 1 — Status Report (morning review)
 
-**Status as of 2026-05-12 ~22:45 ET:** **5 of 6** build agents landed.
-**Three at root-level layout** (execution, live, risk) — **two nested**
-(foundation, models). Auto-merge halted; manual reconciliation needed
-in morning. Reconciliation is mechanical: relocate the 2 nested agents'
-content from `quanta_core/src/quanta_core/` → `src/quanta_core/`.
+**Status as of 2026-05-12 ~23:05 ET:** **ALL 6 build agents landed.**
+**Four at root-level layout** (execution, live, risk, exchanges) —
+**two nested** (foundation, models). Auto-merge halted; manual
+reconciliation needed in morning. Reconciliation is mechanical:
+relocate the 2 nested agents' content from
+`quanta_core/src/quanta_core/` → `src/quanta_core/`.
 
 **Bonus**: LINK retrain completed at 22:25 ET → freqtrade restarted →
 healthy → 5-min regression watch underway. All 4 previously-quarantined
@@ -19,10 +20,11 @@ pairs (DOGE/XRP/AVAX/LINK) now have valid TFT models.
 | 5 | Risk | `feat/v4-build-risk` (`3926cbb`) | ✓ root | 113 ✓ | 98.25% | clean | 1,890 / 1,654 |
 | 1 | Foundation | `feat/v4-build-foundation` (`cb87f3a`) | ✗ NESTED | 90 ✓ | 100% | clean | 892 / 1,095 |
 | 4 | Models | `feat/v4-build-models` (`44522f4`) | ✗ NESTED | 78 ✓ | 94% (100% on validate_artifact) | clean | ~1,400 / ~900 |
+| 2 | Exchanges | `feat/v4-build-exchanges` (`837a2f4`) | ✓ root | 110 ✓ | 89.84% | clean | 1,789 / 1,572 |
 
-**Vote tally: 3 root-level · 2 nested. Reconcile to root-level (doc #10 spec).**
+**Final tally: 4 root-level · 2 nested. Reconcile to root-level (doc #10 spec, dominant vote).**
 
-Still in flight at 22:45 ET: agent #2 (exchanges) — the last one.
+**Wave 1 totals**: 562 tests passing · ~7,562 lines of source · ~8,065 lines of tests · ZERO mypy/ruff issues across 6 modules.
 
 ## Highlights worth surfacing
 
@@ -52,8 +54,16 @@ Still in flight at 22:45 ET: agent #2 (exchanges) — the last one.
 - **`validate_artifact` 100% line coverage** (50 LOC, 0 missed) — the function that prevents today's 789-byte stub bug from recurring
 - 70% port from `TFTModel.py` — architecture verbatim, training loop, predict pipeline
 - **Dropped**: GPU memory-fraction cap, quarantine scan, `sys.modules` proxy, per-pair resume checkpoint, all FreqAI inheritance
-- **Replaced**: `tft_pickle.py` + monolithic `torch.save` → safetensors weights + JSON metadata (separate files; matches doc #10 §4)
+- **Replaced**: legacy serializer + monolithic `torch.save` → safetensors weights + JSON metadata (separate files; matches doc #10 §4)
 - Used `httpx.MockTransport` for Ollama tests (vcrpy not installed in agent env)
+
+### #2 Exchanges
+- `AlpacaExchange.get_positions()` surfaces **`asset_class`** per position (today's regression-tested bug closed at the source)
+- One `mode='paper'|'live'` flag drives SDK paper/live selection (the ONE flag from DESIGN-LOCK §5)
+- `_SequenceTracker` for Coinbase WS — gap detection ignores out-of-order frames, tracks per-channel/product
+- `idempotency.py`: deterministic `qc4-{venue}-{strategy_id}-{uuid7_hex}` — hypothesis-property-tested for determinism + monotonicity + schema round-trip
+- Adapters NEVER retry — surface `RateLimited(retry_after_s=...)` for the future `ExecutionEngine` to decide backoff
+- 7 cassettes (4 vcrpy YAML for Alpaca + 3 JSON body for Coinbase JWT-signing path)
 
 ## Tomorrow morning recipe
 
