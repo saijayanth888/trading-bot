@@ -1131,10 +1131,36 @@
     ];
     useEffect(() => {
       const navItems = items.filter((it) => !it.sect);
+      // Tier C P1-4: extend the focused-element whitelist so digit 1-9
+      // doesn't yank navigation while a button/link/role=button is the
+      // active focus. Previously only INPUT/TEXTAREA/SELECT/contentEditable
+      // were guarded → pressing "2" with a hold-to-confirm button focused
+      // would nav-jump mid-action. Also honor an explicit opt-in attribute
+      // `data-no-hotkey` so components that WANT to swallow digit keys
+      // (e.g. a numeric-spinner that isn't an <input>) can mark themselves.
+      //
+      // INVARIANT: digit 1-9 must NOT fire navigation when an interactive
+      // control owns focus. Future edits should add new control tag names
+      // to NAV_GUARD_TAGS, never remove members.
+      const NAV_GUARD_TAGS = new Set([
+        "INPUT", "TEXTAREA", "SELECT",
+        "BUTTON", "A",
+      ]);
+      const isHotkeyGuarded = (el) => {
+        if (!el) return false;
+        if (NAV_GUARD_TAGS.has(el.tagName)) return true;
+        if (el.isContentEditable) return true;
+        // Explicit opt-in (data-no-hotkey) bubbles up; e.g. a custom
+        // numeric stepper wrapping a <span> can mark its container.
+        if (typeof el.closest === "function" && el.closest("[data-no-hotkey]")) return true;
+        // ARIA role=button covers div/span widgets acting as buttons.
+        const role = el.getAttribute && el.getAttribute("role");
+        if (role === "button" || role === "textbox" || role === "combobox" ||
+            role === "searchbox" || role === "spinbutton") return true;
+        return false;
+      };
       const onKey = (e) => {
-        const tag = e.target && e.target.tagName;
-        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-        if (e.target && e.target.isContentEditable) return;
+        if (isHotkeyGuarded(e.target)) return;
         if (e.metaKey || e.ctrlKey || e.altKey) return;
         const n = parseInt(e.key, 10);
         if (n >= 1 && n <= navItems.length) {
