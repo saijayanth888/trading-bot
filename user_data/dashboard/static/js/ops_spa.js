@@ -1380,6 +1380,95 @@
     );
   }
 
+  // ─────────────── Move #7 · Global blocker banner ─────────────────────────
+  // Single-line summary mounted under the topbar, above TodayScoreboard.
+  // Aggregates /api/ops/gates data into one prominent line:
+  //
+  //   🚦 6/8 pairs blocked on regime=trending_down  ·  2/8 blocked on
+  //      vol_floor  ·  newest blocker: tft<0.40 (12m ago)
+  //
+  // Click expands to a per-pair breakdown (uses the same p.gates data the
+  // EntryGatesLive modal already renders). When zero blockers exist, the
+  // component returns null and consumes zero footprint.
+  //
+  // ZERO new endpoint calls — reads from the existing data.gates slot the
+  // SPA already polls every 10s.
+  function BlockerBanner({ data }) {
+    const [expand, setExpand] = useState(false);
+    const slot = slotState(data, "gates");
+    if (slot.phase !== "ok") return null;
+    const env = envelopeData(slot.env) || {};
+    const crypto = env.crypto || [];
+    const stocks = env.stocks || [];
+    const all = crypto.concat(stocks).map(r => ({
+      sym: r.pair,
+      blocking: r.n_blocking || 0,
+      first_blocker: r.first_blocker,
+      gates: r.gates || [],
+    }));
+    const total = all.length;
+    const blocked = all.filter(p => (p.blocking || 0) > 0);
+    if (blocked.length === 0 || total === 0) return null;
+
+    // Tally most common blockers across the universe.
+    const counts = {};
+    blocked.forEach(p => {
+      (p.gates || []).filter(g => g.pass === false).forEach(g => {
+        counts[g.gate] = (counts[g.gate] || 0) + 1;
+      });
+    });
+    const topCauses = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 3);
+
+    // "Newest blocker" — read flip-time from the same ring buffer Move #6
+    // uses. Lowest "since" (most recent flip to blocked) wins.
+    let newest = null;
+    blocked.forEach(p => {
+      (p.gates || []).filter(g => g.pass === false).forEach(g => {
+        const since = __gateFlipTracker.observe(p.sym, g.gate, g.pass);
+        if (!newest || since > newest.since) newest = { gate: g.gate, since, sym: p.sym };
+      });
+    });
+
+    return h(F, null,
+      h("div", {
+        className: "blocker-banner",
+        role: "button",
+        tabIndex: 0,
+        onClick: () => setExpand(!expand),
+        onKeyDown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setExpand(!expand); } },
+        title: "Click for per-pair breakdown",
+      },
+        h("span", { className: "bb-glyph", "aria-hidden": "true" }, "🚦"),
+        h("span", { className: "bb-summary" },
+          h("span", { className: "bb-warn" }, blocked.length + "/" + total),
+          " pairs blocked",
+          topCauses.length > 0 && h(F, null,
+            h("span", { className: "bb-sep" }, "·"),
+            topCauses.map(([cause, n], i) => h(F, { key: cause },
+              i > 0 && h("span", { className: "bb-sep" }, "·"),
+              h("span", null, n + "/" + total + " on "),
+              h("span", { className: "bb-warn" }, cause)
+            ))
+          ),
+          newest && h(F, null,
+            h("span", { className: "bb-sep" }, "·"),
+            h("span", { className: "bb-dim" }, "newest blocker: "),
+            h("span", null, newest.gate),
+            h("span", { className: "bb-dim" }, " (" + fmtAgoShort(newest.since) + " ago)")
+          )
+        ),
+        h("span", { className: "bb-caret" }, expand ? "▾" : "▸")
+      ),
+      expand && h("div", { className: "blocker-banner-detail" },
+        blocked.map(p => h("div", { key: p.sym, className: "bb-row" },
+          h("span", { className: "bb-sym" }, p.sym),
+          " ",
+          h("span", { className: "bb-cause" }, p.first_blocker || ("× " + p.blocking))
+        ))
+      )
+    );
+  }
+
   function EntryGatesLive({ data }) {
     const [expand, setExpand] = useState(null);
     const slot = slotState(data, "gates");
@@ -3745,6 +3834,10 @@
             h("span", { className: "tb-spacer", style: { flex: 1 } }),
             h("span", { className: "mono dim", style: { fontSize: "var(--t-xs)" } }, "scroll · sections snap to view")
           ),
+          // Move #7 · BLOCKER BANNER — global "why isn't anything trading?"
+          // summary. Only renders when blockers exist; zero footprint at rest.
+          // Reads from the existing data.gates slot — no new endpoint.
+          h(BlockerBanner, { data }),
           // TODAY SCOREBOARD — operator's at-a-glance: capital, day P&L,
           // trades done, open positions, drawdown. Mounted ABOVE the hero
           // so it's the first thing the eye lands on (top of the page).

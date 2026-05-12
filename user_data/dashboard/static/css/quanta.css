@@ -794,3 +794,50 @@ table.t .row-strike td { color: var(--fg-3); }
 }
 .tlpill-detail .tlpd-name { color: var(--fg-1); }
 .tlpill-detail .tlpd-detail { color: var(--fg-3); }
+
+/* Move #7 — Global "why isn't anything trading?" banner.
+   Mounted under the topbar above TodayScoreboard. Only renders when
+   blockers exist — zero blockers = no banner = no footprint. */
+.blocker-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: 6px var(--s-4);
+  margin: 0 0 var(--s-2) 0;
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  border: 1px solid var(--warn-line);
+  border-radius: var(--r-base);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--t-xs);
+  color: var(--fg-1);
+  letter-spacing: .02em;
+  cursor: pointer;
+  transition: background 120ms cubic-bezier(0.2, 0, 0, 1),
+              border-color 120ms cubic-bezier(0.2, 0, 0, 1);
+}
+.blocker-banner:hover {
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  border-color: var(--warn);
+}
+.blocker-banner .bb-glyph { font-size: var(--t-md); line-height: 1; flex: 0 0 auto; }
+.blocker-banner .bb-summary { flex: 1; min-width: 0; }
+.blocker-banner .bb-sep { color: var(--fg-3); margin: 0 6px; }
+.blocker-banner .bb-warn { color: var(--warn); }
+.blocker-banner .bb-dim  { color: var(--fg-3); }
+.blocker-banner .bb-caret { color: var(--fg-3); font-size: var(--t-xs); }
+.blocker-banner-detail {
+  margin: var(--s-1) 0 var(--s-2);
+  padding: var(--s-2) var(--s-4);
+  background: var(--bg-card);
+  border: 1px solid var(--line-1);
+  border-radius: var(--r-base);
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 2px var(--s-3);
+}
+.blocker-banner-detail .bb-row { color: var(--fg-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.blocker-banner-detail .bb-row .bb-sym { color: var(--fg-1); }
+.blocker-banner-detail .bb-row .bb-cause { color: var(--warn); }
