@@ -1,10 +1,14 @@
 # V4 Build Wave 1 — Status Report (morning review)
 
-**Status as of 2026-05-12 ~22:25 ET:** **4 of 6** build agents landed.
-**Three at root-level layout** (execution, live, risk) — **one nested**
-(foundation). Auto-merge halted; manual reconciliation needed in morning.
-Reconciliation is simple — just relocate foundation's content from
-`quanta_core/src/quanta_core/` → `src/quanta_core/`.
+**Status as of 2026-05-12 ~22:45 ET:** **5 of 6** build agents landed.
+**Three at root-level layout** (execution, live, risk) — **two nested**
+(foundation, models). Auto-merge halted; manual reconciliation needed
+in morning. Reconciliation is mechanical: relocate the 2 nested agents'
+content from `quanta_core/src/quanta_core/` → `src/quanta_core/`.
+
+**Bonus**: LINK retrain completed at 22:25 ET → freqtrade restarted →
+healthy → 5-min regression watch underway. All 4 previously-quarantined
+pairs (DOGE/XRP/AVAX/LINK) now have valid TFT models.
 
 ## Landed agent inventory
 
@@ -14,10 +18,11 @@ Reconciliation is simple — just relocate foundation's content from
 | 3 | Live | `feat/v4-build-live` (`86e1b4e`) | ✓ root | 37 ✓ | 96% | clean | 1,516 / 1,182 |
 | 5 | Risk | `feat/v4-build-risk` (`3926cbb`) | ✓ root | 113 ✓ | 98.25% | clean | 1,890 / 1,654 |
 | 1 | Foundation | `feat/v4-build-foundation` (`cb87f3a`) | ✗ NESTED | 90 ✓ | 100% | clean | 892 / 1,095 |
+| 4 | Models | `feat/v4-build-models` (`44522f4`) | ✗ NESTED | 78 ✓ | 94% (100% on validate_artifact) | clean | ~1,400 / ~900 |
 
-**Vote tally: 3 root-level · 1 nested. Reconcile to root-level (doc #10 spec).**
+**Vote tally: 3 root-level · 2 nested. Reconcile to root-level (doc #10 spec).**
 
-Still in flight at 22:25 ET: agents #2 (exchanges), #4 (models).
+Still in flight at 22:45 ET: agent #2 (exchanges) — the last one.
 
 ## Highlights worth surfacing
 
@@ -42,6 +47,13 @@ Still in flight at 22:25 ET: agents #2 (exchanges), #4 (models).
 - 90 tests across 5 files
 - Notable design: Strategy ABC is sync (not async per doc #6) — operator-locked from DESIGN-LOCK §5; preserves backtest determinism
 - Decimal import at runtime (not TYPE_CHECKING) — required by Pydantic v2 forward-ref resolution
+
+### #4 Models
+- **`validate_artifact` 100% line coverage** (50 LOC, 0 missed) — the function that prevents today's 789-byte stub bug from recurring
+- 70% port from `TFTModel.py` — architecture verbatim, training loop, predict pipeline
+- **Dropped**: GPU memory-fraction cap, quarantine scan, `sys.modules` proxy, per-pair resume checkpoint, all FreqAI inheritance
+- **Replaced**: `tft_pickle.py` + monolithic `torch.save` → safetensors weights + JSON metadata (separate files; matches doc #10 §4)
+- Used `httpx.MockTransport` for Ollama tests (vcrpy not installed in agent env)
 
 ## Tomorrow morning recipe
 
