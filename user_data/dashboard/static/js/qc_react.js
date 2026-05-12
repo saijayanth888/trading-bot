@@ -990,6 +990,17 @@
     // start time. Earlier this was page-load time, which made the pill
     // read "0h 0m" every refresh — not useful.
     const [uptime, setUptime] = useState("—");
+    // Tier C P1-8: track freqtrade up/down + last-good uptime timestamp.
+    // When /api/ops/uptime reports { status: "down" } (freqtrade crashed
+    // or hasn't started yet) we MUST NOT keep rendering the stale
+    // uptime_s — that lies to the operator about service health. Render
+    // an explicit "FT down" pill instead, with a tooltip showing the
+    // last-good timestamp so they know how stale the previous reading is.
+    //
+    // INVARIANT: when ftDown is true, the uptime pill MUST render the
+    // "FT down" affordance — never the cached numeric uptime.
+    const [ftDown, setFtDown] = useState(false);
+    const [uptimeFetchedAt, setUptimeFetchedAt] = useState(null);
     // Equity/mode/ftUp are derived from props when provided; otherwise
     // populated by the local-fallback fetch below.
     const [equityLocal, setEquityLocal] = useState({ value: null, deltaPct: null });
@@ -1007,15 +1018,24 @@
           const j = await r.json().catch(() => ({}));
           if (ctrl.signal.aborted) return;
           const ft = (j && j.data && j.data.freqtrade) || {};
-          if (typeof ft.uptime_s === "number") {
+          // P1-8: explicit down-state handling. status:"down" OR up:false
+          // means "do not trust uptime_s" — show the down pill instead.
+          const status = String(ft.status || "").toLowerCase();
+          const isDown = status === "down" || ft.up === false;
+          setFtDown(isDown);
+          if (!isDown && typeof ft.uptime_s === "number") {
             const s = ft.uptime_s;
             const d = Math.floor(s / 86400);
             const hh = Math.floor((s % 86400) / 3600);
             const m = Math.floor((s % 3600) / 60);
             setUptime(d > 0 ? `${d}d ${hh}h ${m}m` : (hh > 0 ? `${hh}h ${m}m` : `${m}m`));
-          } else {
+            setUptimeFetchedAt(new Date());
+          } else if (!isDown) {
             setUptime("—");
           }
+          // When isDown we deliberately do NOT clobber the cached uptime
+          // value — uptimeFetchedAt still points at the last clean read
+          // so the tooltip can surface "last good …" for the operator.
         } catch (e) { if (e && e.name !== "AbortError") { /* ignore */ } }
       };
       refreshUptime();
@@ -1144,13 +1164,25 @@
       h("div", { className: "tb-divider" }),
       h(
         "div",
-        { className: "tb-group" },
+        {
+          className: "tb-group",
+          // P1-8: surface last-good uptime timestamp on hover when freqtrade
+          // is down, so operator knows how stale the previous reading is.
+          title: ftDown && uptimeFetchedAt
+            ? ("last good uptime " + uptimeFetchedAt.toLocaleTimeString() + " ET")
+            : undefined,
+        },
         h(
           "span",
           { className: "dim2 mono", style: { fontSize: "var(--t-xs)", letterSpacing: ".08em" } },
           "BOT UP"
         ),
-        h("span", { className: "num" }, uptime)
+        // P1-8: when ftDown, render the explicit down pill. Previously
+        // the stale uptime_s would keep ticking on screen forever.
+        ftDown
+          ? h("span", { className: "pill down", style: { fontFamily: "var(--mono)" } },
+              h("span", { className: "dot down pulse" }), " FT down")
+          : h("span", { className: "num" }, uptime)
       ),
       h("div", { className: "tb-divider" }),
       h(
