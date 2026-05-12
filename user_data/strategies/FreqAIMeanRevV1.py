@@ -441,6 +441,12 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
     # cadence as _missing_pred_cols_logged so the operator gets a single
     # confirmation per pair per process lifetime when fallback fires.
     _tft_blind_logged: set = set()
+    # Per-pair latch for the freqai historic_predictions.pkl `date_pred`
+    # dtype migration. See _normalize_historic_predictions_dtype for the
+    # full root-cause story; we touch a given pair's frame at most once
+    # per process lifetime so the hot path stays O(1) after the first
+    # coercion.
+    _hp_dtype_normalized: set = set()
 
     # ------------------------------------------------------------------
     # FreqAI feature engineering
@@ -1072,7 +1078,97 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
                 pass
             return dataframe
 
+    def _normalize_historic_predictions_dtype(self, pair: str) -> None:
+        """Coerce ``date_pred`` in freqai's per-pair historic predictions frame
+        to ``datetime64[ms, UTC]`` so the backtest merge in
+        ``freqai_interface.start_backtesting_from_historic_predictions``
+        (left_on=date, right_on=date_pred) does not blow up on a dtype
+        mismatch.
+
+        Root cause: freqai's ``data_drawer.append_model_predictions`` appends
+        a per-candle row by concatenating a ``np.zeros((1, len(columns)))``
+        DataFrame to the existing per-pair frame. The zeros DataFrame is all
+        float64; when concatenated with the existing datetime64[ns, UTC]
+        ``date_pred`` column, pandas demotes the merged column to ``object``
+        dtype because the per-cell types are heterogenous (Timestamp + 0.0).
+        Subsequent ``df.iloc[-1, date_pred_loc] = Timestamp(...)`` writes
+        leave the column as object-dtype-with-Timestamps forever.
+
+        That object column is what gets saved to historic_predictions.pkl.
+        Live mode tolerates it (freqai converts via ``pd.to_datetime`` inside
+        ``set_initial_historic_predictions``), but ``--freqai-backtest-live-models``
+        merges the saved frame directly against the incoming candle dataframe
+        (datetime64[ms, UTC] from feather) and pandas raises
+        ``ValueError: You are trying to merge on datetime64[ms, UTC] and
+        object columns for key 'date'.``
+
+        We cannot patch upstream freqai (would block container updates), so
+        we coerce at the consumer side. The coercion is:
+          - idempotent: a per-process set ensures we touch each pair at most
+            once per restart;
+          - safe in live mode: the incoming Timestamps are already UTC-aware,
+            so ``pd.to_datetime(..., utc=True)`` is an identity transform on
+            the values, only the column-level dtype changes;
+          - explicit ``datetime64[ms, UTC]`` (not [ns]) to match the dtype
+            pandas/feather emits for the strategy's ``date`` column on
+            Python 3.14 / pandas 2.2+. Mixing [ns] vs [ms] would raise the
+            same ValueError on a different code path.
+
+        Called from ``_populate_indicators_inner`` BEFORE
+        ``self.freqai.start(...)`` so the merge always sees a clean dtype.
+        Cost when already-normalized: one dict lookup and one set lookup.
+        """
+        if pair in self._hp_dtype_normalized:
+            return
+        freqai = getattr(self, "freqai", None)
+        dd = getattr(freqai, "dd", None) if freqai is not None else None
+        store = getattr(dd, "historic_predictions", None) if dd is not None else None
+        if not store or pair not in store:
+            # First call for this pair, before set_initial_historic_predictions
+            # has run. Nothing to coerce yet; we'll try again on the next
+            # populate_indicators call.
+            return
+        df = store[pair]
+        if "date_pred" not in df.columns:
+            self._hp_dtype_normalized.add(pair)
+            return
+        col = df["date_pred"]
+        target_dtype = "datetime64[ms, UTC]"
+        try:
+            if str(col.dtype) == target_dtype:
+                self._hp_dtype_normalized.add(pair)
+                return
+            # pd.to_datetime accepts a mix of Timestamps / strings / NaT /
+            # numpy datetimes and returns a tz-aware DatetimeIndex when
+            # utc=True. The .astype on the result enforces ms precision to
+            # match feather's storage and avoid a second mismatch on the
+            # backtest merge code path.
+            coerced = pd.to_datetime(col, utc=True, errors="coerce")
+            df["date_pred"] = coerced.astype(target_dtype)
+            self._hp_dtype_normalized.add(pair)
+            logger.info(
+                "[strategy] coerced historic_predictions[%s].date_pred dtype "
+                "%s -> %s (one-time per-process migration to unblock "
+                "--freqai-backtest-live-models merge)",
+                pair, col.dtype, target_dtype,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Don't latch on failure — we'll retry on the next candle. If
+            # the coercion can't succeed at all, the existing strategy-level
+            # try/except in populate_indicators catches the eventual merge
+            # error and emits a neutral frame.
+            logger.warning(
+                "[strategy] could not normalize historic_predictions[%s].date_pred "
+                "dtype (will retry next candle): %s", pair, exc,
+            )
+
     def _populate_indicators_inner(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        # Permanent fix for the freqai-backtest-live-models dtype-merge bug.
+        # See _normalize_historic_predictions_dtype docstring for the full
+        # root-cause analysis. Idempotent + cheap after first call per pair.
+        pair = metadata.get("pair", "") if metadata else ""
+        if pair:
+            self._normalize_historic_predictions_dtype(pair)
         dataframe = self.freqai.start(dataframe, metadata, self)
         # Belt-and-braces: ensure gating columns survive the FreqAI pipeline
         if "regime_label" not in dataframe.columns:
