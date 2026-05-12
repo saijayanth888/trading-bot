@@ -716,10 +716,25 @@
   // ─────────────── KillSwitch ───────────────
   // 1500 ms hold-to-confirm. raf-driven fill width. release before 100% -> cancel.
   // pointermove cancel matches prototype's "release on drag-off".
+  //
+  // Tier C P1-5: parity with the DOM version (components.js:killHoldProto)
+  // which already handles pointerleave and touchcancel. The React version
+  // was missing both — touch users could press → drift their finger →
+  // still trigger destructive kill at 1500 ms. Now:
+  //   - onPointerLeave + onPointerCancel reset progress.
+  //   - onTouchMove watches finger displacement; > 20 px drift cancels.
+  //
+  // INVARIANT: the hold-to-confirm progress MUST reset (visual fill →
+  // 0 %, raf cancelled) the moment the user's intent becomes ambiguous —
+  // pointer drift, leaving the button, or a touch-cancel from the OS.
+  // Future edits must not remove any of the four cancel paths (mouseup,
+  // mouseleave, touchend, pointerleave/pointercancel + touchmove-drift).
   function KillSwitch({ state, onArm, onKill, onResume }) {
     const [holding, setHolding] = useState(0);
     const raf = useRef(null);
     const start = useRef(0);
+    const touchStart = useRef(null); // {x, y} when touchstart fires
+    const DRIFT_PX = 20;
     const holdMs = 1500;
 
     const tick = (now) => {
@@ -734,15 +749,37 @@
         raf.current = requestAnimationFrame(tick);
       }
     };
-    const down = () => {
+    const down = (e) => {
       if (state !== "armed") return;
+      // Capture initial touch coordinates so onTouchMove can compute drift.
+      if (e && e.touches && e.touches[0]) {
+        touchStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      } else {
+        touchStart.current = null;
+      }
       start.current = performance.now();
       raf.current = requestAnimationFrame(tick);
     };
     const up = () => {
       if (raf.current) cancelAnimationFrame(raf.current);
       raf.current = null;
+      touchStart.current = null;
       setHolding(0);
+    };
+    // P1-5: pointermove cancel — fires for both mouse and touch (pointer
+    // events are the unified abstraction). Reset progress on drag-off.
+    const onPointerLeave = () => up();
+    const onPointerCancel = () => up();
+    // P1-5: touch-drift cancel — > 20 px movement aborts the hold even if
+    // the finger is still on the button. Prevents accidental kill on
+    // touchscreen drift while operator is reading the screen.
+    const onTouchMove = (e) => {
+      if (!touchStart.current || !raf.current) return;
+      const t = e.touches && e.touches[0];
+      if (!t) return;
+      const dx = t.clientX - touchStart.current.x;
+      const dy = t.clientY - touchStart.current.y;
+      if ((dx * dx + dy * dy) > (DRIFT_PX * DRIFT_PX)) up();
     };
 
     useEffect(() => {
@@ -793,6 +830,15 @@
             onMouseLeave: up,
             onTouchStart: down,
             onTouchEnd: up,
+            onTouchCancel: up,
+            // P1-5: touch + pointer drift cancel paths
+            onPointerLeave: onPointerLeave,
+            onPointerCancel: onPointerCancel,
+            onTouchMove: onTouchMove,
+            // Prevent the long-press context menu on touch screens so the
+            // hold stays a hold; the OS's text-selection magnifier was
+            // also stealing focus on iOS.
+            onContextMenu: (e) => e.preventDefault(),
             "aria-pressed": true,
             "aria-label": "Pause trading (hold to confirm)",
           },
