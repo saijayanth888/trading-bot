@@ -405,7 +405,7 @@ button { font-family: inherit; }
   display: flex; flex-direction: column;
   min-width: 0;
 }
-.anchor { scroll-margin-top: 80px; }
+.anchor { scroll-margin-top: 52px; } /* match .topbar min-height so hash-jumps land flush */
 .card-head {
   display: flex; align-items: center; gap: var(--s-2);
   padding: 10px var(--pad-card) 8px;
