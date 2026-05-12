@@ -153,6 +153,10 @@
     // ~/.hermes/scripts/shark_override_verify.sh after each market_open
     // run. Surfaces the SharkOverrideHealthLive card under TodayScoreboard.
     shark_override_health: "/api/ops/shark_override_health",
+    // ModelForge weekly LoRA training pipeline status — surfaces the
+    // WeeklyTrainingLive card under TodayScoreboard. Degrades soft when
+    // model-forge is offline (card still renders with local-only fields).
+    weekly_training: "/api/ops/weekly_training",
   };
   const SLOW_ENDPOINTS = {
     ept_champion: { url: "/api/ops/mcp/get_champion_genome", method: "POST", body: {} },
@@ -371,6 +375,314 @@
         lastTrade ? h("span", null, " · last trade: " + lastTrade) : null,
         checkedAt ? h("span", null, " · checked " + checkedAt) : null
       )
+    );
+  }
+
+  // ─────────────── WEEKLY TRAINING — ModelForge LoRA pipeline status ────
+  // Surfaces /api/ops/weekly_training. Six rows (one per trading-bot LLM
+  // role) with current adapter version, last train ts, headline eval
+  // score, and an eligibility badge. Two summary stats sit above the
+  // table: reflections-this-week (the input to next Sunday's refresh)
+  // and a Sunday 02:00 ET countdown.
+  //
+  // Color rules per spec:
+  //   green   — adapter promoted this week (eligibility="promoted" + freshly trained)
+  //   yellow  — adapter promoted earlier, score flat OR shadow run
+  //   red     — adapter regressed and was rolled back
+  //   gray    — no data yet (track registered, no champion)
+  //
+  // Degrade-soft: when model-forge is offline (data.model_forge_reachable
+  // === false), the connectivity pip turns orange + we still render the
+  // 6-track skeleton + the reflection count (which works purely off
+  // local files).
+  //
+  // This card is the **viral screenshot** for the week 4 launch — keep it
+  // pixel-perfect against the dYdX/Geist aesthetic the rest of the SPA
+  // uses (mono numerics, no shadows, no gradients).
+  function WeeklyTrainingLive({ data }) {
+    const slot = slotState(data, "weekly_training");
+    const env = envelopeData(slot.env) || {};
+    const tracks = env.tracks || [];
+    const summary = env.summary || {};
+    const mfReachable = env.model_forge_reachable !== false;
+    const reflections = env.reflections_this_week;
+    const lessons = env.lessons_injected;
+
+    if (slot.phase === "down") {
+      return h(Card, {
+        num: "00c", title: "Weekly training · LoRA adapters",
+        sub: "endpoint unavailable",
+        right: cardRight(slot.fetchedAt),
+      }, h(EmptyState, { reason: slot.reason, fetchedAt: slot.fetchedAt, period: 10 }));
+    }
+    if (slot.phase === "loading") {
+      return h(Card, {
+        num: "00c", title: "Weekly training · LoRA adapters",
+        sub: "loading…",
+        right: cardRight(slot.fetchedAt),
+      }, h(LoadingState));
+    }
+
+    // Connectivity pip — green when model-forge is reachable AND at least
+    // one track has a champion; orange when MF is offline; gray when MF
+    // is reachable but pipeline is still starting up.
+    let pillCls, pillText;
+    if (!mfReachable) {
+      pillCls = "warn"; pillText = "MODEL-FORGE OFFLINE";
+    } else if ((summary.n_tracks_trained || 0) === 0) {
+      pillCls = "info"; pillText = "STARTING UP";
+    } else if ((summary.n_promoted_this_week || 0) > 0) {
+      pillCls = "up"; pillText = (summary.n_promoted_this_week) + " PROMOTED THIS WEEK";
+    } else {
+      pillCls = "info"; pillText = (summary.n_tracks_trained || 0) + "/6 TRAINED";
+    }
+
+    return h(Card, {
+      num: "00c", title: "Weekly training · LoRA adapters",
+      sub: mfReachable
+        ? ("model-forge @ " + (env.model_forge_url || "—")
+           + " · Sun 02:00 ET refresh")
+        : "model-forge offline — local-only metrics shown",
+      right: cardRight(slot.fetchedAt,
+        h("span", { className: "pill " + pillCls, style: { height: 18 } },
+          h("span", { className: "dot " + pillCls + (pillCls === "up" ? " pulse" : "") }),
+          " ", pillText))
+    },
+      // Summary strip — reflections this week + next training countdown.
+      h(WeeklyTrainingSummary, {
+        reflections: reflections,
+        lessons: lessons,
+        nextTrainingTs: env.next_training_ts,
+        nTrained: summary.n_tracks_trained || 0,
+        nRegistered: summary.n_tracks_registered || 6,
+        mfReachable: mfReachable,
+        mfError: env.model_forge_error,
+      }),
+      // Per-track table — 6 rows + a 5-column header.
+      h("div", {
+        style: {
+          display: "grid",
+          gridTemplateColumns:
+            "minmax(140px, 1.6fr) minmax(150px, 1.5fr) minmax(90px, 1fr) minmax(110px, 1.2fr) minmax(70px, .8fr)",
+          gap: 0,
+          marginTop: "var(--s-3)",
+          borderTop: "1px solid var(--line-1)",
+        }
+      },
+        // header row
+        h(F, null,
+          h(WeeklyTrainingHeaderCell, { label: "Track" }),
+          h(WeeklyTrainingHeaderCell, { label: "Adapter / status" }),
+          h(WeeklyTrainingHeaderCell, { label: "Last train" }),
+          h(WeeklyTrainingHeaderCell, { label: "Headline score" }),
+          h(WeeklyTrainingHeaderCell, { label: "Examples", align: "right" }),
+        ),
+        // data rows — always 6, even when the array is empty (skeleton).
+        tracks.map(t => h(WeeklyTrainingTrackRow, { key: t.track_id, t }))
+      ),
+      h("div", {
+        className: "dim mono",
+        style: { fontSize: "var(--t-2xs)", padding: "var(--s-2) 0 0",
+                 letterSpacing: ".06em" }
+      },
+        mfReachable
+          ? "promoted = Pareto-dominant on faithfulness + hit-rate · rolled back = regressed vs prior champion"
+          : "showing local-only metrics · model-forge will populate adapter rows once :8000 is up")
+    );
+  }
+
+  function WeeklyTrainingHeaderCell({ label, align }) {
+    return h("div", {
+      className: "dim2 mono",
+      style: {
+        fontSize: "var(--t-2xs)", letterSpacing: ".08em",
+        textTransform: "uppercase",
+        padding: "var(--s-2) var(--s-2)",
+        textAlign: align || "left",
+        borderBottom: "1px solid var(--line-1)",
+      }
+    }, label);
+  }
+
+  function WeeklyTrainingSummary({ reflections, lessons, nextTrainingTs, nTrained, nRegistered, mfReachable, mfError }) {
+    // Countdown to next Sunday 02:00 ET (recomputed on each render via the
+    // 1s-tick from RetryCountdown sibling — we use a similar interval here
+    // so the "Next training" cell stays live).
+    const [, force] = useState(0);
+    useEffect(() => {
+      const iv = setInterval(() => force(n => n + 1), 30_000);
+      return () => clearInterval(iv);
+    }, []);
+
+    let countdown = "—";
+    if (nextTrainingTs) {
+      const ms = new Date(nextTrainingTs).getTime() - Date.now();
+      if (ms > 0) {
+        const days = Math.floor(ms / 86_400_000);
+        const hours = Math.floor((ms % 86_400_000) / 3_600_000);
+        const mins = Math.floor((ms % 3_600_000) / 60_000);
+        if (days > 0) countdown = days + "d " + String(hours).padStart(2, "0") + "h";
+        else if (hours > 0) countdown = hours + "h " + String(mins).padStart(2, "0") + "m";
+        else countdown = mins + "m";
+      } else {
+        countdown = "now";
+      }
+    }
+
+    const stat = (lbl, val, cls, hint) => h("div", {
+      style: { display: "flex", flexDirection: "column", gap: 2, minWidth: 120 }
+    },
+      h("div", {
+        className: "dim2 mono",
+        style: { fontSize: "var(--t-2xs)", letterSpacing: ".08em", textTransform: "uppercase" }
+      }, lbl),
+      h("div", {
+        className: "num " + (cls || ""),
+        style: {
+          fontSize: "var(--t-lg)", fontFamily: "var(--mono)",
+          fontWeight: 500, fontVariantNumeric: "tabular-nums",
+        }
+      }, val),
+      hint ? h("div", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, hint) : null
+    );
+
+    return h("div", {
+      style: {
+        display: "flex", flexWrap: "wrap", gap: "var(--s-5)",
+        alignItems: "baseline", paddingBottom: "var(--s-3)",
+      }
+    },
+      stat("Reflections this week",
+           reflections == null ? "—" : String(reflections),
+           reflections > 0 ? "up" : "",
+           "from decisions.md"),
+      stat("Lessons injected",
+           lessons == null ? "n/a" : String(lessons),
+           lessons > 0 ? "up" : "",
+           lessons == null ? "logger not wired" : "get_past_context()"),
+      stat("Tracks trained",
+           nTrained + " / " + nRegistered,
+           nTrained > 0 ? "up" : "",
+           mfReachable ? "model-forge live" : "model-forge offline"),
+      stat("Next training",
+           countdown,
+           "info",
+           "Sunday 02:00 ET")
+    );
+  }
+
+  function WeeklyTrainingTrackRow({ t }) {
+    const elig = (t && t.eligibility) || "no-data";
+    // Color mapping per spec.
+    let pillCls, pillDot, pillText;
+    if (elig === "promoted") { pillCls = "up";   pillDot = "up";   pillText = "PROMOTED"; }
+    else if (elig === "shadow")    { pillCls = "warn"; pillDot = "warn"; pillText = "SHADOW"; }
+    else if (elig === "regressed") { pillCls = "down"; pillDot = "down"; pillText = "ROLLED BACK"; }
+    else                           { pillCls = "info"; pillDot = "info"; pillText = "NO DATA"; }
+
+    const cell = (kids, extra) => h("div", {
+      style: Object.assign({
+        padding: "var(--s-2) var(--s-2)",
+        borderBottom: "1px solid var(--line-1)",
+        fontSize: "var(--t-xs)",
+        display: "flex", alignItems: "center", gap: 6,
+        minHeight: 32,
+      }, extra || {})
+    }, kids);
+
+    // Track name + role.
+    const role = t.role || t.track_id;
+    const trackCell = cell(
+      h(F, null,
+        h("strong", { style: { color: "var(--fg-1)" } }, role),
+        h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)", marginLeft: 6 } },
+          t.track_id)
+      )
+    );
+
+    // Adapter version + eligibility badge.
+    const ver = t.current_adapter_version || (t.current_adapter ? "—" : "");
+    const adapterCell = cell(
+      h(F, null,
+        h("span", { className: "mono",
+                    style: { color: ver ? "var(--fg-1)" : "var(--fg-4)",
+                             fontFamily: "var(--mono)" } },
+          ver || "—"),
+        h("span", { className: "pill " + pillCls,
+                    style: { height: 16, marginLeft: "auto" } },
+          h("span", { className: "dot " + pillDot }), " ", pillText)
+      ),
+      { gap: 6, justifyContent: "flex-start" }
+    );
+
+    // Last train timestamp — relative if recent, absolute otherwise.
+    const trainCell = cell(
+      h(WeeklyTrainingRelTime, { ts: t.last_train_ts })
+    );
+
+    // Headline score (whatever the role's headline metric is).
+    const score = t.headline_score;
+    const scoreStr = (score == null || isNaN(score)) ? "—"
+      : (typeof score === "number" ? score.toFixed(3) : String(score));
+    const scoreCls = score == null ? "" : (score >= 0.7 ? "up" : score >= 0.5 ? "" : "warn");
+    const scoreCell = cell(
+      h(F, null,
+        h("span", { className: "num mono " + scoreCls,
+                    style: { fontFamily: "var(--mono)", fontVariantNumeric: "tabular-nums" } },
+          scoreStr),
+        h("span", { className: "dim mono",
+                    style: { fontSize: "var(--t-2xs)", marginLeft: 6, opacity: 0.7 } },
+          t.headline_metric || "")
+      )
+    );
+
+    // Examples trained this week.
+    const ex = Number(t.examples_trained_this_week || 0);
+    const examplesCell = cell(
+      h("span", { className: "num mono " + (ex > 0 ? "up" : ""),
+                  style: { fontFamily: "var(--mono)",
+                           fontVariantNumeric: "tabular-nums",
+                           width: "100%", textAlign: "right" } },
+        ex > 0 ? String(ex) : "—"),
+      { justifyContent: "flex-end" }
+    );
+
+    return h(F, null,
+      trackCell, adapterCell, trainCell, scoreCell, examplesCell);
+  }
+
+  function WeeklyTrainingRelTime({ ts }) {
+    // Tick once a minute so "2d ago" updates without a full refetch.
+    const [, force] = useState(0);
+    useEffect(() => {
+      const iv = setInterval(() => force(n => n + 1), 60_000);
+      return () => clearInterval(iv);
+    }, []);
+    if (!ts) {
+      return h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, "—");
+    }
+    const now = Date.now();
+    const t = new Date(ts).getTime();
+    if (!isFinite(t)) {
+      return h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, "—");
+    }
+    const ms = now - t;
+    let rel;
+    if (ms < 60_000) rel = "just now";
+    else if (ms < 3_600_000) rel = Math.floor(ms / 60_000) + "m ago";
+    else if (ms < 86_400_000) rel = Math.floor(ms / 3_600_000) + "h ago";
+    else rel = Math.floor(ms / 86_400_000) + "d ago";
+    // Sunday short-form for promoted-this-week adapters.
+    let abs = "";
+    try {
+      const dt = new Date(ts);
+      const day = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][dt.getUTCDay()];
+      abs = day + " " + String(dt.getUTCHours()).padStart(2, "0")
+            + ":" + String(dt.getUTCMinutes()).padStart(2, "0");
+    } catch (e) { /* leave abs empty */ }
+    return h("span", { style: { display: "inline-flex", flexDirection: "column", lineHeight: 1.15 } },
+      h("span", { className: "mono", style: { color: "var(--fg-1)" } }, rel),
+      abs ? h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, abs) : null
     );
   }
 
@@ -2752,6 +3064,15 @@
           // single glance tells the operator "override is healthy" or
           // "override has not fired in N runs — investigate."
           h(SharkOverrideHealthLive, { data }),
+          // WEEKLY TRAINING — ModelForge LoRA adapter pipeline status.
+          // Surfaces the 6 trading-bot LLM-role tracks (Reflector, Bull,
+          // Bear, Arbiter, RegimeTagger, IndicatorSelector) with their
+          // current champion adapter + last train timestamp + headline
+          // eval score. Sits next to SharkOverrideHealthLive — these are
+          // the two "what's the AI doing right now" health cards.
+          // Degrade-soft: still renders with local-only metrics when
+          // model-forge is offline.
+          h(WeeklyTrainingLive, { data }),
           // HERO
           h(HeroLive, { data, killState }),
           // TRAINING ROW — crypto FreqAI + stocks Shark TFT side-by-side.
