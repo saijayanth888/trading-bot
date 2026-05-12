@@ -3462,3 +3462,465 @@ async def backtest_gates():
         error=("one or more reports are >8d old — weekly cron may have failed"
                if any_stale else None),
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# /api/ops/weekly_training — ModelForge LoRA training pipeline status
+# ──────────────────────────────────────────────────────────────────────────
+#
+# Surfaces the weekly LoRA training pipeline status to the operator. The
+# trading-bot exports nightly reflections + LLM logs into ModelForge's
+# curated dir; ModelForge runs a per-track refresh every Sunday 02:00 ET
+# (see docs/4_WEEK_EXECUTION_PLAN.md § "Per-role training cadence").
+#
+# This endpoint fans out to two sources:
+#   (1) ModelForge HTTP API on :8000  (GET /api/forge/tracks)
+#       → current_adapter, last_train_ts, last_eval_scores, examples_trained
+#   (2) Local trading-bot files
+#       → reflections_this_week (count from stocks/memory/decisions.md)
+#       → lessons_injected      (count get_past_context() invocations,
+#                                read from llm-calls.jsonl if present)
+#
+# Envelope:
+#   status="ok"       — model-forge reachable, ≥1 track has a champion
+#   status="degraded" — model-forge unreachable OR no champions yet (early
+#                       in the build-up week). Local-only fields still set
+#                       so the card has something to render.
+#   data["model_forge_reachable"] is a boolean the frontend uses to colour
+#   the connectivity pip orange when False.
+#
+# Operator note: this card is the **viral screenshot** for the week 4
+# launch — "watch the AI learn". Keep its envelope shape stable so the
+# launch demo doesn't break.
+
+MODELFORGE_API_URL = os.environ.get("MODELFORGE_API_URL", "http://localhost:8000")
+
+# Canonical track order — matches docs/MODELFORGE_INTEGRATION_PLAN.md § 2.
+# We always return these 6 rows, even when model-forge has zero tracks
+# registered (the card shows a "registered, no data yet" empty state per
+# track). Stable order = stable screenshots.
+_WEEKLY_TRAINING_TRACKS: tuple[tuple[str, str, str], ...] = (
+    # (track_id,                   role label,                headline_metric)
+    ("trading-reflector",          "Reflector",               "predictive_hit_rate_30d"),
+    ("trading-bull",               "Bull analyst",            "judge_preference_pct"),
+    ("trading-bear",               "Bear analyst",            "judge_preference_pct"),
+    ("trading-arbiter",            "Portfolio manager",       "decision_consistency"),
+    ("trading-regime-tagger",      "Regime tagger",           "json_schema_validity_rate"),
+    ("trading-indicator-selector", "Indicator selector",      "selected_indicator_avg_sharpe"),
+)
+
+# Candidate locations for the decisions log — worktree vs main checkout vs
+# container mount. First match wins (mirrors the override_verify pattern).
+_DECISIONS_PATHS = [
+    Path("/home/saijayanthai/Documents/trading-bot/stocks/memory/decisions.md"),
+    Path(__file__).resolve().parents[2] / "stocks" / "memory" / "decisions.md",
+    Path("/freqtrade/stocks/memory/decisions.md"),
+]
+
+# Candidate locations for the LLM call log — same pattern.
+_LLM_CALLS_PATHS = [
+    Path("/home/saijayanthai/Documents/trading-bot/stocks/memory/llm-calls.jsonl"),
+    Path(__file__).resolve().parents[2] / "stocks" / "memory" / "llm-calls.jsonl",
+    Path("/freqtrade/stocks/memory/llm-calls.jsonl"),
+]
+
+
+def _monday_of_this_week_utc() -> datetime:
+    """Return the UTC datetime for Monday 00:00 of the current ISO week.
+
+    Used to scope "this week" counts (reflections, lessons injected).
+    Monday rather than Sunday so the count resets just after the Sunday
+    02:00 ET training run completes — operator sees "reflections trained
+    last night vs new since" cleanly.
+    """
+    now = datetime.now(timezone.utc)
+    # weekday(): Mon=0 … Sun=6
+    monday = now - timedelta(days=now.weekday(),
+                             hours=now.hour, minutes=now.minute,
+                             seconds=now.second, microseconds=now.microsecond)
+    return monday
+
+
+def _count_reflections_since(path: Path, since: datetime) -> int:
+    """Count REFLECTION: blocks in decisions.md added since ``since``.
+
+    The file is append-only; each closed trade adds a block like::
+
+        [2026-05-12 | NVDA | ... | +1.2% | +0.5% alpha | 3d]
+        DECISION: ...
+        REFLECTION: <2-4 sentences>
+        ---
+
+    We count lines starting with ``REFLECTION:`` whose enclosing block
+    bears a date >= ``since``. Cheap parser — no regex backreferences.
+    Returns 0 on any read error (operator card must never 500).
+    """
+    if not path.is_file():
+        return 0
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0
+
+    count = 0
+    current_date: datetime | None = None
+    for line in text.splitlines():
+        ls = line.strip()
+        if ls.startswith("[") and "|" in ls:
+            # Extract the first field as YYYY-MM-DD. Tolerate junk.
+            head = ls.lstrip("[").split("|", 1)[0].strip()
+            try:
+                current_date = datetime.strptime(head[:10], "%Y-%m-%d").replace(
+                    tzinfo=timezone.utc
+                )
+            except ValueError:
+                current_date = None
+        elif ls.startswith("REFLECTION:"):
+            if current_date is not None and current_date >= since:
+                # A reflection-line whose preceding block date is in window.
+                # Skip empty REFLECTION lines (e.g. "REFLECTION:" with no body).
+                body = ls[len("REFLECTION:"):].strip()
+                if body:
+                    count += 1
+    return count
+
+
+def _count_lessons_injected_since(path: Path, since: datetime) -> int | None:
+    """Count get_past_context() invocations in llm-calls.jsonl since ``since``.
+
+    The LLM logger writes one JSON object per line. We look for records
+    where ``tool == "get_past_context"`` OR ``event == "lesson_injected"``.
+    Returns ``None`` (not 0) when the file does not exist — the card uses
+    None to mean "logger not yet capturing this signal" vs 0 = "zero so
+    far this week".
+    """
+    if not path.is_file():
+        return None
+    try:
+        cutoff_iso = since.isoformat()
+    except Exception:
+        cutoff_iso = ""
+
+    count = 0
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                ts = (obj.get("ts") or obj.get("timestamp")
+                      or obj.get("created_at") or "")
+                if cutoff_iso and ts and ts < cutoff_iso:
+                    continue
+                tool = (obj.get("tool") or obj.get("event") or "").lower()
+                if tool in ("get_past_context", "lesson_injected"):
+                    count += 1
+    except OSError:
+        return None
+    return count
+
+
+def _first_existing(paths: list[Path]) -> Path | None:
+    for p in paths:
+        try:
+            if p.is_file():
+                return p
+        except OSError:
+            continue
+    return None
+
+
+def _next_sunday_0200_et_iso() -> str:
+    """Return ISO-8601 UTC timestamp of the next Sunday 02:00 America/New_York.
+
+    ET = UTC-5 (EST) or UTC-4 (EDT). We approximate via the standard offset
+    of UTC-4 in summer / UTC-5 in winter using a naive month-band switch —
+    the card is only consuming this as a countdown target, so a 1-hour
+    DST-transition wobble twice a year is acceptable.
+
+    Operator-visible only as a countdown; we do not use this to schedule
+    anything (the real Sunday 02:00 ET schedule lives in model-forge's
+    cron).
+    """
+    now = datetime.now(timezone.utc)
+    # weekday(): Mon=0 … Sun=6
+    days_until_sun = (6 - now.weekday()) % 7
+    # If today is Sunday and it's already past 02:00 ET (~07:00 UTC EDT /
+    # 07:00 UTC EST), roll to next Sunday.
+    sunday = now + timedelta(days=days_until_sun)
+    # ET 02:00 → 06:00 UTC (EDT) or 07:00 UTC (EST). Use 06:00 UTC for
+    # daylight-savings months (Mar-Nov), 07:00 UTC otherwise.
+    is_edt = 3 <= sunday.month <= 11
+    target_utc_hour = 6 if is_edt else 7
+    target = sunday.replace(hour=target_utc_hour, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target = target + timedelta(days=7)
+    return target.isoformat()
+
+
+def _empty_track_row(track_id: str, role: str, headline_metric: str) -> dict[str, Any]:
+    """Stable row shape for an unregistered / no-data track."""
+    return {
+        "track_id": track_id,
+        "role": role,
+        "headline_metric": headline_metric,
+        "current_adapter": None,
+        "current_adapter_version": None,
+        "last_train_ts": None,
+        "last_eval_scores": {},
+        "headline_score": None,
+        "eligibility": "no-data",
+        "examples_trained_this_week": 0,
+    }
+
+
+def _eligibility_for(track: dict[str, Any]) -> str:
+    """Map a model-forge track payload → one of:
+        "promoted" | "shadow" | "regressed" | "no-data"
+
+    Heuristics (cheap; the card only colour-codes off this):
+      - no champion or no scores → "no-data"
+      - champion exists + last_run_status == "regressed_rollback" → "regressed"
+      - champion exists + last_run shadowed (not yet promoted) → "shadow"
+      - else → "promoted"
+    """
+    champion = track.get("champion_adapter_path") or track.get("current_adapter")
+    if not champion:
+        return "no-data"
+    last_status = (track.get("last_run_status") or
+                   track.get("last_status") or "").lower()
+    if "regress" in last_status or "rollback" in last_status:
+        return "regressed"
+    if "shadow" in last_status:
+        return "shadow"
+    return "promoted"
+
+
+async def _fetch_modelforge_tracks() -> tuple[list[dict[str, Any]] | None, str | None]:
+    """GET ModelForge /api/forge/tracks. Returns (tracks_list, error_str).
+
+    Connection refused / timeout → (None, "model-forge unreachable: …").
+    Returns the raw track list on success (ModelForge wraps in a list or a
+    {tracks: [...]} envelope; we accept both).
+    """
+    url = MODELFORGE_API_URL.rstrip("/") + "/api/forge/tracks"
+    api_key = os.environ.get("MODELFORGE_API_KEY", "").strip()
+    headers = {"X-API-Key": api_key} if api_key else {}
+    try:
+        async with httpx.AsyncClient(timeout=ENDPOINT_TIMEOUT_S) as client:
+            resp = await client.get(url, headers=headers)
+        if resp.status_code != 200:
+            return None, f"model-forge HTTP {resp.status_code}"
+        body = resp.json()
+    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        return None, f"model-forge unreachable: {exc}"
+    except (httpx.HTTPError, ValueError) as exc:
+        return None, f"model-forge response error: {exc}"
+
+    # Accept either a bare list, {"tracks": [...]}, or an envelope.
+    if isinstance(body, list):
+        return body, None
+    if isinstance(body, dict):
+        for key in ("tracks", "data"):
+            v = body.get(key)
+            if isinstance(v, list):
+                return v, None
+            if isinstance(v, dict) and isinstance(v.get("tracks"), list):
+                return v["tracks"], None
+    return [], None
+
+
+@router.get("/weekly_training")
+async def weekly_training() -> dict[str, Any]:
+    """Weekly LoRA training pipeline status — one row per ModelForge track.
+
+    Read-only, no auth dep. Degrades soft: if model-forge is unreachable
+    we still return the 6-track skeleton + the local reflection count so
+    the operator card has something useful to show during the build-up
+    week before the training pipeline goes live.
+
+    Envelope contract (see docs/WEEKLY_TRAINING_CARD.md for full schema):
+
+        {
+            "status": "ok" | "degraded",
+            "data": {
+                "tracks": [
+                    {
+                        "track_id": "trading-reflector",
+                        "role": "Reflector",
+                        "headline_metric": "predictive_hit_rate_30d",
+                        "current_adapter": "run-XXX__gen3" | None,
+                        "current_adapter_version": "v20260512" | None,
+                        "last_train_ts": "2026-05-12T07:30:00+00:00" | None,
+                        "last_eval_scores": {"faithfulness_regex": 0.81, ...},
+                        "headline_score": 0.62 | None,
+                        "eligibility": "promoted" | "shadow" | "regressed" | "no-data",
+                        "examples_trained_this_week": 47,
+                    }, ... 6 total
+                ],
+                "summary": {
+                    "n_tracks_registered": 6,
+                    "n_tracks_trained": 4,
+                    "n_promoted_this_week": 2,
+                },
+                "reflections_this_week": 12,
+                "lessons_injected": 41 | None,
+                "next_training_ts": "2026-05-18T06:00:00+00:00",
+                "model_forge_url": "http://localhost:8000",
+                "model_forge_reachable": True | False,
+                "model_forge_error": null | "model-forge unreachable: …",
+                "week_started": "2026-05-12T00:00:00+00:00",
+            },
+            "error": null | "human-readable summary",
+            "checked_at": ISO-8601 UTC,
+        }
+    """
+    # ─── Local-only signals (always available, even if MF is down) ────────
+    week_started = _monday_of_this_week_utc()
+    decisions_path = _first_existing(_DECISIONS_PATHS)
+    reflections_this_week = (
+        _count_reflections_since(decisions_path, week_started)
+        if decisions_path is not None else 0
+    )
+    llm_calls_path = _first_existing(_LLM_CALLS_PATHS)
+    lessons_injected = (
+        _count_lessons_injected_since(llm_calls_path, week_started)
+        if llm_calls_path is not None else None
+    )
+
+    # ─── Remote signal: ModelForge /api/forge/tracks ──────────────────────
+    mf_tracks, mf_err = await _fetch_modelforge_tracks()
+    mf_reachable = mf_err is None
+
+    # Index returned tracks by track_id for quick lookup. Tolerate either
+    # `track_id` or `name` keys (ModelForge schema varies by version).
+    mf_by_id: dict[str, dict[str, Any]] = {}
+    if mf_tracks:
+        for t in mf_tracks:
+            if not isinstance(t, dict):
+                continue
+            tid = t.get("track_id") or t.get("name") or t.get("id")
+            if isinstance(tid, str):
+                mf_by_id[tid] = t
+
+    rows: list[dict[str, Any]] = []
+    n_promoted_this_week = 0
+    n_trained = 0
+
+    for track_id, role, headline_metric in _WEEKLY_TRAINING_TRACKS:
+        mf_t = mf_by_id.get(track_id)
+        if not mf_t:
+            rows.append(_empty_track_row(track_id, role, headline_metric))
+            continue
+
+        # Adapter id / version label. ModelForge stores `champion_adapter_path`
+        # like `data/adapters/{run_id}/gen-{N}/`; we surface the basename plus
+        # a date-version derived from champion_promoted_at if available.
+        adapter_id = (mf_t.get("champion_adapter_id")
+                      or mf_t.get("champion_run_id")
+                      or mf_t.get("current_adapter"))
+        adapter_path = mf_t.get("champion_adapter_path")
+        if adapter_id is None and adapter_path:
+            # `data/adapters/run-XYZ/gen-3` → "run-XYZ__gen3"
+            parts = [p for p in str(adapter_path).strip("/").split("/") if p]
+            if len(parts) >= 2:
+                adapter_id = f"{parts[-2]}__{parts[-1]}"
+
+        promoted_at = (mf_t.get("champion_promoted_at")
+                       or mf_t.get("last_train_ts")
+                       or mf_t.get("last_train_finished_at"))
+        adapter_version = None
+        if isinstance(promoted_at, str):
+            # Strip to a date stamp like "v20260512" for the badge.
+            try:
+                dt = datetime.fromisoformat(promoted_at.replace("Z", "+00:00"))
+                adapter_version = "v" + dt.strftime("%Y%m%d")
+            except ValueError:
+                adapter_version = None
+
+        scores = mf_t.get("champion_scores") or mf_t.get("last_eval_scores") or {}
+        if not isinstance(scores, dict):
+            scores = {}
+
+        # Headline score = the metric we want on the dashboard row.
+        headline_score = scores.get(headline_metric)
+        if headline_score is None and scores:
+            # Fallback to any numeric value so the row isn't empty.
+            for v in scores.values():
+                if isinstance(v, (int, float)):
+                    headline_score = float(v)
+                    break
+
+        examples = (mf_t.get("examples_trained_this_week")
+                    or mf_t.get("last_train_num_samples")
+                    or mf_t.get("max_samples")
+                    or 0)
+        try:
+            examples = int(examples)
+        except (TypeError, ValueError):
+            examples = 0
+
+        eligibility = _eligibility_for(mf_t)
+        if adapter_id:
+            n_trained += 1
+
+        # "Promoted this week" = champion_promoted_at >= week_started.
+        if eligibility == "promoted" and isinstance(promoted_at, str):
+            try:
+                dt = datetime.fromisoformat(promoted_at.replace("Z", "+00:00"))
+                if dt >= week_started:
+                    n_promoted_this_week += 1
+            except ValueError:
+                pass
+
+        rows.append({
+            "track_id": track_id,
+            "role": role,
+            "headline_metric": headline_metric,
+            "current_adapter": adapter_id,
+            "current_adapter_version": adapter_version,
+            "last_train_ts": promoted_at,
+            "last_eval_scores": scores,
+            "headline_score": headline_score,
+            "eligibility": eligibility,
+            "examples_trained_this_week": examples,
+        })
+
+    summary = {
+        "n_tracks_registered": len(rows),
+        "n_tracks_trained": n_trained,
+        "n_promoted_this_week": n_promoted_this_week,
+    }
+
+    # Envelope status:
+    #   "degraded" when model-forge is unreachable OR no track has been
+    #               trained yet (early build-up week — operator still wants
+    #               to see the card render, with a clear "training pipeline
+    #               starting up" message).
+    #   "ok"       otherwise.
+    if not mf_reachable:
+        env_status = "degraded"
+        env_error = mf_err
+    elif n_trained == 0:
+        env_status = "degraded"
+        env_error = "training pipeline starting up — 0 of 6 tracks trained yet"
+    else:
+        env_status = "ok"
+        env_error = None
+
+    data = {
+        "tracks": rows,
+        "summary": summary,
+        "reflections_this_week": reflections_this_week,
+        "lessons_injected": lessons_injected,
+        "next_training_ts": _next_sunday_0200_et_iso(),
+        "model_forge_url": MODELFORGE_API_URL,
+        "model_forge_reachable": mf_reachable,
+        "model_forge_error": mf_err,
+        "week_started": week_started.isoformat(),
+    }
+    return _envelope(env_status, data=data, error=env_error)
