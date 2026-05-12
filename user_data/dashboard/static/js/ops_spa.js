@@ -3541,19 +3541,37 @@
     return "";
   }
 
+  // Strip JSON syntax noise from a response gist so it renders as flat
+  // human-readable text. Bot responses often start with `{` and embed
+  // quoted keys; raw rendering looks like `{ "grade": "C", "pattern":...`
+  // which is ugly. We strip braces/quotes, replace `:` with ` ` and `,`
+  // with ` · `, and collapse whitespace.
+  function _afCleanGist(s) {
+    if (s == null) return "";
+    let t = String(s).trim();
+    // Quick path: if it doesn't look like JSON, just normalize whitespace.
+    if (t[0] !== "{" && t[0] !== "[" && t.indexOf('"') === -1) {
+      return t.replace(/\s+/g, " ");
+    }
+    t = t.replace(/[{}\[\]"]/g, "");
+    t = t.replace(/\s*:\s*/g, " ");
+    t = t.replace(/\s*,\s*/g, " · ");
+    t = t.replace(/\s+/g, " ").trim();
+    // Drop dangling separator if truncated mid-pair upstream.
+    if (t.endsWith("·")) t = t.slice(0, -1).trim();
+    return t;
+  }
+
   function AgentFlowBox({ role, detail, onClick }) {
     const empty = !detail || !detail.count;
-    const cls = "af-box " + _afFreshnessClass(detail);
+    const cls = "af-box " + (empty ? "is-empty" : _afFreshnessClass(detail));
     const dotCls = _afDotClass(detail);
-    const ageLabel = empty ? "no calls today" : _afAgeLabel(detail.last_ts);
     const ariaLabel = empty
-      ? role + " — no calls in 24h window"
-      : role + " — " + detail.count + " calls, last " + ageLabel;
+      ? role + " — idle (no calls in 24h)"
+      : role + " — " + detail.count + " calls, last " + _afAgeLabel(detail.last_ts);
     const boxRef = useRef(null);
-    // Tier E: inline "last:" preview line uses last_response_gist (added
-    // server-side in commit 6528a7f). Falls back to last_gist for compat
-    // with any older payload shape still in cache. Empty when no calls.
     const lastGist = detail && (detail.last_response_gist || detail.last_gist);
+    const cleanGist = lastGist ? _afCleanGist(lastGist) : "";
     return h("div", {
       ref: boxRef,
       className: cls,
@@ -3568,35 +3586,36 @@
         }
       },
     },
+      // Title row stays for every box so the strip is identifiable when
+      // empty too. Everything else collapses on the empty path.
       h("div", { className: "af-title" }, role),
-      h("div", { className: "af-model" }, empty ? "—" : (detail.model || "—")),
-      h("div", { className: "af-live" },
-        dotCls && h("span", { className: "dot " + dotCls }),
-        h("span", null, ageLabel)
-      ),
       empty
-        ? h("div", { className: "af-counts af-placeholder" }, "—")
-        : h("div", { className: "af-counts" },
-            h("span", { className: "af-ok" }, detail.success, " ✓"),
-            h("span", { className: "af-sep" }, "·"),
-            h("span", { className: "af-bad" }, detail.fail, " ✕")
-          ),
-      empty
-        ? h("div", { className: "af-latency af-placeholder" }, "—")
-        : h("div", { className: "af-latency" },
-            "avg ", (detail.avg_latency_s || 0).toFixed(1), "s · p95 ",
-            (detail.p95_latency_s || 0).toFixed(1), "s"),
-      h("div", { className: "af-gist", title: detail && detail.last_gist || "" },
-        empty ? "no calls today" : (detail.last_gist || "—")),
-      // Tier E: inline "last:" preview row — render-skipped entirely when
-      // the role has no calls, so empty boxes don't gain a stray "last: -".
-      !empty && lastGist && h("div", {
-        className: "af-last",
-        title: lastGist,
-      },
-        h("span", { className: "af-last-key" }, "last:"),
-        '"', _aldTrim(lastGist, 60), '"'
-      )
+        ? // Single-line empty state — keeps the box visible in the flow
+          // but visually quiet. Operator can still click to open the
+          // drawer (which will show its own "no calls yet" body).
+          h("div", { className: "af-idle" }, "idle")
+        : h(F, null,
+            h("div", { className: "af-model" }, detail.model || "—"),
+            h("div", { className: "af-live" },
+              dotCls && h("span", { className: "dot " + dotCls }),
+              h("span", null, _afAgeLabel(detail.last_ts))
+            ),
+            h("div", { className: "af-counts" },
+              h("span", { className: "af-ok" }, detail.success, " ✓"),
+              h("span", { className: "af-sep" }, "·"),
+              h("span", { className: "af-bad" }, detail.fail, " ✕")
+            ),
+            h("div", { className: "af-latency" },
+              "avg ", (detail.avg_latency_s || 0).toFixed(1), "s · p95 ",
+              (detail.p95_latency_s || 0).toFixed(1), "s"),
+            cleanGist && h("div", {
+              className: "af-last",
+              title: cleanGist,
+            },
+              h("span", { className: "af-last-key" }, "last:"),
+              _aldTrim(cleanGist, 44)
+            )
+          )
     );
   }
 

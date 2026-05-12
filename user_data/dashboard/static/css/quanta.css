@@ -747,10 +747,10 @@ table.t .row-strike td { color: var(--fg-3); }
 .agent-flow::-webkit-scrollbar-track { background: transparent; }
 
 .af-box {
-  flex: 0 0 auto;
-  min-width: 180px;
+  flex: 1 1 0;
+  min-width: 160px;
   max-width: 220px;
-  min-height: 104px;
+  min-height: 132px;
   padding: 8px 10px;
   background: var(--bg-card);
   border: 1px solid var(--line-2);
@@ -762,6 +762,7 @@ table.t .row-strike td { color: var(--fg-3); }
   transition: background var(--dur-fast) var(--ease),
               border-color var(--dur-fast) var(--ease);
   font-family: var(--mono);
+  overflow: hidden;
 }
 .af-box:hover { background: var(--bg-card-2); }
 .af-box:focus-visible {
@@ -772,7 +773,20 @@ table.t .row-strike td { color: var(--fg-3); }
 .af-box.is-warm  { border-color: var(--warn-line); }
 .af-box.is-cold  { border-color: var(--line-2); }
 .af-box.is-fail  { border-color: var(--down-line); }
-.af-box.is-empty { border-color: var(--line-1); background: var(--bg-rail); }
+.af-box.is-empty { border-color: var(--line-1); background: transparent; opacity: .55; }
+.af-box.is-empty .af-title { color: var(--fg-3); }
+.af-box.is-empty:hover { opacity: .85; }
+
+/* Idle pill — single-line empty state replaces the row-of-dashes look. */
+.af-idle {
+  font-size: var(--t-2xs);
+  color: var(--fg-4);
+  text-transform: lowercase;
+  letter-spacing: .04em;
+  margin-top: auto;
+  margin-bottom: auto;
+  align-self: flex-start;
+}
 
 .af-title {
   font-size: var(--t-xs);
@@ -871,15 +885,21 @@ table.t .row-strike td { color: var(--fg-3); }
 .af-box .af-last {
   font-family: var(--mono);
   font-size: 11px;
-  color: var(--fg-3);
+  color: var(--fg-2);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  margin-top: 4px;
+  max-width: 100%;
+  margin-top: auto;
   border-top: 1px solid var(--line-1);
   padding-top: 4px;
 }
-.af-box .af-last .af-last-key { color: var(--fg-4); margin-right: 4px; }
+.af-box .af-last .af-last-key {
+  color: var(--fg-4);
+  margin-right: 4px;
+  text-transform: lowercase;
+  letter-spacing: .02em;
+}
 
 /* ── AgentLogsDrawer — slide-in panel from the right (Tier E) ─────────
    Replaces (with opt-out fallback) the Tier-D scroll-and-pulse behavior

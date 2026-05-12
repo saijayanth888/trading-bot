@@ -4040,13 +4040,14 @@ _AGENT_ROLE_MAP = {
     # Conceptual role  : list of agent-name prefixes that map to it
     "regime_tagger": ("regime_tagger", "trading-regime-tagger"),
     "indicator_selector": ("indicator_selector",),
-    "bull_debater": ("analyst_bull", "debate.bull"),
-    "bear_debater": ("analyst_bear", "debate.bear"),
+    "bull_debater": ("analyst_bull", "debate.bull", "risk_debate.aggressive"),
+    "bear_debater": ("analyst_bear", "debate.bear", "risk_debate.conservative"),
     "arbiter": (
         "decision_arbiter",
         "debate.arbiter",
         "combined_analyst",  # the merged bull+bear+arbiter call
         "risk_debate.judge",
+        "risk_debate.neutral",
         "trade_reviewer",
     ),
     "reflector": ("outcome_resolver", "reflector"),
