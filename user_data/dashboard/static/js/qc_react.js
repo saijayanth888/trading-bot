@@ -871,6 +871,10 @@
     // /api/mode, ftUp from /api/ops/services.
     const [mode, setMode] = useState({ label: "—", dry: true, healthy: false });
     const [ftUp, setFtUp] = useState(null);   // null = unknown, true/false otherwise
+    // Bonus #4 · Tier-B · freqtrade /api/mode round-trip latency in ms.
+    // Measured around the existing fetch — same URL, same options, same
+    // cadence (30s). null = not measured yet; -1 = the fetch threw.
+    const [latencyMs, setLatencyMs] = useState(null);
     useEffect(() => {
       const t = setInterval(() => setClock(fmtClock()), 1000);
       const refresh = async () => {
@@ -899,9 +903,17 @@
           }
         } catch (_) { /* ignore */ }
         // /api/mode — { mode: "paper"|"live", dry_run: bool, state: "running"|"paused"|... }
+        // Bonus #4 · measure round-trip around the SAME fetch (no new request,
+        // no extra cadence). performance.now() is monotonic; we record on
+        // either path (success → ms, exception → -1 to signal "feed died").
+        const tStart = (typeof performance !== "undefined" && performance.now)
+          ? performance.now() : Date.now();
         try {
           const r = await fetch("/api/mode", { cache: "no-store" });
           const j = await r.json().catch(() => ({}));
+          const tEnd = (typeof performance !== "undefined" && performance.now)
+            ? performance.now() : Date.now();
+          setLatencyMs(Math.max(0, Math.round(tEnd - tStart)));
           const m = String(j && j.mode || "").toLowerCase();
           const dry = !!(j && j.dry_run);
           const st = String(j && j.state || "").toLowerCase();
@@ -910,7 +922,7 @@
             ? (dry ? "PAPER · DRY-RUN" : "PAPER")
             : "LIVE";
           setMode({ label, dry, healthy });
-        } catch (_) { /* ignore */ }
+        } catch (_) { setLatencyMs(-1); }
         // /api/ops/services — { data: { freqtrade: { up: bool, ... }, ... } }
         try {
           const r = await fetch("/api/ops/services", { cache: "no-store" });
@@ -955,6 +967,34 @@
           { className: "pill " + (ftUp === true ? "up" : ftUp === false ? "down" : "") },
           h("span", { className: "dot " + (ftUp === true ? "up pulse" : ftUp === false ? "down" : "dim") }),
           " FREQTRADE " + (ftUp === true ? "OK" : ftUp === false ? "DOWN" : "—")
+        ),
+        // Bonus #4 · Tier-B · latency dot with backpressure pulse.
+        // 6px dot tints + pulses based on freqtrade /api/mode round-trip.
+        //   <100ms   : up   solid (fast)
+        //   100-250ms: up   slow pulse 2s (ok)
+        //   250-1000 : warn fast pulse 1s (slow)
+        //   >1000ms  : down solid (dead — feed froze, no pulse so it's
+        //              obvious the dot itself isn't moving either)
+        h(
+          "span",
+          {
+            className: "tb-latency",
+            title: latencyMs == null
+              ? "freqtrade latency: measuring…"
+              : latencyMs < 0
+                ? "freqtrade latency: feed unreachable (fetch threw)"
+                : "freqtrade latency: " + latencyMs + " ms (round-trip /api/mode)",
+          },
+          h("span", {
+            className: "ltd " + (
+              latencyMs == null   ? ""
+              : latencyMs < 0     ? "lat-dead"
+              : latencyMs > 1000  ? "lat-dead"
+              : latencyMs >= 250  ? "lat-slow"
+              : latencyMs >= 100  ? "lat-ok"
+              :                     "lat-fast"
+            ),
+          })
         )
       ),
       h("div", { className: "tb-divider" }),
