@@ -34,6 +34,18 @@ user_data/data/onchain.db-shm
 user_data/tradesv3.sqlite
 user_data/tradesv3.sqlite-shm
 user_data/tradesv3.sqlite-wal
+user_data/tradesv3_nfi.sqlite
+user_data/tradesv3_nfi.sqlite-shm
+user_data/tradesv3_nfi.sqlite-wal
+# Freqtrade auto-saves a hyperopt-style params file next to the strategy
+# when running --export trades; commit only the result JSON, not this.
+user_data/nfix6-*.json
+
+# Backtest result archives are large + reproducible; commit only the
+# parsed JSON + the report markdown. Re-runnable via scripts/nfi_x6_gate_check.sh.
+user_data/backtest_results/backtest-result-*.zip
+user_data/backtest_results/backtest-result-*.meta.json
+user_data/backtest_results/.last_result.json
 
 # Historical candle data — downloaded by freqtrade on startup
 user_data/data/coinbase/*.feather

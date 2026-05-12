@@ -22,8 +22,8 @@
     "trading_mode": "spot",
     "margin_mode": "",
     "timeframe": "5m",
-    "bot_name": "freqtrade-nfi-x6-scaffold",
-    "initial_state": "stopped",
+    "bot_name": "freqtrade-nfi-x6-paper-soak",
+    "initial_state": "running",
     "force_entry_enable": false,
     "minimal_roi": {
         "0": 100
@@ -90,14 +90,15 @@
         "chat_id": ""
     },
     "api_server": {
-        "enabled": false,
-        "listen_ip_address": "127.0.0.1",
-        "listen_port": 8090,
+        "_doc": "Bound to 0.0.0.0:8080 inside the container; docker-compose maps host 127.0.0.1:8090 → container 8080. Username/password are overridden by FREQTRADE__API_SERVER__USERNAME/PASSWORD env vars set in docker-compose.yml from the same .env values the main bot uses.",
+        "enabled": true,
+        "listen_ip_address": "0.0.0.0",
+        "listen_port": 8080,
         "verbosity": "error",
-        "enable_openapi": false,
+        "enable_openapi": true,
         "CORS_origins": [],
-        "username": "scaffold",
-        "password": "scaffold"
+        "username": "freqtrader",
+        "password": "__OVERRIDDEN_BY_FREQTRADE__API_SERVER__PASSWORD__"
     },
     "internals": {
         "process_throttle_secs": 5
