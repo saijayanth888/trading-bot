@@ -1,9 +1,20 @@
-# HANDOFF · `feat/v4-wave2-frontend` · V4 frontend wave-2
+# HANDOFF · `feat/v4-wave2-frontend-v2` · V4 frontend wave-2
 
-**Branch:** `feat/v4-wave2-frontend` (off `main`)
+**Branch:** `feat/v4-wave2-frontend-v2` (off `feat/v4-wave2-quality` HEAD `791308b`,
+which itself is off `main`'s wave-2 plan commit — no divergent code, only
+docs above the cut point).
 **Worktree:** `.claude/worktrees/agent-a8e1a0734cecef701`
 **Date:** 2026-05-12
-**Commit:** `e52feb3` — `v4(wave-2/frontend): greenfield Vite + React 19 + shadcn/ui operator console`
+**Commits:**
+- `e52feb3` — `v4(wave-2/frontend): greenfield Vite + React 19 + shadcn/ui operator console`
+- `b1f4b88` — `HANDOFF.md · V4 wave-2 frontend session`
+
+> **Branch-name note:** the dispatch asked for `feat/v4-wave2-frontend`, but a
+> branch by that exact name already existed locally (carrying the pre-existing
+> bug-fix work `merge: fix/pre-existing-bugs — risk_governor dedup …`). To
+> avoid clobbering that, this work landed on `feat/v4-wave2-frontend-v2`
+> instead. Operator should rename or pick whichever they prefer at merge time
+> — the commit graph is clean and re-pointable with `git branch -m`.
 
 ---
 
@@ -210,13 +221,21 @@ Per `memory/feedback_dashboard_design.md`:
 ## 8 · Commit shas (this branch)
 
 ```
+b1f4b88  HANDOFF.md · V4 wave-2 frontend session — V3 hunt result, component map, integration touchpoints
 e52feb3  v4(wave-2/frontend): greenfield Vite + React 19 + shadcn/ui operator console
-         ↑ everything above (frontend-v4/ + user_data/dashboard/v4_routes.py
-           + user_data/dashboard/app.py +6 lines)
+         ↑ frontend-v4/ + user_data/dashboard/v4_routes.py
+           + user_data/dashboard/app.py +6 lines
 ```
 
 Parent: `791308b docs(v4): wave-2 sprint plan — 10 agents`
-Branch base: `main` (via parent-of-parent `c18acfa wave-1 FINAL`)
+Branch base: `main` (via parent-of-parent `c18acfa wave-1 FINAL`).
+
+> **Note for the reviewer/merger:** the worktree's HEAD was on
+> `feat/v4-wave2-quality` (a pre-existing local branch) at commit time, so
+> those two SHAs are also reachable from that branch. Since neither was
+> pushed, this is harmless — `git reset --hard 791308b` on
+> `feat/v4-wave2-quality` (if anyone needs it clean) drops only the two V4
+> commits, which are preserved on `feat/v4-wave2-frontend-v2`.
 
 **Not pushed to remote** (per spec — operator-reviewed merge).
 
