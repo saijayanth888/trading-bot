@@ -18,7 +18,7 @@ def isolated_risk_anchor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Ite
     """Point ``RISK_GOVERNOR_ANCHORS_PATH`` at a per-test tmp file."""
     anchor = tmp_path / "risk_governor_anchors.json"
     monkeypatch.setenv("RISK_GOVERNOR_ANCHORS_PATH", str(anchor))
-    yield anchor
+    return anchor
 
 
 @pytest.fixture(autouse=True)
@@ -27,4 +27,4 @@ def isolated_quanta_state_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("QUANTA_STATE_DIR", str(state_dir))
-    yield state_dir
+    return state_dir

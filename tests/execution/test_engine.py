@@ -835,7 +835,7 @@ def test_reject_swallows_illegal_transition_from_terminal(
 
     engine = _engine(fake_exchange, fake_ledger, idem_store)
     terminal_machine = OrderStateMachine(state=OrderState.FILLED)
-    out = engine._reject(  # noqa: SLF001 - testing defensive branch
+    out = engine._reject(
         terminal_machine,
         proposal,
         code="post_terminal_reject",

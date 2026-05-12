@@ -78,7 +78,7 @@ class Strategy(ABC):
     # with stateful implementations without changing the signature.
     # ------------------------------------------------------------------
 
-    def on_tick(self, tick: Tick) -> Sequence[OrderProposal]:  # noqa: ARG002
+    def on_tick(self, tick: Tick) -> Sequence[OrderProposal]:
         """Handle a raw tick before bar aggregation. Default returns ``()``.
 
         Returns

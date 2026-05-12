@@ -81,12 +81,22 @@ select = [
     "RUF",          # ruff-specific
 ]
 ignore = [
-    "E501",  # line length handled by formatter
-    "B008",  # function call as default arg — Path.home() etc
+    "E501",   # line length handled by formatter
+    "B008",   # function call as default arg — Path.home() etc
+    "B027",   # empty abstract-base methods — intentional no-op hooks
+    "RUF001", # ambiguous unicode in strings (ρ, ×, − in math/error messages)
+    "RUF002", # idem (docstrings allowed to contain math symbols)
+    "RUF003", # idem (comments)
+    "RUF012", # ClassVar mutable default — dataclasses + ABC class-level defaults are intentional
+    "PERF401", # list.append in loop fine for readability in adapters
+    "PT006",  # parametrize first-arg-as-string is common idiom
+    "SIM108", # ternary not always clearer
+    "SIM105", # explicit try/except/pass is clearer than contextlib.suppress
+    "UP046",  # PEP 695 generics — keep Generic[T] for Python 3.12 dataclass compat
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "T20", "PT011", "B", "ASYNC"]  # asserts/print/broad raises/bugbear/async ok in tests
+"tests/**" = ["S101", "T20", "PT011", "B", "ASYNC", "SIM117", "PT018"]  # asserts/print/broad raises/bugbear/async/nested-with/compound-assert ok in tests
 
 # ---------------------------------------------------------------------------
 # Mypy
@@ -108,11 +118,25 @@ mypy_path = "src"
 # legacy code lives outside src/ — never type-checked from here.
 
 [[tool.mypy.overrides]]
-module = ["sqlalchemy.*", "psycopg.*", "structlog.*", "vcr.*", "safetensors.*", "torch.*", "coinbase.*", "alpaca.*"]
+module = [
+    "sqlalchemy.*",
+    "psycopg.*",
+    "structlog.*",
+    "vcr.*",
+    "safetensors.*",
+    "torch.*",
+    "coinbase.*",
+    "alpaca.*",
+    "pandas.*",
+    "pandas",
+    "cupy",
+    "cupy.*",
+    "numpy.*",
+]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = "tests.*"
+module = ["tests.*"]
 disallow_untyped_defs = false
 
 # ---------------------------------------------------------------------------

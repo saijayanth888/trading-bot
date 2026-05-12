@@ -126,13 +126,15 @@ def test_repeated_503_raises_ollama_error() -> None:
         return httpx.Response(503, text="still loading")
 
     transport = _make_transport(handler)
-    with OllamaClient(
-        transport=transport,
-        sleep=_no_sleep,
-        max_retries=3,
-    ) as client:
-        with pytest.raises(OllamaError) as exc_info:
-            client.generate("hermes3:70b", "x")
+    with (
+        OllamaClient(
+            transport=transport,
+            sleep=_no_sleep,
+            max_retries=3,
+        ) as client,
+        pytest.raises(OllamaError) as exc_info,
+    ):
+        client.generate("hermes3:70b", "x")
     assert exc_info.value.status_code == 503
 
 
@@ -144,13 +146,15 @@ def test_non_503_4xx_raises_immediately() -> None:
         return httpx.Response(400, text="bad model")
 
     transport = _make_transport(handler)
-    with OllamaClient(
-        transport=transport,
-        sleep=_no_sleep,
-        max_retries=3,
-    ) as client:
-        with pytest.raises(OllamaError) as exc_info:
-            client.generate("nope", "x")
+    with (
+        OllamaClient(
+            transport=transport,
+            sleep=_no_sleep,
+            max_retries=3,
+        ) as client,
+        pytest.raises(OllamaError) as exc_info,
+    ):
+        client.generate("nope", "x")
     assert exc_info.value.status_code == 400
     # No retry on 4xx — caller fixes the request.
     assert calls[0] == 1
@@ -164,13 +168,15 @@ def test_connection_error_retries_then_raises() -> None:
         raise httpx.ConnectError("daemon down")
 
     transport = _make_transport(handler)
-    with OllamaClient(
-        transport=transport,
-        sleep=_no_sleep,
-        max_retries=2,
-    ) as client:
-        with pytest.raises(OllamaError, match="connection error"):
-            client.generate("hermes3:8b", "x")
+    with (
+        OllamaClient(
+            transport=transport,
+            sleep=_no_sleep,
+            max_retries=2,
+        ) as client,
+        pytest.raises(OllamaError, match="connection error"),
+    ):
+        client.generate("hermes3:8b", "x")
     assert calls[0] == 2
 
 

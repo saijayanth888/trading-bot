@@ -16,7 +16,7 @@ References
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from decimal import Decimal  # noqa: TC003 — runtime needed for Pydantic v2 model resolution
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal, NewType, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator

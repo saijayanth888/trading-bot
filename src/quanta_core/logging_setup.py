@@ -41,25 +41,27 @@ LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 _REDACTED_PLACEHOLDER = "***REDACTED***"
 
-_REDACTED_KEYS: frozenset[str] = frozenset({
-    "api_key",
-    "api_secret",
-    "secret",
-    "secret_key",
-    "password",
-    "token",
-    "bearer",
-    "authorization",
-    "private_key",
-    "passphrase",
-    "alpaca_api_key",
-    "alpaca_secret_key",
-    "coinbase_api_key",
-    "coinbase_api_secret",
-    "anthropic_api_key",
-    "openai_api_key",
-    "modelforge_api_key",
-})
+_REDACTED_KEYS: frozenset[str] = frozenset(
+    {
+        "api_key",
+        "api_secret",
+        "secret",
+        "secret_key",
+        "password",
+        "token",
+        "bearer",
+        "authorization",
+        "private_key",
+        "passphrase",
+        "alpaca_api_key",
+        "alpaca_secret_key",
+        "coinbase_api_key",
+        "coinbase_api_secret",
+        "anthropic_api_key",
+        "openai_api_key",
+        "modelforge_api_key",
+    }
+)
 
 
 def _redact_secrets(

@@ -384,7 +384,7 @@ class BrokerExchange(Exchange):
             "override ``open`` to bridge stream_ticks + stream_fills into a StreamEvent iterator.",
         )
 
-    async def list_positions(self) -> list[Any]:  # type: ignore[override]
+    async def list_positions(self) -> list[Any]:
         return await self.get_positions()
 
     async def close(self) -> None:

@@ -101,7 +101,7 @@ def test_history_records_every_transition_with_reason() -> None:
 
 def test_state_transition_is_frozen() -> None:
     t = StateTransition(frm=OrderState.NEW, to=OrderState.SENT, at=NOW, reason="x")
-    with pytest.raises(Exception):  # noqa: B017 - frozen Pydantic raises ValidationError
+    with pytest.raises(Exception):
         t.frm = OrderState.ACK  # type: ignore[misc]
 
 

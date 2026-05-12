@@ -206,5 +206,5 @@ def test_drift_at_exact_threshold_passes() -> None:
 
 def test_result_is_frozen() -> None:
     r = SlippageGateResult(ok=True, reason="ok")
-    with pytest.raises(Exception):  # noqa: B017
+    with pytest.raises(Exception):
         r.ok = False  # type: ignore[misc]

@@ -406,7 +406,7 @@ class ExecutionEngine:
                 detail=exc.message,
                 already_rejected=True,
             )
-        except Exception as exc:  # noqa: BLE001 - we re-raise programmer bugs only
+        except Exception as exc:
             # IO that wasn't classified or a programmer bug: surface, do not silently retry.
             machine.transition(OrderState.REJECTED, at=self._now_fn(), reason="exception")
             self._idem.abandon(proposal.client_order_id, "exception")
@@ -527,7 +527,7 @@ class ExecutionEngine:
         for attempt in range(1, self._retry.max_attempts + 1):
             try:
                 return self._exchange.place(proposal)
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:
                 if not self._retry.should_retry(exc):
                     raise
                 last_exc = exc

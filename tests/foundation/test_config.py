@@ -45,7 +45,7 @@ def test_default_universe_constant_matches_settings() -> None:
 
 def test_settings_is_frozen() -> None:
     settings = Settings()
-    with pytest.raises(Exception):  # noqa: PT011 — pydantic raises ValidationError
+    with pytest.raises(Exception):
         settings.runtime = RuntimeSection(mode="live")
 
 
@@ -55,22 +55,22 @@ def test_settings_is_frozen() -> None:
 
 
 def test_invalid_mode_rejected() -> None:
-    with pytest.raises(Exception):  # noqa: PT011
+    with pytest.raises(Exception):
         Settings(runtime=RuntimeSection.model_validate({"mode": "bogus"}))
 
 
 def test_invalid_hold_horizon_lo_too_low() -> None:
-    with pytest.raises(Exception):  # noqa: PT011
+    with pytest.raises(Exception):
         RuntimeSection(hold_horizon_days=(0, 5))
 
 
 def test_invalid_hold_horizon_inverted() -> None:
-    with pytest.raises(Exception):  # noqa: PT011
+    with pytest.raises(Exception):
         RuntimeSection(hold_horizon_days=(10, 3))
 
 
 def test_empty_universe_rejected() -> None:
-    with pytest.raises(Exception):  # noqa: PT011
+    with pytest.raises(Exception):
         RuntimeSection(universe=[])
 
 
@@ -85,7 +85,7 @@ def test_universe_strips_whitespace_and_filters_blanks() -> None:
 
 
 def test_extra_keys_rejected_on_runtime() -> None:
-    with pytest.raises(Exception):  # noqa: PT011
+    with pytest.raises(Exception):
         RuntimeSection.model_validate({"mode": "paper", "boom": True})
 
 
