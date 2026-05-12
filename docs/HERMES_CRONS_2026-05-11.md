@@ -34,7 +34,8 @@ below back into `~/.hermes/scripts/` and apply the jobs.json patch in §3.
 | `daily_pnl_report`         | `0 0 * * *`        | Postgres `trade_journal` + `regime_log`   | Slack webhook                          | `:bell: :warning: :rotating_light:` |
 | `weekly_evolution_report`  | `0 0 * * 0`        | `mcp_local.get_evolution_status()` + `get_champion_genome()` | Slack webhook | `:bell: :warning:` |
 | `sentiment_accuracy_audit` | `0 6 * * *`        | Postgres `trade_journal` joined to `sentiment_log` | Slack webhook | `:bell: :warning: :rotating_light:` |
-| `ept_eval_breeding`        | `every 2160m` (~36h) | `mcp_local.get_evolution_status()` (sharpe<0.5 flag) | Slack webhook | `:bell: :warning:` |
+| ~~`ept_eval_breeding`~~     | ~~`every 2160m`~~ | **RETIRED 2026-05-12** — paused; ModelForge supersedes (see `docs/MODELFORGE_INTEGRATION_PLAN.md` §EPT retirement) | — | — |
+| ~~`ept_training_daily`~~    | ~~`0 2 * * *`~~   | **RETIRED 2026-05-12** — paused; was emitting deterministic mock-mode output (champion `gen0-011`, fitness `0.7540`) every night | — | — |
 | `post_mortem_weekly`       | `0 1 * * 0`        | Postgres `trade_journal` clustered by (regime, exit_reason) | Slack webhook | `:bell: :warning: :rotating_light:` |
 | `market_research_30min`    | `*/30 * * * *`     | Postgres `sentiment_log`, `news_headlines`, `fear_greed_log`, `regime_log` — divergence score | Slack webhook (suppressed unless actionable) | `:bell: :warning:` |
 | `shark_briefing_alerts`    | `15 9 * * 1-5`     | `stocks/memory/DAILY-HANDOFF.md` last phase block | Slack webhook | `:bell: :warning: :rotating_light:` |
