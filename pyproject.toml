@@ -1,0 +1,84 @@
+# Quanta Core V4 — root pyproject.
+#
+# This file currently only configures tooling for the new ``src/quanta_core/``
+# tree built under ``feat/v4-build``. The legacy stack (``user_data/``,
+# ``stocks/``) is not affected: ruff and mypy are scoped to ``src/``, and
+# pytest discovery for ``tests/live/`` is opt-in via the explicit path
+# (``pytest tests/live/``).
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "quanta-core"
+version = "0.4.0.dev0"
+description = "Quanta Core V4 — direct-to-broker trading engine"
+requires-python = ">=3.12"
+dependencies = [
+  "anyio>=4.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/quanta_core"]
+
+# ---------------- ruff ----------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests/live"]
+extend-exclude = [
+  "user_data",
+  "stocks",
+  "scripts",
+  "tests",  # legacy tests not maintained to ruff-strict style
+  "hermes-mcp",
+  "private",
+  "docs",
+]
+
+[tool.ruff.lint]
+select = [
+  "E",      # pycodestyle
+  "F",      # pyflakes
+  "I",      # isort
+  "B",      # bugbear
+  "T20",    # no print
+  "UP",     # pyupgrade
+  "ASYNC",  # async lints
+  "SIM",    # simplify
+  "C4",     # comprehensions
+  "PT",     # pytest
+  "RET",    # return
+]
+ignore = [
+  "E501",  # line length handled by formatter
+  "B008",  # function call as default arg — Path.home() etc
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/live/*" = ["T20"]
+
+# ---------------- mypy ----------------
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src/quanta_core"]
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = "src"
+# legacy code lives outside src/ — never type-checked from here.
+
+[[tool.mypy.overrides]]
+module = "tests.live.*"
+disallow_untyped_defs = false
+
+# ---------------- pytest ----------------
+#
+# We intentionally do NOT set ``[tool.pytest.ini_options]`` here. The legacy
+# test suite under ``tests/`` is not pytest-config aware; setting global
+# options would change behaviour. The live module tests use the helper
+# ``tests/live/pytest.ini`` instead — run with ``pytest -c
+# tests/live/pytest.ini`` or ``pytest tests/live -p anyio``.
