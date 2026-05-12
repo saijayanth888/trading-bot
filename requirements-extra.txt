@@ -4,19 +4,25 @@
 #   docker compose exec freqtrade pip install -r /freqtrade/user_data/../requirements-extra.txt
 #
 # Or rebake the image (see Dockerfile in this directory).
+#
+# Pinning policy (2026-05-12 audit):
+#   - Lower bound captures the minimum API we use.
+#   - Upper bound (< next major) keeps `pip install` reproducible across
+#     machines without forcing a security-patch lockout. Bump deliberately
+#     when adopting a major release.
 
-hmmlearn>=0.3.2
-stable-baselines3>=2.4.0
-gymnasium>=0.29
-influxdb-client>=1.40
-requests>=2.31
-psycopg[binary,pool]>=3.2
-psycopg2-binary>=2.9     # for freqtrade's SQLAlchemy driver
-aiohttp>=3.9
+hmmlearn>=0.3.2,<0.4
+stable-baselines3>=2.4.0,<3
+gymnasium>=0.29,<2
+influxdb-client>=1.40,<2
+requests>=2.31,<3
+psycopg[binary,pool]>=3.2,<4
+psycopg2-binary>=2.9,<3     # for freqtrade's SQLAlchemy driver
+aiohttp>=3.9,<4
 # torch is already in the freqtradeorg/freqtrade:stable_freqaitorch image,
 # pinned for reference only:
-# torch>=2.4
+# torch>=2.4,<3
 
 
 # News aggregator — RSS parsing
-feedparser>=6.0.10
+feedparser>=6.0.10,<7
