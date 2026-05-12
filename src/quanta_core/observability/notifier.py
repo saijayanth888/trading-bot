@@ -157,9 +157,50 @@ class Notifier(ABC):
     ) -> None:
         """Implementation hook — actually send the notification."""
 
+    async def warning(self, subject: str, body: str) -> bool:
+        """Route a (subject, body) WARN-level alert through :meth:`notify`.
+
+        Convenience for the live engine + other call sites that pre-date the
+        :meth:`notify` API. ``dedup_key`` defaults to ``subject`` so identical
+        subjects collapse inside the dedup window.
+        """
+        return await self.notify(
+            f"{subject}\n{body}" if body else subject,
+            severity=Severity.WARN,
+            dedup_key=subject,
+        )
+
+    async def info(self, subject: str, body: str) -> bool:
+        """INFO-level twin of :meth:`warning`."""
+        return await self.notify(
+            f"{subject}\n{body}" if body else subject,
+            severity=Severity.INFO,
+            dedup_key=subject,
+        )
+
     def clear_dedup_cache(self) -> None:
         """Reset the dedup cache. Tests use this between cases."""
         self._dedup.reset()
+
+
+class NullNotifier(Notifier):
+    """No-op notifier — silently discards every message.
+
+    Used in paper mode, unit tests, and as the default fallback when no
+    webhook is configured. ``_deliver`` does nothing; ``dedup_window_s``
+    defaults to 0 so back-to-back test calls aren't suppressed.
+    """
+
+    def __init__(self, *, dedup_window_s: float = 0.0) -> None:
+        super().__init__(dedup_window_s=dedup_window_s)
+
+    async def _deliver(
+        self,
+        message: str,
+        severity: Severity,
+        context: Mapping[str, Any],
+    ) -> None:
+        return None
 
 
 class LogOnlyNotifier(Notifier):

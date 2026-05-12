@@ -43,8 +43,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      influxdb:
-        condition: service_started
     volumes:
       - ./user_data:/freqtrade/user_data
       # Operator scripts (entrypoint loader, etc) — read-only.
@@ -77,10 +75,10 @@ services:
       # here — passwords with special chars (e.g. '@') break URL parsing.
       # freqtrade_entrypoint.py builds them from POSTGRES_* below using
       # urllib.parse.quote_plus on the password.
-      - INFLUX_URL=http://influxdb:8086
-      - INFLUX_TOKEN=${INFLUX_TOKEN:-trading-token}
-      - INFLUX_ORG=${INFLUX_ORG:-trading-bot}
-      - INFLUX_BUCKET=${INFLUX_BUCKET:-trading}
+      # InfluxDB writer was retired 2026-05-12 (no consumer; Grafana removed).
+      # The metrics_writer still imports influxdb_client opportunistically;
+      # INFLUX_ENABLED=0 keeps it strictly no-op.
+      - INFLUX_ENABLED=0
       # Recommended: drop the JSON key Coinbase emits at ./secrets/coinbase.json.
       # The freqtrade_entrypoint.py script reads it on container start and
       # exports FREQTRADE__EXCHANGE__KEY / FREQTRADE__EXCHANGE__SECRET so the
@@ -283,36 +281,9 @@ services:
       - bear=/lora/bear-current
       - arbiter=/lora/arbiter-current
 
-  # ── DEPRECATION NOTICE ────────────────────────────────────────────────
-  # InfluxDB is scheduled for removal once Grafana dashboards are migrated
-  # to query TimescaleDB directly. Until then, both run in parallel.
-  # To remove: delete this service + its volumes, update grafana provisioning
-  # to use the PostgreSQL/TimescaleDB datasource, and remove INFLUX_* from .env.
-  # ────────────────────────────────────────────────────────────────────────
-  influxdb:
-    image: influxdb:2.7
-    container_name: influxdb
-    restart: unless-stopped
-    # P0-V: InfluxDB exposed only to other docker services + the host loopback.
-    ports:
-      - "127.0.0.1:8086:8086"
-    volumes:
-      - influxdb_data:/var/lib/influxdb2
-      - influxdb_config:/etc/influxdb2
-    environment:
-      - DOCKER_INFLUXDB_INIT_MODE=setup
-      - DOCKER_INFLUXDB_INIT_USERNAME=${INFLUX_ADMIN_USER:-admin}
-      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUX_ADMIN_PASSWORD:-changeme-please}
-      - DOCKER_INFLUXDB_INIT_ORG=${INFLUX_ORG:-trading-bot}
-      - DOCKER_INFLUXDB_INIT_BUCKET=${INFLUX_BUCKET:-trading}
-      - DOCKER_INFLUXDB_INIT_RETENTION=${INFLUX_RETENTION:-90d}
-      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUX_TOKEN:-trading-token}
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8086/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+  # InfluxDB removed 2026-05-12: only consumer was Grafana, which was also
+  # removed. Trade telemetry lives in TimescaleDB; circuit-breaker + LLM
+  # state live in JSONL. No replacement needed.
 
   dashboard:
     build:
@@ -399,44 +370,10 @@ services:
       retries: 5
       start_period: 30s
 
-  grafana:
-    # P0-X: pin Grafana to the exact version we last validated against
-    # (was :latest, which silently shipped 13.0.1 on 2026-04-17). Bump
-    # deliberately when migrating dashboards.
-    image: grafana/grafana:13.0.1
-    container_name: grafana
-    restart: unless-stopped
-    depends_on:
-      - influxdb
-    # P0-V: Grafana on loopback only; tunnel for remote access.
-    ports:
-      - "127.0.0.1:3000:3000"
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
-    environment:
-      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-changeme-please}
-      - GF_USERS_ALLOW_SIGN_UP=false
-      - GF_AUTH_ANONYMOUS_ENABLED=false
-      - GF_INSTALL_PLUGINS=
-      - INFLUX_URL=http://influxdb:8086
-      - INFLUX_TOKEN=${INFLUX_TOKEN:-trading-token}
-      - INFLUX_ORG=${INFLUX_ORG:-trading-bot}
-      - INFLUX_BUCKET=${INFLUX_BUCKET:-trading}
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/api/health || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+  # Grafana removed 2026-05-12 — unused; dashboard is the SSOT UI.
 
 volumes:
   postgres_data:
-  influxdb_data:
-  influxdb_config:
-  grafana_data:
   # Persists the HF model cache for vLLM — first pull is ~30 GB, we
   # don't want to redo it on every container restart.
   vllm_cache:
