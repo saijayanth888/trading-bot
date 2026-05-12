@@ -1,0 +1,164 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "quanta-core"
+version = "0.1.0-wave2-backtest"
+description = "Quanta Core V4 — one event loop, one strategy ABC, one ledger. Wave 2: backtest parity oracle."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [{ name = "trading-bot operator" }]
+dependencies = [
+  "pydantic>=2.7",
+  "pandas>=2.2",
+  "pyarrow>=15.0",
+  "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-cov>=5.0",
+  "mypy>=1.10",
+  "ruff>=0.5",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/quanta_core"]
+
+# ---------------------------------------------------------------------------
+# Ruff — lint + format in one binary.
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E", "F", "W",     # pycodestyle + pyflakes
+  "I",               # isort
+  "B",               # bugbear
+  "UP",              # pyupgrade
+  "SIM",             # simplify
+  "RUF",             # ruff
+  "C4",              # comprehensions
+  "PIE",             # misc
+  "PT",              # pytest style
+  "PTH",             # pathlib
+  "TCH",             # type-checking import guard
+  "ANN",             # annotations
+  "D",               # pydocstyle (selective)
+  "N",               # pep8-naming
+  "S",               # bandit-style
+]
+ignore = [
+  "D100", "D104", "D107",  # missing module/package/__init__ docstrings — module headers cover this
+  "D203", "D213",          # incompatible with D211/D212 (chosen below)
+  "ANN401",                # Any is allowed in narrow seams (metadata dict, journal payloads)
+  "S101",                  # asserts are fine in tests + invariants
+  "S311",                  # random is fine for deterministic-seeded synthetic candles
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+  "D",        # docstrings — tests are self-describing
+  "ANN",      # annotations — pytest fixtures are positional
+  "S",        # bandit — asserts and pseudo-random fine in tests
+  "PT011",    # broad pytest.raises — Pydantic v2 errors are ValueError soup
+  "ARG002",   # unused method args — strategy stubs accept-and-ignore
+  "TC001",    # type-checking imports — strategies use eager imports
+  "TC003",    # type-checking imports — kept eager for fixture clarity
+  "PLR2004",  # magic numbers
+  "PT006",    # tuple-of-strings parametrize names
+  "RUF012",   # mutable class default — used intentionally to demo non-determinism
+  "RUF043",   # pytest.raises regex — Pydantic v2 errors share many phrasings
+  "B027",     # abstract method no-op default body — Strategy ABC pattern
+  "RUF007",   # zip-instead-of-pairwise — pairwise needs 3.10+ and slices are clearer
+  "RUF009",   # call in dataclass default — _MockLiveResult uses Symbol() fallback
+  "SIM108",   # if-else vs ternary — clarity wins
+]
+"src/quanta_core/strategy/base.py" = [
+  "D102",   # method docstrings — base ABC is documented at class level
+  "B027",   # empty no-op defaults — concrete strategies override lazily
+]
+# Pydantic v2 needs runtime access to annotation types for model resolution,
+# so TC001/TC003 (move-to-TYPE_CHECKING) is wrong for type-bearing modules.
+"src/quanta_core/backtest/result.py" = ["TC001"]
+"src/quanta_core/backtest/walk_forward.py" = ["TC001"]
+"src/quanta_core/backtest/candle_source.py" = ["SIM108"]
+"src/quanta_core/types.py" = ["TC003"]  # Decimal needed at runtime for Pydantic
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.format]
+quote-style = "double"
+
+# ---------------------------------------------------------------------------
+# Mypy — strict.
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+# strict=true on src is enforced by the explicit flags below — kept off here
+# so the tool.mypy.overrides can relax the test surface (mypy applies CLI/file
+# strict=true uniformly otherwise).
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unreachable = true
+disallow_any_generics = true
+disallow_untyped_decorators = true
+no_implicit_reexport = true
+implicit_reexport = false
+strict_equality = true
+files = ["src/quanta_core", "tests/backtest"]
+exclude = ['tests/backtest/test_.*\.py$', 'tests/backtest/conftest\.py$']
+
+# Strict mode applied to library code only — the test files use Pydantic models
+# from a subclass-attribute style that fights mypy's strict attr-defined rule.
+[[tool.mypy.overrides]]
+module = "quanta_core.*"
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_calls = true
+disallow_any_unimported = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_return_any = true
+
+[[tool.mypy.overrides]]
+module = ["pandas.*", "pyarrow.*"]
+ignore_missing_imports = true
+
+
+# ---------------------------------------------------------------------------
+# Pytest + coverage.
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests/backtest"]
+addopts = [
+  "-ra",
+  "--strict-markers",
+  "--strict-config",
+]
+markers = [
+  "parity: cross-engine parity oracle (live vs backtest).",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["src/quanta_core/backtest", "src/quanta_core/strategy"]
+
+[tool.coverage.report]
+precision = 1
+show_missing = true
+skip_empty = true
+exclude_lines = [
+  "pragma: no cover",
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "\\.\\.\\.",
+]
