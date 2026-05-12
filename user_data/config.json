@@ -188,9 +188,10 @@
     "logfile": "user_data/logs/freqtrade.log",
     "db_url": "__OVERRIDDEN_BY__FREQTRADE__DB_URL__",
     "strategy_overrides": {
-        "_doc": "OPTIONAL strategy-level overrides. Default behaviour is unchanged when this block is absent or fields are missing. tft_blind_fallback: when TFT prediction columns (up/down) are missing \u2014 either freqai cold-init (5-10 min after restart) or a quarantined pair (stub model.zip / missing artifact) \u2014 the strategy normally returns a no-signal dataframe (safe, but the pair stays dark until next successful retrain). Setting enabled=true makes the strategy fall through to a pure BollingerRSI mean-reversion entry path at degraded sizing (position_size_multiplier). ALL other safety gates (regime_confidence, capital_allocation, drawdown, risk_governor) still apply. Operator must opt in by flipping enabled to true.",
+        "_doc": "OPTIONAL strategy-level overrides. tft_blind_fallback: when TFT prediction columns (up/down) are missing \u2014 either freqai cold-init (5-10 min after restart) or a quarantined pair (stub model.zip / missing artifact) \u2014 the strategy normally returns a no-signal dataframe (safe, but the pair stays dark until next successful retrain). Setting enabled=true makes the strategy fall through to a pure BollingerRSI mean-reversion entry path at degraded sizing (position_size_multiplier). ALL other safety gates (regime_confidence, capital_allocation, drawdown, risk_governor) still apply.",
+        "_paper_default_doc": "PAPER MODE DEFAULT 2026-05-12+: tft_blind_fallback.enabled defaults to TRUE so quarantined pairs (DOGE/XRP/AVAX/LINK on 2026-05-12) keep trading on pure BollingerRSI MR signal at 50% size while their TFT models retrain. Before switching to LIVE: (1) backtest validates well? (2) risk acceptable on real money? (3) if performance is good, consider bumping position_size_multiplier toward 1.0 OR flip enabled to false to gate behind TFT only. See FreqAIMeanRevV1.py header docstring + HANDOFF for the 2026-05-12 permanent-fixes context.",
         "tft_blind_fallback": {
-            "enabled": false,
+            "enabled": true,
             "position_size_multiplier": 0.5,
             "log_per_pair_once": true
         }

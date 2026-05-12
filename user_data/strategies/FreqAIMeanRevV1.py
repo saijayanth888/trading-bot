@@ -4,6 +4,29 @@ FreqAIMeanRevV1 — starter FreqAI strategy.
 Trains a LightGBM classifier to predict whether the close `label_period_candles`
 ahead will be higher ("up") or lower ("down") than the current close. Uses RSI,
 MACD, Bollinger bands, volume SMA ratio and ATR as features.
+
+tft_blind_fallback (paper-mode default ON, 2026-05-12+)
+-------------------------------------------------------
+config.json[strategy_overrides][tft_blind_fallback].enabled defaults to TRUE
+on this paper-trading deployment. Quarantined pairs (TFT artifact missing or
+training stub) keep trading on a pure BollingerRSI mean-reversion signal at
+``position_size_multiplier`` (default 50%) of the normal stake — every other
+safety gate (regime_confidence, capital_allocation, drawdown, risk_governor)
+still applies, so a flat / trending_down / high_volatility regime still
+blocks the entry.
+
+Before going LIVE, the operator should:
+  1. Confirm the BollingerRSI-blind path backtests well over a multi-month
+     window (the bb_oversold_revert + rsi<=30 entry, bb_upper + rsi>=70 exit
+     is identical to the TFT-present "bb_oversold_revert" branch — only the
+     size differs).
+  2. Decide whether the 50% sizing is appropriate or bump it up if the
+     blind path is competitive with the TFT path on real data.
+  3. Either flip enabled back to false (TFT-only gating, safer) or accept
+     the blind path as a permanent safety net for re-training windows.
+
+See HANDOFF.md for the 2026-05-12 permanent-fixes context (dtype merge bug,
+broken-model retrain, default flip).
 """
 
 import logging
