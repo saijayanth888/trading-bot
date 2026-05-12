@@ -43,7 +43,10 @@ case "$MODE" in
             "user_data/models"
             "user_data/logs/evolution.json"
         )
-        DUMP_PG=1
+        # Honor a caller-supplied DUMP_PG override so test runners (which
+        # have no docker container) can disable the pg_dump step that would
+        # otherwise hang. Defaults to 1 in cron.
+        DUMP_PG="${DUMP_PG:-1}"
         ;;
     weekly)
         DEST_DIR="${DEST_ROOT}/weekly"
@@ -51,7 +54,7 @@ case "$MODE" in
         # Everything under user_data — minus pycache and freqai cache so
         # the archive doesn't balloon with reproducible-from-source content.
         SOURCES=("user_data")
-        DUMP_PG=1
+        DUMP_PG="${DUMP_PG:-1}"
         ;;
     *)
         echo "usage: $0 {daily|weekly}" >&2

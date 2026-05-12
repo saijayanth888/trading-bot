@@ -127,9 +127,9 @@ unhandled exception leaves a position dangling >24h.
   endpoint.
 - Hermes cron job registration — when ready, run:
   ```
-  hermes cron create '0 15 * * 5' --name wheel_sell_csps --script wheel_sell_csps.sh --no-agent --workdir /home/saijayanthai/Documents/trading-bot/stocks
-  hermes cron create '0 14,18 * * 1-5' --name wheel_profit_take --script wheel_profit_take.sh --no-agent --workdir /home/saijayanthai/Documents/trading-bot/stocks
-  hermes cron create '0 15 * * 1' --name wheel_sell_calls --script wheel_sell_covered_calls.sh --no-agent --workdir /home/saijayanthai/Documents/trading-bot/stocks
+  hermes cron create '0 15 * * 5' --name wheel_sell_csps --script wheel_sell_csps.sh --no-agent --workdir $HOME/Documents/trading-bot/stocks
+  hermes cron create '0 14,18 * * 1-5' --name wheel_profit_take --script wheel_profit_take.sh --no-agent --workdir $HOME/Documents/trading-bot/stocks
+  hermes cron create '0 15 * * 1' --name wheel_sell_calls --script wheel_sell_covered_calls.sh --no-agent --workdir $HOME/Documents/trading-bot/stocks
   ```
   (Wrapper scripts to be written under `~/.hermes/scripts/`.)
 - Telegram delivery — `runner.*` returns a summary dict ready for piping

@@ -14,7 +14,11 @@
 
 set -euo pipefail
 
-REPO=/home/saijayanthai/Documents/trading-bot
+# REPO defaults to two levels up from this script (so installed copies under
+# $HOME/.hermes/scripts/ keep working when REPO is set in cron env). Override
+# with TRADING_BOT_REPO=/abs/path if your checkout isn't at $HOME/.../trading-bot.
+REPO="${TRADING_BOT_REPO:-${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)}}"
+[[ -d "$REPO/user_data" ]] || REPO="$HOME/Documents/trading-bot"
 STOCKS=$REPO/stocks
 LOG=$STOCKS/memory/cron-stocks-ml-train.log
 STATUS=$STOCKS/memory/stocks-ml-status.json

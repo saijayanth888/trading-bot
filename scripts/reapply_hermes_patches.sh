@@ -19,8 +19,10 @@
 
 set -euo pipefail
 
-REPO=/home/saijayanthai/Documents/trading-bot
-HERMES_REPO=/home/saijayanthai/.hermes/hermes-agent
+# AUDIT 2026-05-12 Critical #1: $HOME-relative paths replace hardcoded ones.
+REPO="${TRADING_BOT_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)}"
+[[ -d "$REPO/user_data" ]] || REPO="$HOME/Documents/trading-bot"
+HERMES_REPO="${HERMES_REPO:-$HOME/.hermes/hermes-agent}"
 PATCHES_DIR="$REPO/hermes_patches"
 
 log() { printf '[reapply-hermes %s] %s\n' "$(date '+%H:%M:%S')" "$1"; }
@@ -121,7 +123,7 @@ log "Gateway state: $state"
 if [[ "$state" == "active" ]]; then
     log "DONE. Worker-pool log marker:"
     sleep 3
-    tail -50 /home/saijayanthai/.hermes/logs/agent.log 2>/dev/null \
+    tail -50 "$HOME/.hermes/logs/agent.log" 2>/dev/null \
         | grep -E "Cron ticker started" | tail -1 | sed 's/^/    /'
     exit 0
 else

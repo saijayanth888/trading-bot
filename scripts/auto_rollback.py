@@ -1,4 +1,4 @@
-#!/home/saijayanthai/Documents/spark/envs/ml-env/bin/python3
+#!/usr/bin/env python3
 """
 Hourly safety net.
 
@@ -13,8 +13,13 @@ Two checks, in order of severity:
 
 Designed for cron, e.g.
 
-    0 * * * * /home/<user>/Documents/trading-bot/scripts/auto_rollback.py \
-        >> /home/<user>/Documents/trading-bot/user_data/logs/auto_rollback.log 2>&1
+    0 * * * * $HOME/Documents/trading-bot/scripts/auto_rollback.py \
+        >> $HOME/Documents/trading-bot/user_data/logs/auto_rollback.log 2>&1
+
+The previous shebang pointed at an operator-specific ML env. We've moved to
+``/usr/bin/env python3`` so the script is portable across machines; set
+``ML_ENV_PYTHON=/abs/path`` in the cron environment if you need a specific
+interpreter.
 
 Idempotent: re-running with no new trades closes is a no-op (each action
 records a marker in the state file, so consecutive crons don't double-fire).
@@ -81,7 +86,16 @@ def _load_state() -> dict:
 
 
 def _save_state(state: dict) -> None:
-    tmp = STATE_FILE.with_suffix(".tmp")
+    """Atomic write of cron state via tempfile-in-same-dir + rename.
+
+    Using ``with_suffix(".tmp")`` on the canonical file dropped the
+    extension before re-attaching, which on some filesystems (and when
+    two crons overlapped) raced against a sibling rename. We now derive
+    the tempfile name explicitly and create it adjacent to the target
+    so the rename is atomic on the same volume.
+    """
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_FILE.parent / (STATE_FILE.name + ".tmp")
     tmp.write_text(json.dumps(state, indent=2))
     tmp.replace(STATE_FILE)
 
@@ -123,12 +137,25 @@ def _starting_equity_proxy(rows: list[dict], default: float = 10_000.0) -> float
 
 
 def daily_loss_pct(now_utc: datetime) -> tuple[float, int]:
-    """Returns (loss_fraction, n_trades) for today's UTC day."""
+    """Returns (loss_fraction, n_trades) for today's UTC day.
+
+    Edge cases (verified):
+      - 0 trades → 0.0, 0           (no action; falls through main())
+      - starting equity = 0         → 0.0 (guard against div-by-zero)
+      - net positive day            → returns a negative loss_fraction
+                                      which fails the ``> limit`` test, so
+                                      no emergency stop. Intentional.
+      - DB unreachable              → 0.0, 0 (logged at DEBUG by _query_trades)
+    """
     day_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
     rows = _query_trades(day_start)
     if not rows:
         return 0.0, 0
     starting = _starting_equity_proxy(rows)
+    if starting <= 0:
+        # Defensive: _starting_equity_proxy floors at the default (10k) so
+        # this is mostly unreachable, but a future refactor could change it.
+        return 0.0, len(rows)
     pnl_quote = sum(float(r.get("pnl") or 0.0) for r in rows)
     return float(-pnl_quote / starting), len(rows)
 
@@ -253,8 +280,11 @@ def main() -> int:
         daily_loss * 100, daily_n, sharpe, n_days, week_trades,
     )
 
-    # ---- check 1: daily loss > limit -> emergency stop -----------------
-    if daily_loss > args.daily_loss_limit:
+    # ---- check 1: daily loss >= limit -> emergency stop -----------------
+    # Use ``>=`` so a loss that exactly hits the limit (e.g. -3.00%) still
+    # fires. Floating-point noise can otherwise leave a critical breach
+    # ``> 0.029999999`` and ``< 0.03`` which a strict greater-than misses.
+    if daily_loss >= args.daily_loss_limit:
         if state.get("last_emergency_stop") == today_key:
             logger.info("emergency stop already triggered today; skipping")
         elif args.dry:

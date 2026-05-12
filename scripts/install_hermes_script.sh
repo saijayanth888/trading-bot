@@ -14,7 +14,7 @@
 # Run on the main tree (NOT inside a worktree) so $REPO points at the
 # canonical checkout, e.g.:
 #
-#     bash /home/saijayanthai/Documents/trading-bot/scripts/install_hermes_script.sh
+#     bash $HOME/Documents/trading-bot/scripts/install_hermes_script.sh
 #
 # Or, after the agent's worktree is merged to main, the coordinator runs it
 # from the merged checkout.

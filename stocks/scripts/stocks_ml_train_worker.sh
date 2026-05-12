@@ -8,7 +8,10 @@
 
 set -euo pipefail
 
-REPO=/home/saijayanthai/Documents/trading-bot
+# REPO defaults to two levels up from this script. AUDIT 2026-05-12 Critical #1:
+# previously hardcoded one operator's path, which broke fresh clones and worktrees.
+REPO="${TRADING_BOT_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)}"
+[[ -d "$REPO/user_data" ]] || REPO="$HOME/Documents/trading-bot"
 STOCKS=$REPO/stocks
 LOG=$STOCKS/memory/cron-stocks-ml-train.log
 STATUS=$STOCKS/memory/stocks-ml-status.json

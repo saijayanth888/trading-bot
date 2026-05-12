@@ -1,4 +1,4 @@
-#!/home/saijayanthai/Documents/spark/envs/ml-env/bin/python3
+#!/usr/bin/env python3
 """
 Nightly Reflector — post-mortem writer for closed trades.
 

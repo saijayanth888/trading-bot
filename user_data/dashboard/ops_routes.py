@@ -3270,12 +3270,15 @@ async def stock_regime():
 #
 # The card colors map: green=healthy, yellow=degraded/stalled<3, red=stalled>=3.
 
-# Two candidate locations the verifier may write to depending on the
-# repo layout (worktree vs main checkout). First match wins.
+# Candidate locations the verifier may write to depending on the
+# repo layout (worktree vs main checkout vs container mount). First
+# match wins. AUDIT 2026-05-12 Critical #1: previous revision hardcoded
+# one operator's home path; we now resolve from $HOME so the dashboard
+# works for any user without code edits.
 _OVERRIDE_VERIFY_PATHS = [
-    Path("/home/saijayanthai/Documents/trading-bot/stocks/memory/override_verify.json"),
     Path(__file__).resolve().parents[2] / "stocks" / "memory" / "override_verify.json",
     Path("/freqtrade/stocks/memory/override_verify.json"),
+    Path(os.environ.get("HOME", "/root")) / "Documents" / "trading-bot" / "stocks" / "memory" / "override_verify.json",
 ]
 
 
@@ -3385,7 +3388,9 @@ async def backtest_gates():
     # Try the in-container path first; fall back to host path. Mirrors the
     # /api/universe pattern documented in the dashboard's path-lookup notes.
     if not results_dir.is_dir():
-        alt = Path("/home/saijayanthai/Documents/trading-bot/user_data/backtest_results")
+        # AUDIT 2026-05-12 Critical #1: prefer $HOME-relative fallback over
+        # the hardcoded operator path. Container mount stays first.
+        alt = Path(os.environ.get("HOME", "/root")) / "Documents" / "trading-bot" / "user_data" / "backtest_results"
         if alt.is_dir():
             results_dir = alt
     if not results_dir.is_dir():
@@ -3511,17 +3516,19 @@ _WEEKLY_TRAINING_TRACKS: tuple[tuple[str, str, str], ...] = (
 
 # Candidate locations for the decisions log — worktree vs main checkout vs
 # container mount. First match wins (mirrors the override_verify pattern).
+# AUDIT 2026-05-12 Critical #1: $HOME-relative fallback replaces hardcoded path.
+_HOME_REPO = Path(os.environ.get("HOME", "/root")) / "Documents" / "trading-bot"
 _DECISIONS_PATHS = [
-    Path("/home/saijayanthai/Documents/trading-bot/stocks/memory/decisions.md"),
     Path(__file__).resolve().parents[2] / "stocks" / "memory" / "decisions.md",
     Path("/freqtrade/stocks/memory/decisions.md"),
+    _HOME_REPO / "stocks" / "memory" / "decisions.md",
 ]
 
 # Candidate locations for the LLM call log — same pattern.
 _LLM_CALLS_PATHS = [
-    Path("/home/saijayanthai/Documents/trading-bot/stocks/memory/llm-calls.jsonl"),
     Path(__file__).resolve().parents[2] / "stocks" / "memory" / "llm-calls.jsonl",
     Path("/freqtrade/stocks/memory/llm-calls.jsonl"),
+    _HOME_REPO / "stocks" / "memory" / "llm-calls.jsonl",
 ]
 
 
@@ -3944,13 +3951,15 @@ from urllib.parse import unquote as _llm_unquote
 
 
 def _llm_log_paths() -> list[Path]:
-    """The live JSONL is searched in two candidate locations: bind-mount
-    path inside the dashboard container, plus the host path. First match
-    wins. Mirrors the pattern used by shark_override_health."""
+    """The live JSONL is searched in three candidate locations: bind-mount
+    path inside the dashboard container, repo-relative path (worktree or
+    main checkout), and a $HOME-relative fallback (replaces the previous
+    hardcoded operator path). First match wins. Mirrors the pattern used
+    by shark_override_health. AUDIT 2026-05-12 Critical #1."""
     return [
         STOCKS_ROOT / "memory" / "llm-calls.jsonl",
-        Path("/home/saijayanthai/Documents/trading-bot/stocks/memory/llm-calls.jsonl"),
         Path(__file__).resolve().parents[2] / "stocks" / "memory" / "llm-calls.jsonl",
+        _HOME_REPO / "stocks" / "memory" / "llm-calls.jsonl",
     ]
 
 

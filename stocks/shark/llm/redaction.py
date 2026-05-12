@@ -66,8 +66,14 @@ _ACCOUNT_RE = re.compile(
 # RFC-5322-ish email — intentionally loose, false-positive cost is low.
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 
-# Operator paths — anything under /home/saijayanthai/.
-_PATH_RE = re.compile(r"/home/saijayanthai/[^\s\"'<>]+")
+# Operator paths — anything under /home/<user>/ or /Users/<user>/.
+# Older revision hardcoded one operator path; the generalised regex catches
+# any single-user home directory on Linux and macOS so anyone running this
+# bot gets the same redaction guarantees without editing the file. We
+# intentionally keep this LOOSE (anything under /home/<dir>/) — false
+# positives on bench scripts that mention `/home/runner/work/...` are a
+# better failure mode than leaking the operator's home tree to the LLM.
+_PATH_RE = re.compile(r"(?:/home|/Users)/[^/\s\"'<>]+/[^\s\"'<>]+")
 
 # Slack webhook URLs.
 _WEBHOOK_RE = re.compile(r"https://hooks\.slack\.com/[^\s\"'<>]+")
