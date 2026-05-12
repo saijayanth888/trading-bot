@@ -1,0 +1,16 @@
+{
+  "success": true,
+  "success_response": {
+    "order_id": "11111111-2222-3333-4444-555555555555",
+    "product_id": "BTC-USD",
+    "side": "BUY",
+    "client_order_id": "qc4-coinbase-mr01-018f6e6406000000000000000000ffff"
+  },
+  "order_configuration": {
+    "limit_limit_gtc": {
+      "base_size": "0.001",
+      "limit_price": "60000.00",
+      "post_only": false
+    }
+  }
+}

@@ -1,0 +1,42 @@
+interactions:
+- request:
+    body: null
+    headers:
+      Accept:
+      - '*/*'
+      APCA-API-KEY-ID:
+      - test-key
+      APCA-API-SECRET-KEY:
+      - test-secret
+    method: GET
+    uri: https://paper-api.alpaca.markets/v2/clock
+  response:
+    body:
+      string: '{"timestamp":"2026-05-12T20:00:00.000000-04:00","is_open":true,"next_open":"2026-05-13T09:30:00-04:00","next_close":"2026-05-12T16:00:00-04:00"}'
+    headers:
+      Content-Type:
+      - application/json
+    status:
+      code: 200
+      message: OK
+- request:
+    body: null
+    headers:
+      Accept:
+      - '*/*'
+      APCA-API-KEY-ID:
+      - test-key
+      APCA-API-SECRET-KEY:
+      - test-secret
+    method: GET
+    uri: https://paper-api.alpaca.markets/v2/orders?status=open&limit=500&nested=false
+  response:
+    body:
+      string: '[{"id":"66f1d1ac-bf99-4a09-9d92-69a48a4fc0c1","client_order_id":"qc4-alpaca-wheel-018f6e6406007095aa3835d8c88117ae","created_at":"2026-05-12T20:00:01Z","updated_at":"2026-05-12T20:00:01Z","submitted_at":"2026-05-12T20:00:01Z","filled_at":null,"expired_at":null,"canceled_at":null,"failed_at":null,"replaced_at":null,"replaced_by":null,"replaces":null,"asset_id":"b0b04bdb-d6e6-46d2-9b09-7ab4a4f31aa1","symbol":"AAPL","asset_class":"us_equity","notional":null,"qty":"1","filled_qty":"0","filled_avg_price":null,"order_class":"","order_type":"limit","type":"limit","side":"buy","time_in_force":"day","limit_price":"150","stop_price":null,"status":"new","extended_hours":false,"legs":null,"trail_percent":null,"trail_price":null,"hwm":null}]'
+    headers:
+      Content-Type:
+      - application/json
+    status:
+      code: 200
+      message: OK
+version: 1
