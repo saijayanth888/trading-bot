@@ -320,6 +320,122 @@ async def training():
 
 
 # --------------------------------------------------------------------------
+# /api/ops/training_health — per-pair model.zip validation status
+# --------------------------------------------------------------------------
+
+TRAINING_HEALTH_STALE_HOURS = float(
+    os.environ.get("OPS_TRAINING_HEALTH_STALE_HOURS", "72")
+)
+
+
+def _training_health_payload(identifier: str = "tft_v1") -> dict[str, Any]:
+    import sys as _sys
+    user_data_root = Path(os.environ.get(
+        "USER_DATA_ROOT",
+        str(Path(__file__).resolve().parent.parent),
+    ))
+    if str(user_data_root) not in _sys.path:
+        _sys.path.insert(0, str(user_data_root))
+    from freqaimodels import tft_pickle as _save_mod
+    scan = _save_mod.scan_pair_dictionary_for_quarantine(identifier)
+
+    now = datetime.now(timezone.utc)
+    rows: list[dict[str, Any]] = []
+    for pair, info in sorted(scan.items()):
+        zip_path_str = info.get("zip_path")
+        zip_path = Path(zip_path_str) if zip_path_str else None
+        validate_info = info.get("info") or {}
+
+        trained_ts = int(info.get("trained_ts") or 0)
+        file_mtime: int | None = None
+        size_bytes: int = int(validate_info.get("size_bytes") or 0)
+        if zip_path and zip_path.exists():
+            try:
+                st = zip_path.stat()
+                file_mtime = int(st.st_mtime)
+                if not size_bytes:
+                    size_bytes = int(st.st_size)
+            except OSError:
+                pass
+
+        last_train_ts = file_mtime or trained_ts or 0
+        age_hours: float | None = None
+        if last_train_ts:
+            age_hours = round((now.timestamp() - last_train_ts) / 3600.0, 2)
+        last_train_iso = (
+            datetime.fromtimestamp(last_train_ts, timezone.utc).isoformat()
+            if last_train_ts else None
+        )
+
+        status = info["status"]
+        stale = bool(
+            status == "ok"
+            and age_hours is not None
+            and age_hours > TRAINING_HEALTH_STALE_HOURS
+        )
+        if stale:
+            status = "stale"
+
+        rows.append({
+            "pair": pair,
+            "status": status,
+            "reason": info.get("reason"),
+            "last_train_ts": last_train_ts or None,
+            "last_train_iso": last_train_iso,
+            "zip_size_bytes": size_bytes or None,
+            "has_metadata_json": validate_info.get("has_data_pkl"),
+            "has_data_pkl": validate_info.get("has_data_pkl"),
+            "tensor_blobs": validate_info.get("tensor_blobs") or 0,
+            "age_hours": age_hours,
+            "stale": stale,
+        })
+
+    counts = {"ok": 0, "stub": 0, "missing": 0, "stale": 0, "error": 0}
+    for r in rows:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+
+    return {
+        "identifier": identifier,
+        "stale_hours_threshold": TRAINING_HEALTH_STALE_HOURS,
+        "counts": counts,
+        "pairs": rows,
+    }
+
+
+@router.get("/training_health")
+async def training_health(identifier: str = "tft_v1"):
+    try:
+        loop = asyncio.get_running_loop()
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, _training_health_payload, identifier),
+            timeout=ENDPOINT_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        return _envelope("down", error="training_health scan timed out")
+    except Exception as exc:
+        logger.exception("training_health payload build failed")
+        return _envelope("down", error=str(exc))
+
+    counts = result.get("counts", {})
+    bad = counts.get("stub", 0) + counts.get("missing", 0) + counts.get("error", 0)
+    stale = counts.get("stale", 0)
+    if bad > 0:
+        status = "degraded"
+        err = (f"{bad} pair(s) quarantined "
+               f"(stub={counts.get('stub',0)}, missing={counts.get('missing',0)})")
+    elif stale > 0:
+        status = "degraded"
+        err = f"{stale} pair(s) > {TRAINING_HEALTH_STALE_HOURS:.0f}h stale"
+    elif not result.get("pairs"):
+        status = "degraded"
+        err = "pair_dictionary.json empty or unreadable"
+    else:
+        status = "ok"
+        err = None
+    return _envelope(status, data=result, error=err)
+
+
+# --------------------------------------------------------------------------
 # /api/ops/regime
 # --------------------------------------------------------------------------
 
