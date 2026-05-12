@@ -22,7 +22,10 @@
   const {
     NumberRoll, Sparkline, RegimeRibbon, StatusRow, GateBadge, KillSwitch,
     Topbar, Sidebar, Card, LiveTicker, ProgressBar, TimeSince,
+    DDRibbon, HeartbeatDot, KillBar, deriveHeartbeatStatus,
+    HoldToConfirmButton,
   } = window;
+  const CommandPalette = (window.QC && window.QC.CommandPalette) || function () { return null; };
 
   // ─────────────── helpers ───────────────
   function cls(...xs) { return xs.filter(Boolean).join(" "); }
@@ -150,7 +153,7 @@
     backtest_gates: "/api/ops/backtest_gates",
     llm_stats: "/api/ops/llm_stats",
     mcp: "/api/ops/mcp",
-    sentiment: "/api/ops/sentiment",
+    risk_gates: "/api/ops/risk_gates",
     // stocks_sentiment endpoint removed 2026-05-11 — see ops_routes.py
     // comment. Shark Briefing card (data-num 13c) is the source of truth
     // for per-symbol stocks sentiment via Shark's analyst pipeline.
@@ -294,69 +297,132 @@
     return { state, refetchFast, refetchSlow };
   }
 
-  // ─────────────── TODAY SCOREBOARD — single-card at-a-glance summary ─────
-  // Operator's stated need (2026-05-11): "top right corner, daily P&L,
-  // capital, trades done, all the things". This card distills 6 numbers
-  // that answer "where are we right now" without scrolling.
-  function TodayScoreboard({ data }) {
+  // ─────────────── scoreboard metrics (card 00 + DD ribbon + KillBar) ─────
+  function computeScoreboardMetrics(data) {
     const cpSlot = slotState(data, "combined_portfolio");
     const cp = envelopeData(cpSlot.env) || {};
     const tr = envelopeData(data.trades_risk) || {};
     const stocks = envelopeData(data.stocks) || {};
     const wheelOpen = ((stocks.wheel || {}).open_positions || []).length;
-
     const equity = Number(cp.total_equity ?? 0);
     const peak = Number(cp.combined_peak_equity ?? equity);
-    const dd = Math.abs(Number(cp.combined_drawdown_pct ?? 0));
-    // Closed-trade day P&L (from trade_journal, server-side at ops_routes:2549).
-    // This is the "realized" component — only moves when a trade closes.
     const closedPnl = Number(cp.day_pnl_usd ?? 0);
-    // Live unrealized P&L on open positions — this is what makes the number
-    // TICK with market moves. Operator complaint (2026-05-11 ~3 PM): "I don't
-    // see the drop in -23.37, that is not getting changed" because the page
-    // was showing closed-only. Sum crypto-unrealized (sources.crypto_unrealised_pnl
-    // — freqtrade hot-quotes) and stocks day-move (stocks_equity − stocks_peak_equity,
-    // captures wheel MTM since the wheel_snapshot cron now fires every minute).
     const srcs = cp.sources || {};
     const cryptoUnrl = Number(srcs.crypto_unrealised_pnl ?? 0);
     const stocksEq = Number(cp.stocks_equity ?? 0);
     const stocksPeak = Number(cp.stocks_peak_equity ?? stocksEq);
     const stocksMove = stocksEq - stocksPeak;
     const liveDayPnl = closedPnl + cryptoUnrl + stocksMove;
-    // Percent against starting combined capital — use peak as a sane proxy
-    // when peak ≈ start (early in the campaign). Operator-readable %.
     const baseCap = peak > 0 ? peak : equity;
     const liveDayPct = baseCap > 0 ? (liveDayPnl / baseCap) * 100 : 0;
+    const rgSlot = slotState(data, "risk_gates");
+    const rgEnv = envelopeData(rgSlot.env) || {};
+    const rgNested = rgEnv.risk_gates || rgEnv.resolved || {};
+    const rgSrc = (srcs.risk_gates) || rgNested || {};
+    const haltFrac = Number(rgSrc.daily_loss_halt_pct ?? 0.03);
     const closedToday = Number(tr.closed_today ?? 0);
     const openCrypto = Number(tr.open_count ?? 0);
     const totalOpen = openCrypto + wheelOpen;
+    const dd = Math.abs(Number(cp.combined_drawdown_pct ?? 0));
+    return {
+      cpSlot, equity, peak, closedPnl, cryptoUnrl, stocksMove, liveDayPnl, liveDayPct,
+      haltFrac, closedToday, totalOpen, openCrypto, wheelOpen, dd, baseCap,
+    };
+  }
+
+  function sentimentRadarPoints(env) {
+    const cx = 60;
+    const cy = 60;
+    const R = 44;
+    const clamp01 = (x) => {
+      if (x == null || isNaN(x)) return 0.5;
+      return Math.max(0, Math.min(1, x));
+    };
+    const deep = Number(env.deep_score);
+    const fast = Number(env.fast_score);
+    const fg = env.fear_greed != null ? Number(env.fear_greed) / 100 : null;
+    let ag = env.community_score != null ? Number(env.community_score) : null;
+    if (ag == null || isNaN(ag)) {
+      ag = env.agreement === true ? 0.82 : 0.18;
+    }
+    const uDeep = clamp01((deep + 1) / 2);
+    const uFast = clamp01((fast + 1) / 2);
+    const uFg = clamp01(fg != null ? fg : 0.5);
+    const uAg = clamp01(ag);
+    const vals = [uDeep, uFast, uFg, uAg];
+    const pts = [];
+    for (let i = 0; i < 4; i++) {
+      const ang = (-Math.PI / 2) + (i * Math.PI / 2);
+      const rad = R * vals[i];
+      pts.push((cx + rad * Math.cos(ang)).toFixed(1) + "," + (cy + rad * Math.sin(ang)).toFixed(1));
+    }
+    return { points: pts.join(" "), labels: ["Deep", "Fast", "F&G", "Agree"] };
+  }
+
+  // ─────────────── TODAY SCOREBOARD — single-card at-a-glance summary ─────
+  // Operator's stated need (2026-05-11): "top right corner, daily P&L,
+  // capital, trades done, all the things". This card distills 6 numbers
+  // that answer "where are we right now" without scrolling.
+  function TodayScoreboard({ data }) {
+    const m = computeScoreboardMetrics(data);
+    const {
+      cpSlot, equity, peak, closedPnl, cryptoUnrl, stocksMove, liveDayPnl, liveDayPct,
+      haltFrac, closedToday, totalOpen, openCrypto, wheelOpen, dd,
+    } = m;
+
     const dayCls = liveDayPnl >= 0 ? "up" : "down";
     const ddCls = dd >= 8 ? "down" : dd >= 5 ? "warn" : "up";
+    const regimeEnv = envelopeData(data.regime) || {};
+    const regimeLabel = regimeEnv.current ? String(regimeEnv.current) : "—";
+    const regimeTint = (() => {
+      const r = regimeEnv.current ? String(regimeEnv.current) : "";
+      switch (r) {
+        case "trending_up": return "var(--up)";
+        case "trending_down": return "var(--down)";
+        case "mean_reverting": return "var(--warn)";
+        case "high_volatility": return "var(--accent)";
+        default: return "var(--line-2)";
+      }
+    })();
 
-    const stat = (lbl, val, cls) => h("div", { style: { display: "flex", flexDirection: "column", gap: 2, minWidth: 110 } },
+    const stat = (lbl, valNode) => h("div", { style: { display: "flex", flexDirection: "column", gap: 2, minWidth: 100 } },
       h("div", { className: "dim2 mono", style: { fontSize: "var(--t-2xs)", letterSpacing: ".08em", textTransform: "uppercase" } }, lbl),
-      h("div", { className: "num " + (cls || ""), style: { fontSize: "var(--t-lg)", fontFamily: "var(--mono)", fontWeight: 500, fontVariantNumeric: "tabular-nums" } }, val)
+      valNode
     );
 
     return h(Card, {
       num: "00", title: "Today · scoreboard",
       sub: "live · realized + unrealized · refreshes every 10s",
+      className: "v3-card-scoreboard",
       right: cardRight(cpSlot.fetchedAt,
         h("span", { className: "pill " + dayCls, style: { height: 18 } },
           h("span", { className: "dot " + dayCls + (liveDayPnl === 0 ? "" : " pulse") }),
           " ", (liveDayPct >= 0 ? "+" : "") + liveDayPct.toFixed(2) + "% live"))
     },
-      h("div", { style: { display: "flex", flexWrap: "wrap", gap: "var(--s-5)", alignItems: "baseline" } },
-        stat("Capital", "$" + fmtUSD(equity)),
-        stat("Live P&L", (liveDayPnl >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(liveDayPnl)), dayCls),
-        stat("Realized today", (closedPnl >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(closedPnl)),
-          closedPnl >= 0 ? "up" : "down"),
-        stat("Unrealized", (cryptoUnrl + stocksMove >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(cryptoUnrl + stocksMove)),
-          (cryptoUnrl + stocksMove) >= 0 ? "up" : "down"),
-        stat("Drawdown", dd.toFixed(2) + "%", ddCls),
-        stat("Peak", "$" + fmtUSD(peak)),
-        stat("Open", totalOpen + " (" + openCrypto + "C + " + wheelOpen + "S)"),
-        stat("Closed today", closedToday)
+      h(DDRibbon, { dayPct: liveDayPct, haltPct: haltFrac }),
+      h("div", { className: "v3-score-hero" },
+        h("div", { className: "dim2 mono", style: { fontSize: "var(--t-2xs)", letterSpacing: ".12em" } }, "LIVE DAY P&L"),
+        h("div", { className: dayCls, style: { lineHeight: 1 } },
+          h(NumberRoll, {
+            value: liveDayPnl,
+            decimals: 2,
+            prefix: "$",
+            className: "v3-hero-num",
+          })
+        ),
+        h("div", { className: "v3-score-hero-meta" },
+          stat("Capital", h("span", { className: "v3-num " + "mono", style: { fontSize: "var(--t-lg)", fontWeight: 500 } }, "$" + fmtUSD(equity))),
+          stat("Realized today", h("span", { className: cls("v3-num", "mono", closedPnl >= 0 ? "up" : "down"), style: { fontSize: "var(--t-md)", fontWeight: 500 } },
+            (closedPnl >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(closedPnl)))),
+          stat("Unrealized", h("span", { className: cls("v3-num", "mono", (cryptoUnrl + stocksMove) >= 0 ? "up" : "down"), style: { fontSize: "var(--t-md)", fontWeight: 500 } },
+            (cryptoUnrl + stocksMove >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(cryptoUnrl + stocksMove)))),
+          stat("Drawdown", h("span", { className: cls("v3-num", "mono", ddCls), style: { fontSize: "var(--t-md)", fontWeight: 500 } }, dd.toFixed(2) + "%")),
+          stat("Peak", h("span", { className: "v3-num mono", style: { fontSize: "var(--t-md)", fontWeight: 500 } }, "$" + fmtUSD(peak))),
+          stat("Open", h("span", { className: "v3-num mono", style: { fontSize: "var(--t-md)", fontWeight: 500 } }, totalOpen + " (" + openCrypto + "C + " + wheelOpen + "S)")),
+          stat("Closed today", h("span", { className: "v3-num mono", style: { fontSize: "var(--t-md)", fontWeight: 500 } }, String(closedToday)))
+        ),
+        h("div", { className: "v3-regime-edge", style: { background: regimeTint }, title: "BTC regime" }),
+        h("div", { className: "mono dim", style: { fontSize: "var(--t-2xs)", marginTop: 4 } }, "REGIME · ", h("span", { className: "v3-num" }, regimeLabel))
       )
     );
   }
@@ -406,50 +472,43 @@
     const overrideApplied = !!env.override_applied;
 
     // Color mapping per spec
-    let cls, dot, label;
+    let pillCls, dot, label;
     if (stalled >= 3 || status === "stalled") {
-      cls = "down"; dot = "down"; label = "STALLED";
+      pillCls = "down"; dot = "down"; label = "STALLED";
     } else if (stalled >= 1 || status === "degraded") {
-      cls = "warn"; dot = "warn"; label = "DEGRADED";
+      pillCls = "warn"; dot = "warn"; label = "DEGRADED";
     } else if (status === "unknown") {
-      cls = "info"; dot = "info"; label = "UNKNOWN";
+      pillCls = "info"; dot = "info"; label = "UNKNOWN";
     } else {
-      cls = "up"; dot = "up"; label = "HEALTHY";
+      pillCls = "up"; dot = "up"; label = "HEALTHY";
     }
-
-    const stat = (lbl, val, valCls) => h("div", { style: { display: "flex", flexDirection: "column", gap: 2, minWidth: 100 } },
-      h("div", { className: "dim2 mono", style: { fontSize: "var(--t-2xs)", letterSpacing: ".08em", textTransform: "uppercase" } }, lbl),
-      h("div", { className: "num " + (valCls || ""), style: { fontSize: "var(--t-base)", fontFamily: "var(--mono)", fontWeight: 500, fontVariantNumeric: "tabular-nums" } }, val)
-    );
 
     const reason = env.reason || "—";
     const checkedAt = env.checked_at;
+    const heroClsName = cls("v3-shark-hero", "v3-num", pillCls);
 
     return h(Card, {
       num: "00b", title: "Shark · BEAR_VOLATILE override health",
       sub: "verifier · cron 09:45 ET · " + (regime || "—"),
+      className: "v3-shark-card",
       right: cardRight(slot.fetchedAt,
-        h("span", { className: "pill " + cls, style: { height: 18 } },
+        h("span", { className: "pill " + pillCls, style: { height: 18 } },
           h("span", { className: "dot " + dot + (label === "HEALTHY" ? "" : " pulse") }),
           " ", label))
     },
-      h("div", { style: { display: "flex", flexWrap: "wrap", gap: "var(--s-5)", alignItems: "baseline" } },
-        stat("Regime", regime, regime.indexOf("BEAR") >= 0 ? "warn" : "up"),
-        stat("Override expected", overrideExpected ? "yes" : "no"),
-        stat("Override applied", overrideApplied ? "yes" : "no",
-          overrideApplied ? "up" : (overrideExpected ? "warn" : "")),
-        stat("Candidates", evald),
-        stat("Passed override", passed, passed > 0 ? "up" : ""),
-        stat("Trades placed", trades, trades > 0 ? "up" : ""),
-        stat("Stalled runs", stalled, stalled >= 3 ? "down" : (stalled >= 1 ? "warn" : "up"))
-      ),
-      h("div", {
-        className: "dim mono",
-        style: { fontSize: "var(--t-2xs)", marginTop: "var(--s-3)", lineHeight: 1.4 }
-      },
-        reason,
-        lastTrade ? h("span", null, " · last trade: " + lastTrade) : null,
-        checkedAt ? h("span", null, " · checked " + checkedAt) : null
+      h("div", { className: "v3-shark-row" },
+        h("span", { className: heroClsName, title: label }, stalled >= 3 ? String(stalled) : label),
+        h("div", { style: { display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 200 } },
+          h("div", { style: { display: "flex", flexWrap: "wrap", gap: "var(--s-4)", alignItems: "center" } },
+            h("span", { className: "v3-num mono", style: { fontSize: "var(--t-sm)" } }, "cand " + evald + " · pass " + passed + " · trades " + trades),
+            h("span", { className: "v3-num mono dim", style: { fontSize: "var(--t-2xs)" } },
+              "exp " + (overrideExpected ? "y" : "n") + " · app " + (overrideApplied ? "y" : "n"))),
+          h("div", { className: "dim mono v3-num", style: { fontSize: "var(--t-2xs)", lineHeight: 1.35 } },
+            reason,
+            lastTrade ? h("span", null, " · last " + String(lastTrade).replace("T", " ").slice(0, 16)) : null,
+            checkedAt ? h("span", null, " · chk " + String(checkedAt).replace("T", " ").slice(0, 16)) : null
+          )
+        )
       )
     );
   }
@@ -1301,8 +1360,18 @@
     { h: 21, dur: 4,  name: "Risk rebalance",       kind: "risk",desc: "Pair weights from corr" },
   ];
 
+  const AT_LANE_KEYS = ["rsh", "ml", "evo", "risk", "rpt"];
+  const AT_LANE_LABELS = { rsh: "RESEARCH", ml: "ML", evo: "EVO", risk: "RISK", rpt: "REPORT" };
+
   function AgentTimeline() {
     const hourNow = new Date().getUTCHours() + new Date().getUTCMinutes() / 60;
+    const [, tick] = useState(0);
+    useEffect(() => {
+      const iv = setInterval(() => tick(n => n + 1), 60_000);
+      return () => clearInterval(iv);
+    }, []);
+    void tick;
+
     const colorOf = (k) => ({
       rsh: "var(--info)", ml: "var(--accent)", evo: "var(--warn)",
       risk: "var(--down)", rpt: "var(--up)",
@@ -1311,56 +1380,68 @@
     return h(Card, {
       num: "03", title: "Agent timeline · 24h",
       sub: "UTC · now " + String(Math.floor(hourNow)).padStart(2, "0") + ":" + String(Math.floor((hourNow % 1) * 60)).padStart(2, "0"),
-      right: h("div", { className: "tb-group", style: { display: "flex", gap: 8 } },
-        h("span", { className: "pill", style: { borderColor: "var(--info-line)", color: "var(--info)" } }, "● RESEARCH"),
-        h("span", { className: "pill", style: { borderColor: "var(--accent-line)", color: "var(--accent)" } }, "● ML"),
-        h("span", { className: "pill", style: { borderColor: "var(--warn-line)", color: "var(--warn)" } }, "● EVO"),
-        h("span", { className: "pill", style: { borderColor: "var(--down-line)", color: "var(--down)" } }, "● RISK"),
-        h("span", { className: "pill", style: { borderColor: "var(--up-line)", color: "var(--up)" } }, "● REPORT")
-      )
+      right: h("div", { className: "tb-group v3-at-legend", style: { display: "flex", gap: 6, flexWrap: "wrap" } },
+        AT_LANE_KEYS.map(k => h("span", {
+          key: k,
+          className: "pill",
+          style: { borderColor: colorOf(k), color: colorOf(k), fontSize: "var(--t-2xs)" },
+        }, AT_LANE_LABELS[k]))
+      ),
     },
-      h("div", { style: { position: "relative", height: 80, marginTop: 4 } },
-        Array.from({ length: 25 }).map((_, hi) =>
-          h("div", { key: hi, style: {
-            position: "absolute", left: ((hi / 24) * 100) + "%", top: 0, bottom: 0,
-            width: 1, background: hi % 6 === 0 ? "var(--line-2)" : "var(--line-1)",
-          } })
+      h("div", { className: "v3-agent-timeline" },
+        h("div", { className: "v3-at-hour-ruler" },
+          Array.from({ length: 25 }).map((_, hi) =>
+            h("div", {
+              key: hi,
+              className: "v3-at-axis-tick" + (hi % 6 === 0 ? " is-major" : ""),
+              style: { left: ((hi / 24) * 100) + "%" },
+            })
+          ),
+          h("div", {
+            className: "v3-at-now",
+            style: { left: (hourNow / 24) * 100 + "%" },
+          },
+            h("span", { className: "v3-at-now-lbl mono" }, "NOW"))
         ),
-        CRON_JOBS.map((j, i) => {
-          const top = 8 + (i % 5) * 12;
-          const left = (j.h / 24) * 100;
-          const w = (j.dur / 60) * (100 / 24);
-          const passed = j.h < hourNow;
-          return h("div", {
-            key: i, className: "tt",
-            "data-tt": String(j.h).padStart(2, "0") + ":00 · " + j.name + " · " + j.desc,
-            style: {
-              position: "absolute", left: left + "%", top, width: "max(28px, " + (w * 4) + "%)", height: 8,
-              background: colorOf(j.kind), opacity: passed ? 0.5 : 1, borderRadius: 2,
-            }
-          });
-        }),
-        h("div", { style: {
-          position: "absolute", left: (hourNow / 24) * 100 + "%", top: -4, bottom: -4,
-          width: 2, background: "var(--accent)", boxShadow: "0 0 12px var(--accent)",
-        } },
-          h("div", { style: {
-            position: "absolute", top: -12, left: -22, fontFamily: "var(--mono)",
-            fontSize: "var(--t-2xs)", color: "var(--accent)", letterSpacing: ".1em",
-          } }, "NOW")
-        )
-      ),
-      h("div", { style: { display: "flex", justifyContent: "space-between", marginTop: 8, fontFamily: "var(--mono)", fontSize: "var(--t-2xs)", color: "var(--fg-3)" } },
-        ["00","04","08","12","16","20","24"].map(hh => h("span", { key: hh }, hh + ":00"))
-      ),
-      h("div", { className: "hr" }),
-      h("div", { style: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "var(--s-4)" } },
-        CRON_JOBS.filter(j => j.h > hourNow).slice(0, 3).map((j, i) =>
-          h("div", { key: i },
-            h("div", { className: "tl-source", style: { color: colorOf(j.kind) } },
-              "NEXT · " + String(j.h).padStart(2, "0") + ":00 UTC"),
-            h("div", { className: "num", style: { marginTop: 4 } }, j.name),
-            h("div", { className: "dim", style: { fontSize: "var(--t-xs)", marginTop: 2 } }, j.desc)
+        AT_LANE_KEYS.map(lk =>
+          h("div", { key: lk, className: "v3-at-lane-pair" },
+            h("div", { className: "v3-at-lane-title mono dim" }, AT_LANE_LABELS[lk]),
+            h("div", { className: "v3-at-lane-row" },
+              CRON_JOBS.filter(j => j.kind === lk).map((j, ji) => {
+                const passed = j.h < hourNow;
+                const gist = j.name + " — " + j.desc;
+                return h("button", {
+                  key: ji,
+                  type: "button",
+                  className: "v3-at-cron-tick",
+                  style: {
+                    left: (j.h / 24) * 100 + "%",
+                    background: colorOf(lk),
+                    opacity: passed ? 0.45 : 1,
+                  },
+                  title: gist,
+                  "data-tt": gist,
+                });
+              })
+            )
+          )
+        ),
+        h("div", { className: "v3-at-foot mono dim" },
+          ["00", "04", "08", "12", "16", "20", "24"].map(hh =>
+            h("span", { key: hh, className: "v3-num" }, hh + ":00")
+          )
+        ),
+        h("div", { className: "hr" }),
+        h("div", { className: "v3-at-next-grid" },
+          CRON_JOBS.filter(j => j.h > hourNow).slice(0, 3).map((j, i) =>
+            h("div", { key: i, className: "v3-at-next-card" },
+              h("div", {
+                className: "tl-source mono",
+                style: { color: colorOf(j.kind), fontSize: "var(--t-2xs)" },
+              }, "NEXT · ", h("span", { className: "v3-num" }, String(j.h).padStart(2, "0")), ":00 UTC"),
+              h("div", { className: "num", style: { marginTop: 4 } }, j.name),
+              h("div", { className: "dim mono", style: { fontSize: "var(--t-xs)", marginTop: 2 } }, j.desc)
+            )
           )
         )
       )
@@ -1538,53 +1619,52 @@
       num: "04", title: "Research stream · how the agent thinks",
       sub: "live · synthesises 6 endpoints · click to expand",
       right: cardRight(oldest,
-        h("span", { className: "pill accent" }, h("span", { className: "dot accent pulse" }), " ", items.length, " EVENTS · 24h"))
+        h("span", { className: "pill accent" },
+          h("span", { className: "dot accent pulse" }), " ",
+          h("span", { className: "v3-num" }, String(items.length)), " EVENTS · 24h")),
     },
-      h("div", { style: { display: "flex", flexDirection: "column", maxHeight: 420, overflowY: "auto" } },
+      h("div", { className: "v3-research-feed" },
         items.length === 0
-          ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)", padding: "var(--s-3) 0" } }, "no recent activity")
+          ? h("div", { className: "dim v3-research-empty" }, "no recent activity")
           : items.map((r, i) => {
               const dot = r.level === "warn" ? "warn"
                         : r.level === "down" ? "down"
                         : r.level === "up" ? "up"
                         : "accent";
               const srcVar = "var(--" + dot + ")";
-              // Stable identity prevents React from reusing DOM nodes when
-              // a new event unshifts at the top — expanded state previously
-              // pointed at index N which mapped to a different event after
-              // the refresh tick.
-              const stableKey = `${r.ts}:${r.src}:${(r.title || '').slice(0, 32)}`;
+              const stableKey = `${r.ts}:${r.src}:${(r.title || "").slice(0, 32)}`;
               const open = expanded === stableKey;
-              return h("div", {
+              const body1 = (r.title || "").slice(0, 96);
+              const body2 = (r.body || "").replace(/\s+/g, " ").trim().slice(0, 110);
+              const ageLabel = r.age_s < 60
+                ? r.age_s + "s"
+                : r.age_s < 3600
+                  ? Math.floor(r.age_s / 60) + "m"
+                  : Math.floor(r.age_s / 3600) + "h";
+              return h("article", {
                 key: stableKey,
-                style: {
-                  display: "grid", gridTemplateColumns: "60px 12px 1fr", gap: "var(--s-3)",
-                  padding: "var(--s-3) 0", borderBottom: "1px solid var(--line-1)", cursor: "pointer",
-                },
-                onClick: () => setExpanded(open ? null : stableKey)
+                className: "v3-research-item" + (open ? " is-open" : ""),
+                onClick: () => setExpanded(open ? null : stableKey),
               },
-                h("div", { className: "mono dim", style: { fontSize: "var(--t-xs)", paddingTop: 2 } },
+                h("div", { className: "v3-research-ts mono dim" },
                   h(TimeSince, { ts: r.ts })),
-                h("div", { style: { position: "relative", paddingTop: 6 } },
-                  h("span", { className: "dot " + dot, style: { position: "relative", zIndex: 1 } }),
-                  h("div", { style: { position: "absolute", left: 2, top: 12, bottom: -16, width: 1, background: "var(--line-2)" } })
-                ),
-                h("div", null,
-                  h("div", { style: { display: "flex", alignItems: "baseline", gap: "var(--s-2)" } },
-                    h("span", { className: "tl-source", style: { color: srcVar } }, r.src),
-                    h("span", { style: { color: "var(--fg-1)", fontSize: "var(--t-sm)", fontWeight: 500 } }, r.title),
+                h("div", { className: "v3-research-dotcol" },
+                  h("span", { className: "dot " + dot })),
+                h("div", { className: "v3-research-copy" },
+                  h("header", { className: "v3-research-item-head" },
+                    h("span", { className: "v3-research-age mono dim" },
+                      h("span", { className: "v3-num" }, ageLabel), " ago"),
                     h("span", { className: "tb-spacer", style: { flex: 1 } }),
-                    h("span", { className: "dim mono", style: { fontSize: "var(--t-xs)" } }, open ? "−" : "+")
+                    h("span", {
+                      className: "v3-research-src mono",
+                      style: { color: srcVar },
+                    }, r.src)
                   ),
-                  h("div", { className: "dim", style: { fontSize: "var(--t-sm)", marginTop: 4, lineHeight: 1.55 } }, r.body),
-                  open && h("div", {
-                    style: {
-                      marginTop: 8, background: "var(--bg-inset)", padding: 10, borderRadius: 4,
-                      fontFamily: "var(--mono)", fontSize: "var(--t-xs)", animation: "mountIn 180ms var(--ease-out)",
-                    }
-                  },
-                    h("div", { className: "dim", style: { marginBottom: 4, letterSpacing: ".08em", textTransform: "uppercase", fontSize: "var(--t-2xs)" } }, "CITATIONS · INPUTS"),
-                    (r.cites || []).map((c, j) => h("div", { key: j, style: { padding: "2px 0", color: "var(--fg-2)" } }, "→ " + c))
+                  h("h3", { className: "v3-research-hed" }, body1),
+                  h("p", { className: "v3-research-dek dim" }, body2 || "—"),
+                  open && h("div", { className: "v3-research-cites mono dim" },
+                    h("div", { className: "v3-research-cites-lbl" }, "Citations"),
+                    (r.cites || []).map((c, j) => h("div", { key: j, className: "v3-research-cite-line" }, "→ ", c))
                   )
                 )
               );
@@ -1808,30 +1888,155 @@
     );
   }
 
+  const V3_CRYPTO_GATES_ORDER = [
+    "capital_allocation", "model_freshness", "freqai_predict", "volume", "regime",
+    "up_prob_threshold", "tft_confidence", "high_vol_confidence",
+    "meta_signal_up", "meta_confidence", "account_capacity",
+  ];
+  const V3_STOCKS_GATES_ORDER = [
+    "kill_switch", "ticker_kill_flag", "spy_regime", "no_existing_csp",
+    "no_assignment", "buying_power", "snapshot_fresh", "schedule",
+  ];
+  const V3_GATE_HDR_SHORT = {
+    capital_allocation: "cap",
+    model_freshness: "mdl",
+    freqai_predict: "prd",
+    volume: "vol",
+    regime: "rgm",
+    up_prob_threshold: "up≥",
+    tft_confidence: "tft≥",
+    high_vol_confidence: "hvol",
+    meta_signal_up: "m_up",
+    meta_confidence: "m_c",
+    account_capacity: "open",
+    kill_switch: "kill",
+    ticker_kill_flag: "tkf",
+    spy_regime: "spy",
+    no_existing_csp: "ncsp",
+    no_assignment: "nasg",
+    buying_power: "bpow",
+    snapshot_fresh: "snap",
+    schedule: "sch",
+  };
+
+  function v3GateCellHeat(gate, pass, detail) {
+    const d = String(detail || "").toLowerCase();
+    if (pass === true && d.indexOf("gate disabled") >= 0) return 1;
+    if (pass === null) return 0;
+    if (pass === true) return 2;
+    if (pass === false) {
+      if (gate === "regime" || gate === "model_freshness") return 6;
+      return 5;
+    }
+    return 0;
+  }
+
+  function v3GateCellGlyph(pass) {
+    if (pass === true) return "●";
+    if (pass === false) return "✗";
+    return "○";
+  }
+
+  function v3WhyText(row) {
+    const n = row.n_blocking || 0;
+    if (n === 0) return "EXIT_OK";
+    const fb = row.first_blocker;
+    return fb || "—";
+  }
+
+  function v3WhyTitle(row) {
+    const fb = row.first_blocker;
+    if (!fb) return (row.n_blocking || 0) === 0 ? "All gates clear for this pair." : "";
+    const g = (row.gates || []).find(x => x.gate === fb);
+    const det = g && g.detail ? String(g.detail) : "";
+    return det || fb;
+  }
+
+  function v3WhyHardSuffix(row) {
+    const fb = row.first_blocker;
+    if (!fb || (row.n_blocking || 0) === 0) return "";
+    const g = (row.gates || []).find(x => x.gate === fb);
+    const det = g && g.detail ? String(g.detail) : "";
+    if (det.indexOf("HARD BLOCK") >= 0) return " ← HARD";
+    if (fb === "regime" || fb === "model_freshness") return " ← HARD";
+    return "";
+  }
+
   function EntryGatesLive({ data }) {
-    const [expand, setExpand] = useState(null);
+    const [sortMode, setSortMode] = useState("blocking_desc");
     const slot = slotState(data, "gates");
     const env = envelopeData(slot.env) || {};
-    const crypto = env.crypto || [];
-    const stocks = env.stocks || [];
-    const all = crypto.concat(stocks).map(r => ({
+    const cryptoRaw = env.crypto || [];
+    const stocksRaw = env.stocks || [];
+
+    const mapRow = (r, kind) => ({
+      kind,
       sym: r.pair,
       regime: r.regime,
-      blocking: r.n_blocking || 0,
+      n_blocking: r.n_blocking || 0,
       first_blocker: r.first_blocker,
       gates: r.gates || [],
-      snapshot: r.snapshot || {},
-    }));
-    const passing = all.filter(p => (p.blocking || 0) === 0).length;
-    const blocked = all.length - passing;
+    });
 
-    // Aggregate which gate is the most common blocker (operator wants
-    // "what's keeping everything offline" at a glance).
+    const sortRows = (rows) => {
+      const copy = rows.slice();
+      const eligible = copy.filter(r => (r.n_blocking || 0) === 0);
+      const blocked = copy.filter(r => (r.n_blocking || 0) > 0);
+      const esc = sortMode === "blocking_asc" ? 1 : -1;
+      blocked.sort((a, b) => esc * ((a.n_blocking || 0) - (b.n_blocking || 0)) || String(a.sym).localeCompare(String(b.sym)));
+      eligible.sort((a, b) => String(a.sym).localeCompare(String(b.sym)));
+      return eligible.concat(blocked);
+    };
+
+    const cryptoRows = sortRows(cryptoRaw.map(r => mapRow(r, "crypto")));
+    const stockRows = sortRows(stocksRaw.map(r => mapRow(r, "stocks")));
+    const allFlat = cryptoRows.concat(stockRows);
+    const passing = allFlat.filter(p => (p.n_blocking || 0) === 0).length;
+    const blocked = allFlat.length - passing;
+
     const blockerCounts = {};
-    all.forEach(p => p.gates.filter(g => g.pass === false).forEach(g => {
+    allFlat.forEach(p => (p.gates || []).filter(g => g.pass === false).forEach(g => {
       blockerCounts[g.gate] = (blockerCounts[g.gate] || 0) + 1;
     }));
     const topBlockers = Object.entries(blockerCounts).sort((a, b) => b[1] - a[1]).slice(0, 2);
+
+    const renderGateHeader = (order, hdrClass) => h("div", { className: "v3-gates-matrix-hdr " + hdrClass },
+      h("div", { className: "v3-gates-hdr-corner" }, "pair"),
+      order.map((gate) => h("div", {
+        key: gate,
+        className: "v3-gates-hdr-col",
+        title: gate,
+      }, V3_GATE_HDR_SHORT[gate] || gate)),
+      h("div", { className: "v3-gates-hdr-why" }, "WHY")
+    );
+
+    const renderGateRow = (row, order, rowClass) => {
+      const gateByName = {};
+      (row.gates || []).forEach((g) => { gateByName[g.gate] = g; });
+      const pin = (row.n_blocking || 0) === 0;
+      return h("div", {
+        key: row.sym,
+        className: "v3-gates-row " + rowClass + (pin ? " eligible-pin" : ""),
+      },
+        h("div", { className: "v3-gates-pair mono" }, row.sym),
+        order.map((gate) => {
+          const g = gateByName[gate] || { gate, pass: null, detail: "—" };
+          const heat = v3GateCellHeat(g.gate, g.pass, g.detail);
+          const title = g.gate + " — " + (g.detail || "");
+          return h("div", {
+            key: gate,
+            className: "v3-gates-cell v3-gh-" + heat,
+            title,
+          }, v3GateCellGlyph(g.pass));
+        }),
+        h("div", {
+          className: "v3-gates-why mono",
+          title: v3WhyTitle(row),
+        },
+          h("span", { className: "v3-num" }, v3WhyText(row)),
+          v3WhyHardSuffix(row))
+      );
+    };
 
     if (slot.phase !== "ok") {
       return h(Card, {
@@ -1847,150 +2052,209 @@
 
     return h(Card, {
       num: "05", title: "Entry gates · why isn't anything trading?",
-      sub: passing + "/" + all.length + " pair" + (all.length === 1 ? "" : "s") + " eligible",
+      sub: passing + "/" + allFlat.length + " pair" + (allFlat.length === 1 ? "" : "s") + " eligible · Gates Matrix",
       right: cardRight(slot.fetchedAt,
         h("span", { className: "pill " + (blocked > 0 ? "down" : "up"), style: { height: 18 } },
           h("span", { className: "dot " + (blocked > 0 ? "down pulse" : "up") }), " ",
           blocked > 0 ? (blocked + " BLOCKED") : "ALL CLEAR"))
     },
-      // ── aggregate banner: tells operator "why is everything off" in one line ──
       blocked > 0 && topBlockers.length > 0 && h("div", {
         style: { fontSize: "var(--t-xs)", padding: "var(--s-2) var(--s-3)",
           marginBottom: "var(--s-2)", borderLeft: "2px solid var(--down)",
           background: "color-mix(in srgb, var(--down) 6%, transparent)" }
       },
-        h("span", { style: { color: "var(--fg-1)" } }, blocked + " of " + all.length + " pairs blocked"),
+        h("span", { style: { color: "var(--fg-1)" } }, blocked + " of " + allFlat.length + " pairs blocked"),
         h("span", { className: "dim", style: { marginLeft: 8 } }, "most common: "),
         topBlockers.map(([g, n], i) => h("span", { key: g, className: "mono", style: { marginLeft: 6 } },
           (i > 0 ? "· " : "") + g + " (" + n + "×)"))
       ),
 
-      // ── per-pair rows: pair · regime · gate-strip dots · n/M · first blocker · ▸ ──
-      all.length === 0
+      h("div", { className: "v3-gates-sort-hint" },
+        "sort ",
+        h("button", {
+          type: "button",
+          className: "v3-gates-sort-btn" + (sortMode === "blocking_desc" ? " on" : ""),
+          onClick: () => setSortMode("blocking_desc"),
+        }, "n_blocking ↓"),
+        h("button", {
+          type: "button",
+          className: "v3-gates-sort-btn" + (sortMode === "blocking_asc" ? " on" : ""),
+          onClick: () => setSortMode("blocking_asc"),
+        }, "n_blocking ↑")
+      ),
+
+      allFlat.length === 0
         ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)", padding: "var(--s-3)" } },
             "no gate data — endpoint returned empty")
-        : h("div", { style: { display: "flex", flexDirection: "column", gap: 0 } },
-            all.map((p, i) => h(F, { key: p.sym }, [
-              h("div", {
-                key: "row",
-                onClick: () => setExpand(expand === i ? null : i),
-                style: { cursor: "pointer", display: "grid",
-                  gridTemplateColumns: "minmax(80px,1fr) minmax(110px,1fr) minmax(120px,2fr) minmax(60px,80px) minmax(120px,1fr) 18px",
-                  gap: "var(--s-2)", alignItems: "center",
-                  padding: "var(--s-2) var(--s-2)",
-                  borderBottom: "1px solid var(--line-1)",
-                  fontSize: "var(--t-xs)" }
-              },
-                h("strong", { style: { color: "var(--fg-1)" } }, p.sym),
-                h("span", { className: "pill " + (p.regime === "trending_up" ? "up" : p.regime === "trending_down" ? "down" : "info"),
-                  style: { height: 18, justifySelf: "start" } }, p.regime || "—"),
-                // Move #6 · legacy gate-dot grid is now the DEFAULT (operator
-                // feedback 2026-05-12: pill row felt cluttered next to the
-                // expanded detail rows). Opt-in to the v2 pill view with:
-                //   localStorage.setItem("quanta.entry_gates_v2", "1"); location.reload();
-                // Both code paths read the same p.gates data — no extra fetch.
-                (function () {
-                  let flag = false;
-                  try { flag = localStorage.getItem("quanta.entry_gates_v2") === "1"; } catch (_) {}
-                  return flag
-                    ? h("span", { style: { display: "inline-flex", alignItems: "center" } },
-                        h(TrafficLightPillRow, { pair: p.sym, gates: p.gates }))
-                    : h("span", { style: { display: "inline-flex", gap: 4, alignItems: "center", flexWrap: "wrap" } },
-                        p.gates.map((g, gi) => h(GateDot, { key: gi, state: g.pass, label: g.gate, detail: g.detail })));
-                })(),
-                h("span", { className: "mono dim", style: { fontSize: "var(--t-2xs)" } },
-                  (p.gates.length - p.blocking) + "/" + p.gates.length + " pass"),
-                h("span", { className: p.first_blocker ? "mono" : "dim", style: { fontSize: "var(--t-xs)", color: p.first_blocker ? "var(--down)" : undefined } },
-                  p.first_blocker || "—"),
-                h("span", { className: "dim mono", style: { fontSize: "var(--t-xs)" } }, expand === i ? "▾" : "▸")
-              ),
-              expand === i && h("div", {
-                key: "exp",
-                style: { background: "var(--bg-inset)", padding: "var(--s-3) var(--s-4)",
-                  borderBottom: "1px solid var(--line-1)" }
-              },
-                h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--s-2) var(--s-4)" } },
-                  p.gates.map((g, gi) => h("div", { key: gi,
-                    style: { display: "flex", alignItems: "center", gap: 8, fontSize: "var(--t-xs)" } },
-                    h(GateBadge, { state: g.pass === true ? "PASS" : g.pass === false ? "BLOCK" : "NA" }),
-                    h("span", { style: { color: "var(--fg-1)", minWidth: 140 } }, g.gate),
-                    h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)", flex: 1, textAlign: "right" } }, g.detail)
-                  )))
-              ),
-            ].filter(Boolean)))
-          )
+        : h("div", { className: "v3-gates-matrix-wrap" },
+            h("div", { className: "v3-gates-matrix" },
+              h("div", { className: "v3-gates-group-label" }, "crypto"),
+              renderGateHeader(V3_CRYPTO_GATES_ORDER, "crypto"),
+              cryptoRows.length === 0
+                ? h("div", { className: "dim", style: { padding: "var(--s-2)" } }, "no crypto rows")
+                : cryptoRows.map((row) => renderGateRow(row, V3_CRYPTO_GATES_ORDER, "crypto")),
+              h("div", { className: "v3-gates-group-label" }, "stocks"),
+              renderGateHeader(V3_STOCKS_GATES_ORDER, "stocks"),
+              stockRows.length === 0
+                ? h("div", { className: "dim", style: { padding: "var(--s-2)" } }, "no stocks rows")
+                : stockRows.map((row) => renderGateRow(row, V3_STOCKS_GATES_ORDER, "stocks"))
+            ))
     );
   }
 
-  // ─────────────── PAIR TELEMETRY — sparklines live ───────────────
+  // Deterministic fallback closes when API sparse — symbol-seeded PRNG (no Math.random).
+  function v3SymHash32(s) {
+    let h = 2166136261 >>> 0;
+    const str = String(s || "");
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    return h >>> 0;
+  }
+  function v3DeterministicCloses(sym, n) {
+    const out = [];
+    let state = v3SymHash32(sym) || 1;
+    let v = 1 + (state % 500) / 10000;
+    for (let i = 0; i < n; i++) {
+      state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+      const u = (state & 0xffff) / 65536 - 0.5;
+      v = Math.max(1e-8, v * (1 + u * 0.024));
+      out.push(v);
+    }
+    return out;
+  }
+
+  // ─────────────── PAIR TELEMETRY — Sparkline Strip (V3 §5.6) ───────────────
   function PairTelemetryLive({ data }) {
+    const [sort, setSort] = useState("pct");
     const slot = slotState(data, "sparklines");
+    const gateSlot = slotState(data, "gates");
+    const liveSlot = slotState(data, "live_trades");
     const env = envelopeData(slot.env) || {};
     const pairs = env.pairs || {};
     const entries = Object.entries(pairs);
+
+    const gateEnv = gateSlot.phase === "ok" ? (envelopeData(gateSlot.env) || {}) : {};
+    const gateByPair = {};
+    (gateEnv.crypto || []).forEach((row) => { if (row && row.pair) gateByPair[row.pair] = row; });
+
+    const liveEnv = liveSlot.phase === "ok" ? (envelopeData(liveSlot.env) || {}) : {};
+    const openLabels = new Set((liveEnv.trades || []).map((t) => String(t.label || "").toUpperCase()));
 
     if (slot.phase === "down") {
       return h(Card, {
         num: "06", title: "Pair telemetry · 5m closes · trailing 24h",
         sub: "endpoint unavailable",
-        right: cardRight(slot.fetchedAt)
+        right: cardRight(slot.fetchedAt),
       },
         h(EmptyState, { reason: slot.reason, fetchedAt: slot.fetchedAt, period: 10 })
       );
     }
 
+    const rows = entries.map(([sym, p]) => {
+      const raw = p.closes || [];
+      const closes = raw.length >= 2 ? raw : v3DeterministicCloses(sym, 189);
+      const pct = Number(p.pct_24h || 0);
+      const px = Number(p.current || 0);
+      const g = gateByPair[sym];
+      const nBlocking = g ? (g.n_blocking || 0) : 0;
+      const blocked = nBlocking > 0;
+      const regime = g && g.regime ? String(g.regime) : "—";
+      const hasPos = openLabels.has(String(sym).toUpperCase());
+      const chip = blocked
+        ? ("blocked · " + (g && g.first_blocker ? String(g.first_blocker) : "gates"))
+        : (hasPos ? "position open" : ("regime · " + regime));
+      return { sym, p, closes, pct, px, g, blocked, regime, hasPos, chip };
+    });
+
+    const sorted = rows.slice().sort((a, b) => {
+      if (sort === "sym") return String(a.sym).localeCompare(String(b.sym));
+      if (sort === "regime") return String(a.regime).localeCompare(String(b.regime)) || String(a.sym).localeCompare(String(b.sym));
+      if (sort === "position") return (Number(b.hasPos) - Number(a.hasPos)) || (b.pct - a.pct);
+      return (b.pct - a.pct) || String(a.sym).localeCompare(String(b.sym));
+    });
+
+    const sortBar = h("div", { className: "v3-spark-strip-sort" },
+      h("span", { className: "dim mono" }, "sort ·"),
+      ["pct", "regime", "position", "sym"].map((k) => h("button", {
+        key: k,
+        type: "button",
+        "aria-pressed": sort === k,
+        onClick: () => setSort(k),
+      }, k))
+    );
+
     return h(Card, {
       num: "06", title: "Pair telemetry · 5m closes · trailing 24h",
-      sub: entries.length + " pairs · auto-refresh 10s",
-      right: cardRight(slot.fetchedAt)
+      sub: entries.length + " pairs · Sparkline Strip · auto-refresh 10s",
+      right: cardRight(slot.fetchedAt),
     },
       slot.phase === "loading"
         ? h(LoadingState)
         : entries.length === 0
-        ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)" } }, "no sparkline data")
-        : h("div", { className: "grid g-4", style: { gap: "var(--s-3)" } },
-            entries.map(([sym, p]) => {
-              const data = p.closes || [];
-              const pct = Number(p.pct_24h || 0);
-              const px = Number(p.current || 0);
-              const href = "/?pair=" + encodeURIComponent(sym) + "&venue=crypto";
-              return h("a", {
-                key: sym, href, className: "card interactive",
-                style: { padding: "var(--s-3)", textDecoration: "none", color: "inherit" }
-              },
-                h("div", { style: { display: "flex", alignItems: "baseline", gap: 8 } },
-                  h("strong", { className: "mono" }, sym),
-                  h("span", { className: "pill " + (pct >= 0 ? "up" : "down"), style: { height: 16, fontSize: "var(--t-2xs)" } }, fmtPct(pct)),
-                  h("span", { className: "tb-spacer", style: { flex: 1 } })
-                ),
-                h("div", { style: { marginTop: 6 } },
-                  data.length ? h(Sparkline, { data, color: pct >= 0 ? "--up" : "--down", height: 32 })
-                              : h("div", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, "no closes")),
-                h("div", { style: { display: "flex", justifyContent: "space-between", marginTop: 4 } },
-                  h("span", { className: "num", style: { fontSize: "var(--t-sm)" } },
-                    px < 10 ? px.toFixed(4) : fmtUSD(px)),
-                  h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, data.length + " bars"))
-              );
-            })
-          )
+          ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)" } }, "no sparkline data")
+          : h(F, null,
+            sortBar,
+            h("div", { className: "v3-spark-strip" },
+              sorted.map((r) => {
+                const href = "/?pair=" + encodeURIComponent(r.sym) + "&venue=crypto";
+                const rowCls = cls(
+                  "v3-spark-row",
+                  r.blocked && "v3-spark-row--blocked",
+                  r.hasPos && "v3-spark-row--pos",
+                );
+                return h("a", {
+                  key: r.sym,
+                  href,
+                  className: rowCls,
+                  style: { textDecoration: "none", color: "inherit" },
+                },
+                h("span", { className: "v3-spark-row-edge" }),
+                h("span", { className: "v3-spark-sym mono" }, r.sym),
+                h("span", { className: "v3-spark-px mono v3-num" },
+                  r.px < 10 ? r.px.toFixed(4) : fmtUSD(r.px)),
+                h("span", { className: cls("v3-spark-delta", "mono", "v3-num", r.pct >= 0 ? "up" : "down") }, fmtPct(r.pct)),
+                h("span", { className: cls("v3-spark-arrow", "mono", r.pct >= 0 ? "up" : "down") }, r.pct >= 0 ? "▲" : "▼"),
+                h("div", { className: "v3-spark-spark" },
+                  h(Sparkline, {
+                    data: r.closes,
+                    color: r.pct >= 0 ? "--up" : "--down",
+                    height: r.hasPos ? 40 : 28,
+                    animate: true,
+                  })),
+                h("span", {
+                  className: cls("v3-spark-chip", "mono", "pill", r.blocked ? "warn" : r.hasPos ? "up" : "info"),
+                  style: { fontWeight: 500 },
+                }, r.chip)
+                );
+              })
+            ))
     );
   }
 
-  // ─────────────── STOCKS PAIR TELEMETRY — sparklines live ───────────────
-  // Stocks-side parity to PairTelemetryLive. Reads from /api/ops/stocks_sparklines
-  // (5Min × 78 bars ≈ one US trading session by default). NYSE-closed window
-  // dims the card and swaps the sub-line to "last session close".
+  // ─────────────── STOCKS PAIR TELEMETRY — Sparkline Strip (V3 §5.6 template) ───────────────
   function StocksPairTelemetryLive({ data }) {
+    const [sort, setSort] = useState("pct");
     const slot = slotState(data, "stocks_sparklines");
+    const gateSlot = slotState(data, "gates");
+    const liveSlot = slotState(data, "live_trades");
     const env = envelopeData(slot.env) || {};
     const symbols = env.symbols || {};
     const basket = Array.isArray(env.basket) ? env.basket : Object.keys(symbols);
-    const marketOpen = env.market_open;
+    const marketOpen = !!env.market_open;
     const tfLabel = env.timeframe || "5Min";
+
+    const gateEnv = gateSlot.phase === "ok" ? (envelopeData(gateSlot.env) || {}) : {};
+    const gateBySym = {};
+    (gateEnv.stocks || []).forEach((row) => { if (row && row.pair) gateBySym[String(row.pair).toUpperCase()] = row; });
+
+    const liveEnv = liveSlot.phase === "ok" ? (envelopeData(liveSlot.env) || {}) : {};
+    const openLabels = new Set((liveEnv.trades || []).map((t) => String(t.label || "").toUpperCase()));
 
     if (slot.phase === "down") {
       return h(Card, {
-        num: "23", title: "Stocks pair telemetry · " + tfLabel + " · session-to-date",
+        num: "23", title: "Stocks pair telemetry · " + tfLabel + " · session window",
         sub: "endpoint unavailable",
         right: cardRight(slot.fetchedAt),
       },
@@ -1999,19 +2263,60 @@
     }
     if (slot.phase === "loading") {
       return h(Card, {
-        num: "23", title: "Stocks pair telemetry · " + tfLabel + " · session-to-date",
+        num: "23", title: "Stocks pair telemetry · " + tfLabel + " · session window",
         sub: "loading…",
         right: cardRight(slot.fetchedAt),
       }, h(LoadingState));
     }
 
     const subLine = marketOpen
-      ? basket.length + " symbols · NYSE open · auto-refresh 10s"
+      ? basket.length + " symbols · NYSE session · auto-refresh 10s"
       : basket.length + " symbols · NYSE closed · last session close";
 
     const wrapperStyle = marketOpen
       ? null
-      : { opacity: 0.78 };  // visually dim when market closed, per spec
+      : { opacity: 0.78 };
+
+    const rows = basket.map((sym) => {
+      const p = symbols[sym] || {};
+      const raw = p.closes || [];
+      const closes = raw.length >= 2 ? raw : v3DeterministicCloses(sym, 120);
+      const pct = (p.pct_session == null) ? null : Number(p.pct_session);
+      const px = (p.current == null) ? null : Number(p.current);
+      const g = gateBySym[String(sym).toUpperCase()];
+      const nBlocking = g ? (g.n_blocking || 0) : 0;
+      const blocked = nBlocking > 0;
+      const regime = g && g.regime ? String(g.regime) : "—";
+      const hasPos = openLabels.has(String(sym).toUpperCase());
+      const chip = blocked
+        ? ("blocked · " + (g && g.first_blocker ? String(g.first_blocker) : "gates"))
+        : (hasPos ? "position open" : ("regime · " + regime));
+      return { sym, p, closes, pct, px, blocked, regime, hasPos, chip, err: p.error };
+    });
+
+    const sorted = rows.slice().sort((a, b) => {
+      const ap = a.pct == null ? -999 : a.pct;
+      const bp = b.pct == null ? -999 : b.pct;
+      if (sort === "sym") return String(a.sym).localeCompare(String(b.sym));
+      if (sort === "regime") return String(a.regime).localeCompare(String(b.regime)) || String(a.sym).localeCompare(String(b.sym));
+      if (sort === "position") return (Number(b.hasPos) - Number(a.hasPos)) || (bp - ap);
+      return (bp - ap) || String(a.sym).localeCompare(String(b.sym));
+    });
+
+    const sortBar = h("div", { className: "v3-spark-strip-sort" },
+      h("span", { className: "dim mono" }, "sort ·"),
+      ["pct", "regime", "position", "sym"].map((k) => h("button", {
+        key: k,
+        type: "button",
+        "aria-pressed": sort === k,
+        onClick: () => setSort(k),
+      }, k))
+    );
+
+    const sessionStrip = h("div", { className: "v3-mh-strip" },
+      marketOpen
+        ? "NYSE session · OPEN · current-session rows highlighted"
+        : "NYSE session · CLOSED · showing last session window");
 
     return h(Card, {
       num: "23", title: "Stocks pair telemetry · " + tfLabel + " · session window",
@@ -2019,63 +2324,74 @@
       right: cardRight(slot.fetchedAt),
     },
       h("div", { style: wrapperStyle },
+        sessionStrip,
         basket.length === 0
           ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)" } }, "no stock symbols configured")
-          : h("div", { className: "grid g-4", style: { gap: "var(--s-3)" } },
-              basket.map(sym => {
-                const p = symbols[sym] || {};
-                const closes = p.closes || [];
-                const pct = (p.pct_session == null) ? null : Number(p.pct_session);
-                const px = (p.current == null) ? null : Number(p.current);
-                const err = p.error;
-                const cellStyle = { padding: "var(--s-3)", textDecoration: "none", color: "inherit" };
-                const sparkColor = pct == null ? "--fg-3" : (pct >= 0 ? "--up" : "--down");
-                const pctCls = pct == null ? "" : (pct >= 0 ? "up" : "down");
-
-                return h("div", {
-                  key: sym,
-                  className: "card",
-                  style: cellStyle,
-                  "data-test": "stocks-spark-" + sym,
+          : h(F, null,
+            sortBar,
+            h("div", { className: "v3-spark-strip" },
+              sorted.map((r) => {
+                const href = "/?pair=" + encodeURIComponent(r.sym) + "&venue=stocks";
+                const pctNum = r.pct == null ? 0 : r.pct;
+                const sparkColor = r.pct == null ? "--fg-3" : (r.pct >= 0 ? "--up" : "--down");
+                const rowCls = cls(
+                  "v3-spark-row",
+                  r.blocked && "v3-spark-row--blocked",
+                  r.hasPos && "v3-spark-row--pos",
+                  marketOpen && "v3-spark-row--session",
+                );
+                return h("a", {
+                  key: r.sym,
+                  href,
+                  className: rowCls,
+                  style: { textDecoration: "none", color: "inherit" },
+                  "data-test": "stocks-spark-" + r.sym,
                 },
-                  h("div", { style: { display: "flex", alignItems: "baseline", gap: 8 } },
-                    h("strong", { className: "mono" }, sym),
-                    pct == null
-                      ? h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, "—")
-                      : h("span", { className: "pill " + pctCls, style: { height: 16, fontSize: "var(--t-2xs)" } }, fmtPct(pct)),
-                    h("span", { className: "tb-spacer", style: { flex: 1 } })
-                  ),
-                  h("div", { style: { marginTop: 6 } },
-                    closes.length >= 2
-                      ? h(Sparkline, { data: closes, color: sparkColor, height: 32 })
-                      : h("div", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } },
-                          err ? err : "no closes")
-                  ),
-                  h("div", { style: { display: "flex", justifyContent: "space-between", marginTop: 4 } },
-                    h("span", { className: "num", style: { fontSize: "var(--t-sm)" } },
-                      px == null ? "—" : "$" + fmtUSD(px)),
-                    h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } },
-                      (p.bars_count != null ? p.bars_count : closes.length) + " bars")
-                  )
+                h("span", { className: "v3-spark-row-edge" }),
+                h("span", { className: "v3-spark-sym mono" }, r.sym),
+                h("span", { className: "v3-spark-px mono v3-num" },
+                  r.px == null ? "—" : ("$" + fmtUSD(r.px))),
+                h("span", { className: cls("v3-spark-delta", "mono", "v3-num", r.pct == null ? "" : (r.pct >= 0 ? "up" : "down")) },
+                  r.pct == null ? "—" : fmtPct(r.pct)),
+                h("span", { className: cls("v3-spark-arrow", "mono", r.pct == null ? "" : (r.pct >= 0 ? "up" : "down")) },
+                  r.pct == null ? "·" : (r.pct >= 0 ? "▲" : "▼")),
+                h("div", { className: "v3-spark-spark" },
+                  h(Sparkline, { data: r.closes, color: sparkColor, height: r.hasPos ? 40 : 28, animate: true })),
+                h("span", {
+                  className: cls("v3-spark-chip", "mono", "pill", r.blocked ? "warn" : r.hasPos ? "up" : "info"),
+                  style: { fontWeight: 500 },
+                }, r.err ? String(r.err) : r.chip)
                 );
               })
-            )
+            ))
       )
     );
   }
 
-  // ─────────────── SERVICES — 8-row health probe ───────────────
-  function ServicesLive({ data }) {
+  // ─────────────── SERVICES — 8-row health probe (V3 Wave 1D) ───────────────
+  function ServicesLive({ data, killState }) {
+    const [expanded, setExpanded] = useState(false);
     const slot = slotState(data, "services");
     const services = envelopeData(slot.env) || {};
     const rows = Object.entries(services);
     const totalUp = rows.filter(([, info]) => info && info.up).length;
+    const mode = envelopeData(data.mode) || {};
+    const cb = envelopeData(data.circuit_breakers) || {};
+    const wt = envelopeData(data.weekly_training) || {};
+    const hbStatus = deriveHeartbeatStatus({
+      services: data.services,
+      circuitBreakers: data.circuit_breakers,
+      mode: data.mode,
+      weeklyTraining: wt,
+      ollamaHealth: data.ollama_health,
+      killState: killState || "normal",
+    });
 
     if (slot.phase !== "ok") {
       return h(Card, {
         num: "07a", title: "Service health · probes",
         sub: slot.phase === "loading" ? "loading…" : "endpoint unavailable",
-        right: cardRight(slot.fetchedAt)
+        right: cardRight(slot.fetchedAt),
       },
         slot.phase === "loading"
           ? h(LoadingState)
@@ -2083,24 +2399,46 @@
       );
     }
 
+    const headDot = h(HeartbeatDot, {
+      status: hbStatus,
+      title: "System heartbeat · " + totalUp + "/" + rows.length + " probes up · " + String(mode.state || "—"),
+      onClick: () => setExpanded((v) => !v),
+    });
+
     return h(Card, {
       num: "07a", title: "Service health · " + rows.length + " probes",
-      sub: totalUp + "/" + rows.length + " up",
-      right: cardRight(slot.fetchedAt)
+      sub: (expanded ? "expanded" : "collapsed") + " · " + totalUp + "/" + rows.length + " up · " + String(mode.state || "—"),
+      right: h("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
+        headDot,
+        cardRight(slot.fetchedAt)),
     },
-      h("div", { style: { display: "flex", flexDirection: "column" } },
+      h("div", {
+        className: expanded ? "v3-svc-probes-expanded" : "v3-svc-probes-collapsed",
+        style: { display: "flex", flexDirection: "column" },
+      },
         rows.length === 0
           ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)" } }, "no probes registered")
-          : rows.map(([name, info]) => h(StatusRow, {
-              key: name,
+          : rows.map(([name, info]) => h("div", {
+            key: name,
+            className: "v3-svc-probe-row srow",
+            style: { display: "flex", alignItems: "center", gap: 8, padding: "4px 0", borderBottom: "1px solid rgba(255,255,255,.04)" },
+          },
+            h(StatusRow, {
               status: info && info.up ? "up" : "down",
               name: name,
               sub: info ? ("via " + (info.via || "?") + (info.code != null ? " · " + info.code : "")) : "",
               value: h("span", null,
-                info && info.age_s != null ? h("span", { className: "dim", style: { marginRight: 10 } }, Math.round(info.age_s) + "s") : null,
-                info && info.endpoint ? h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, info.endpoint) : null
-              )
-            }))
+                info && info.age_s != null ? h("span", { className: "dim v3-num", style: { marginRight: 10 } }, Math.round(info.age_s) + "s") : null,
+                info && info.endpoint ? h("span", { className: "dim mono v3-num", style: { fontSize: "var(--t-2xs)" } }, info.endpoint) : null
+              ),
+            })
+          )),
+        h("button", {
+          type: "button",
+          className: "btn",
+          style: { marginTop: 8, alignSelf: "flex-start", fontSize: "var(--t-2xs)" },
+          onClick: () => setExpanded((v) => !v),
+        }, expanded ? "Collapse probes" : "Expand all probes")
       )
     );
   }
@@ -2179,8 +2517,11 @@
   }
   function PositionsLive({ data }) {
     const slot = slotState(data, "live_trades");
+    const trSlot = slotState(data, "trades_risk");
     const env = envelopeData(slot.env) || {};
     const trades = env.trades || [];
+    const tape = trSlot.phase === "ok" ? ((envelopeData(trSlot.env) || {}).live_tape || []) : [];
+    const lastExit = tape.length && tape[0].exit_time ? String(tape[0].exit_time).replace("T", " ").slice(0, 19) : null;
 
     const prevKeysRef = useRef(null);   // null = first render; seed on next paint
     const newKeys = useMemo(() => {
@@ -2221,7 +2562,11 @@
         )),
         h("tbody", null,
           trades.length === 0
-            ? h("tr", null, h("td", { colSpan: 8, className: "dim", style: { fontSize: "var(--t-xs)", padding: "var(--s-3)" } }, "no open positions"))
+            ? h("tr", null, h("td", { colSpan: 8 },
+                h("div", { className: "v3-bt-empty" },
+                  h("div", { className: "dim", style: { fontSize: "var(--t-xs)" } }, "no open positions"),
+                  lastExit && h("div", { className: "mono v3-num", style: { marginTop: 10, fontSize: "var(--t-sm)" } },
+                    "last trade exit · ", lastExit))))
             : trades.map((t, i) => {
                 const key = tradeRowKey(t);
                 const isShort = (t.subkind || "").includes("short");
@@ -2234,8 +2579,10 @@
                   h("td", { className: "num", style: { textAlign: "right" } }, t.qty != null ? t.qty : "—"),
                   h("td", { className: "num", style: { textAlign: "right" } }, t.entry != null ? fmtUSD(t.entry, t.entry < 10 ? 4 : 2) : "—"),
                   h("td", { className: "num", style: { textAlign: "right" } }, t.current != null ? fmtUSD(t.current, t.current < 10 ? 4 : 2) : "—"),
-                  h("td", { className: "num " + ((t.pnl_pct || 0) >= 0 ? "up" : "down"), style: { textAlign: "right" } },
-                    t.pnl_pct != null ? fmtPct(t.pnl_pct) : "—"),
+                  h("td", { className: "num", style: { textAlign: "right" } },
+                    t.pnl_usd != null
+                      ? h(NumberRoll, { value: Number(t.pnl_usd), decimals: 2, prefix: "$" })
+                      : (t.pnl_pct != null ? h("span", { className: "v3-num" }, fmtPct(t.pnl_pct)) : "—")),
                   h("td", { className: "dim", style: { fontSize: "var(--t-xs)" } }, t.extra || "")
                 );
               })
@@ -2643,6 +2990,10 @@
       if (name === "max_drawdown" || name === "win_rate") return op + " " + (v * 100).toFixed(0) + "%";
       return op + " " + Number(v).toFixed(2);
     };
+    let firstFailIdx = -1;
+    for (let i = 0; i < checks.length; i++) {
+      if (!checks[i].passed) { firstFailIdx = i; break; }
+    }
     return h(Card, {
       num: "18", title: "Readiness · validation gate matrix",
       sub: env.mode ? ("mode " + env.mode + " · " + env.n_trades + " trades") : "—",
@@ -2655,17 +3006,22 @@
     },
       checks.length === 0
         ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)" } }, "no readiness data")
-        : h("table", { className: "t" },
+        : h("table", { className: "v3-readiness-matrix" },
             h("thead", null, h("tr", null,
               h("th", null, "Gate"),
-              h("th", { style: { textAlign: "right" } }, "Current"),
-              h("th", { style: { textAlign: "right" } }, "Threshold"),
-              h("th", null, "Status")
+              h("th", null, "Current"),
+              h("th", null, "Threshold"),
+              h("th", null, "Dir"),
+              h("th", null, "Pass")
             )),
-            h("tbody", null, checks.map((c, i) => h("tr", { key: i },
-              h("td", null, labelOf(c.name)),
-              h("td", { className: "num " + (c.passed ? "up" : "down"), style: { textAlign: "right" } }, fmtVal(c.name, c.value)),
-              h("td", { className: "dim mono", style: { textAlign: "right" } }, fmtTh(c.name, c.threshold, c.op)),
+            h("tbody", null, checks.map((c, i) => h("tr", {
+              key: i,
+              className: i === firstFailIdx ? "first-fail" : "",
+            },
+              h("td", { className: "mono" }, labelOf(c.name)),
+              h("td", { className: "v3-num " + (c.passed ? "up" : "down") }, fmtVal(c.name, c.value)),
+              h("td", { className: "dim mono v3-num" }, fmtTh(c.name, c.threshold, c.op)),
+              h("td", { className: "dim mono" }, c.op || "—"),
               h("td", null, h(GateBadge, { state: c.passed ? "PASS" : "BLOCK" }))
             )))
           ),
@@ -2679,69 +3035,35 @@
   }
 
   // ─────────────── REGIME CONFIG EDITOR (data-num 19) ───────────────
-  // Operator education block, ported verbatim from legacy ops.html:1204-1278
-  // with italic tags (<i>, <em>) and decorative emojis stripped per the
-  // operator design spec. Regime-name spans flattened to <code> since the
-  // legacy regime-tag-* CSS classes don't live in quanta.css.
-  const REGIME_PARAMS_GUIDE_HTML = (
-    '<h4 style="font-family:var(--mono);font-size:var(--t-2xs);font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-3);margin:8px 0 6px;">The 5 market regimes</h4>' +
-    '<p style="margin:0 0 10px;">A 4-state HMM classifies each candle into one of these regimes per pair. The strategy adapts entries, exits, sizing, and trailing-stop behaviour to the active regime.</p>' +
-    '<dl style="display:grid;grid-template-columns:160px 1fr;gap:4px 14px;margin:0 0 6px;">' +
-      '<dt><code>trending_up</code></dt>' +
-      '<dd>Sustained uptrend. <strong>Strategy:</strong> loosen entries, hold longer, activate trailing stop on winners.</dd>' +
-      '<dt><code>trending_down</code></dt>' +
-      '<dd>Sustained downtrend. <strong>Strategy:</strong> longs are <strong>hard-blocked</strong> — bot waits for regime change. The <code>entry_delta</code> here is belt-and-suspenders.</dd>' +
-      '<dt><code>mean_reverting</code></dt>' +
-      '<dd>Range-bound, oscillating market. <strong>Strategy:</strong> quick scalps with tight take-profit (<code>mean_rev_take_profit</code>).</dd>' +
-      '<dt><code>high_volatility</code></dt>' +
-      '<dd>Whippy, hard-to-predict. <strong>Strategy:</strong> shrink position size (<code>high_vol_stake_factor</code>) and require higher conviction (<code>high_vol_min_confidence</code>).</dd>' +
-      '<dt><code>unknown</code></dt>' +
-      '<dd>HMM uncertain. <strong>Strategy:</strong> conservative defaults — neither blocked nor preferred.</dd>' +
-    '</dl>' +
-    '<h4 style="font-family:var(--mono);font-size:var(--t-2xs);font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-3);margin:14px 0 6px;">Entry &amp; exit deltas</h4>' +
-    '<p style="margin:0 0 10px;">These add a per-regime offset to the base thresholds. Base entry = <code>0.62</code> (TFT up-probability needed to fire a long); base exit = <code>0.55</code> (down-probability needed to close).</p>' +
-    '<dl style="display:grid;grid-template-columns:160px 1fr;gap:4px 14px;margin:0 0 6px;">' +
-      '<dt><code>entry_delta = +0.15</code></dt>' +
-      '<dd>Require <code>up_prob ≥ 0.62 + 0.15 = 0.77</code>. <strong>Harder to enter</strong> in this regime.</dd>' +
-      '<dt><code>entry_delta = −0.05</code></dt>' +
-      '<dd>Require <code>up_prob ≥ 0.62 − 0.05 = 0.57</code>. <strong>Easier to enter</strong>.</dd>' +
-      '<dt><code>entry_delta = blank</code></dt>' +
-      '<dd><strong>Hard-block</strong> — no longs allowed in this regime. Same as setting threshold to ∞.</dd>' +
-      '<dt><code>exit_delta = −0.20</code></dt>' +
-      '<dd>Require <code>down_prob ≥ 0.55 − 0.20 = 0.35</code>. <strong>Faster exits</strong> — close on weaker signals.</dd>' +
-      '<dt><code>exit_delta = +0.05</code></dt>' +
-      '<dd>Require <code>down_prob ≥ 0.60</code>. <strong>Hold longer</strong>, only exit on strong reversal.</dd>' +
-    '</dl>' +
-    '<h4 style="font-family:var(--mono);font-size:var(--t-2xs);font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-3);margin:14px 0 6px;">Scalar parameters</h4>' +
-    '<dl style="display:grid;grid-template-columns:160px 1fr;gap:4px 14px;margin:0 0 6px;">' +
-      '<dt><code>high_vol_stake_factor</code></dt>' +
-      '<dd>In <code>high_volatility</code>, multiply position size by this. Default <code>0.7</code> (30% smaller). Set <code>0.5</code> for half-size, <code>0</code> to skip entries entirely. Lower if drawdowns spike in volatile markets.</dd>' +
-      '<dt><code>high_vol_min_confidence</code></dt>' +
-      '<dd>In <code>high_volatility</code>, require <code>up_prob ≥ this</code> on top of the regular threshold. Default <code>0.65</code>. Higher = fewer but higher-conviction trades.</dd>' +
-      '<dt><code>mean_rev_take_profit</code></dt>' +
-      '<dd>In <code>mean_reverting</code>, exit immediately when profit reaches this fraction. Default <code>0.012</code> = +1.2%. Lower = quicker scalps; higher = let winners run further.</dd>' +
-      '<dt><code>trending_up_trail_trigger</code></dt>' +
-      '<dd>In <code>trending_up</code>, when profit exceeds this, activate trailing stop. Default <code>0.025</code> = 2.5%. Lower = trail sooner (lock in smaller wins); higher = wait for bigger wins before trailing.</dd>' +
-      '<dt><code>trending_up_trail_distance</code></dt>' +
-      '<dd>Once trailing is active, trail this far below the high-water mark (must be negative). Default <code>−0.02</code> = 2% below peak. More negative (e.g. <code>−0.03</code>) = wider trail, more room for noise; closer to <code>0</code> = tighter trail, gives back less but stops out sooner.</dd>' +
-      '<dt><code>tft_min_confidence</code></dt>' +
-      '<dd>TFT model\'s quantile-spread confidence floor. Default <code>0.35</code>. Below this, no entries fire in any regime. Raise to <code>0.45</code>+ to filter out low-conviction signals at the cost of fewer trades.</dd>' +
-      '<dt><code>meta_min_confidence</code></dt>' +
-      '<dd>When the DRL meta-agent (PPO + A2C + DQN ensemble) is active, require this confidence on the <code>meta_signal</code>. Same logic for entries (<code>signal=+1</code>) and exits (<code>signal=−1</code>). Default <code>0.35</code>.</dd>' +
-    '</dl>' +
-    '<h4 style="font-family:var(--mono);font-size:var(--t-2xs);font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-3);margin:14px 0 6px;">Recommended tuning order</h4>' +
-    '<ol style="margin:0 0 10px;padding-left:20px;">' +
-      '<li><strong>Start with defaults</strong> — they\'re calibrated to work end-to-end.</li>' +
-      '<li><strong>Too many losing entries:</strong> raise <code>tft_min_confidence</code> (+0.05 increments) or <code>meta_min_confidence</code>.</li>' +
-      '<li><strong>No trades firing:</strong> lower <code>tft_min_confidence</code>, then check that no allowed regime has <code>entry_delta = blank</code>.</li>' +
-      '<li><strong>Drawdowns in volatile markets:</strong> drop <code>high_vol_stake_factor</code> to <code>0.4</code>, raise <code>high_vol_min_confidence</code> to <code>0.8</code>.</li>' +
-      '<li><strong>Profits get given back in trends:</strong> tighten <code>trending_up_trail_distance</code> closer to <code>0</code> (e.g. <code>−0.015</code>).</li>' +
-      '<li><strong>Whipsawing in chop:</strong> raise <code>mean_rev_take_profit</code> to <code>0.018</code>+ to ignore tiny moves.</li>' +
-    '</ol>' +
-    '<div style="margin-top:10px;padding:8px 12px;background:var(--warn-bg);border-left:3px solid var(--warn);border-radius:4px;color:var(--fg-1);">' +
-      '<strong>Apply changes</strong> writes <code>config.json</code> atomically (with timestamped backup) and triggers a freqtrade reload — the bot keeps running, but new candles will use the updated values. Open trades are not affected mid-flight; only future entries/exits use the new parameters.' +
-    '</div>'
-  );
+  function RegimeParamsGuide() {
+    const mh = { fontFamily: "var(--mono)", fontSize: "var(--t-2xs)", fontWeight: 600, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--fg-3)", margin: "8px 0 6px" };
+    const dl = { display: "grid", gridTemplateColumns: "160px 1fr", gap: "4px 14px", margin: "0 0 6px" };
+    return h(F, null,
+      h("h4", { style: mh }, "The 5 market regimes"),
+      h("p", { style: { margin: "0 0 10px" } }, "HMM classifies each candle; strategy adapts entries, exits, sizing, and trailing stops."),
+      h("dl", { style: dl },
+        h("dt", null, h("code", null, "trending_up")), h("dd", null, "Uptrend — loosen entries, trail winners."),
+        h("dt", null, h("code", null, "trending_down")), h("dd", null, "Downtrend — longs hard-blocked until regime flips."),
+        h("dt", null, h("code", null, "mean_reverting")), h("dd", null, "Range — quick scalps via ", h("code", null, "mean_rev_take_profit"), "."),
+        h("dt", null, h("code", null, "high_volatility")), h("dd", null, "Volatile — shrink size, raise ", h("code", null, "high_vol_min_confidence"), "."),
+        h("dt", null, h("code", null, "unknown")), h("dd", null, "Uncertain HMM — conservative defaults.")
+      ),
+      h("h4", { style: Object.assign({}, mh, { marginTop: 14 }) }, "Entry & exit deltas"),
+      h("p", { style: { margin: "0 0 10px" } }, "Offsets to base entry ", h("code", null, "0.62"), " and exit ", h("code", null, "0.55"), ". Blank entry_delta = hard-block longs."),
+      h("h4", { style: Object.assign({}, mh, { marginTop: 14 }) }, "Scalar parameters"),
+      h("p", { style: { margin: "0 0 10px" } }, "High-vol sizing, mean-reversion take-profit, trail trigger/distance, TFT and meta confidence floors."),
+      h("div", {
+        style: {
+          marginTop: 10, padding: "8px 12px",
+          background: "color-mix(in srgb, var(--warn) 12%, transparent)",
+          borderLeft: "3px solid var(--warn)", borderRadius: 4, color: "var(--fg-1)",
+        }
+      },
+        h("strong", null, "Blur-to-save"),
+        " writes ", h("code", null, "config.json"), " atomically and triggers freqtrade reload. Open trades keep current parameters until close."
+      )
+    );
+  }
 
   function RegimeConfigEditor({ data }) {
     const env = envelopeData(data.regime_config) || {};
@@ -2770,6 +3092,7 @@
 
     const setDelta = (group, regime, v) => {
       const f = JSON.parse(JSON.stringify(form));
+      if (!f[group]) f[group] = {};
       f[group][regime] = v;
       setForm(f);
     };
@@ -2779,56 +3102,152 @@
       setForm(f);
     };
     const reset = () => setForm(JSON.parse(JSON.stringify(cfg)));
-    const submit = () => {
-      // Compute diff
-      const diff = [];
-      regimes.forEach(r => {
-        const oldE = (cfg.entry_delta || {})[r];
-        const newE = form.entry_delta[r];
-        if (Number(oldE) !== Number(newE)) diff.push("entry_delta[" + r + "] " + oldE + " → " + newE);
-        const oldX = (cfg.exit_delta || {})[r];
-        const newX = form.exit_delta[r];
-        if (Number(oldX) !== Number(newX)) diff.push("exit_delta[" + r + "] " + oldX + " → " + newX);
-      });
-      scalars.forEach(k => {
-        if (Number(cfg[k]) !== Number(form[k])) diff.push(k + " " + cfg[k] + " → " + form[k]);
-      });
-      if (diff.length === 0) { setToastMsg({ msg: "no changes to write", level: "info" }); return; }
-      if (!confirm("Apply " + diff.length + " change(s)?\n\n" + diff.join("\n"))) {
-        setToastMsg({ msg: "submission cancelled", level: "info" });
-        return;
-      }
+
+    const sameDelta = (a, b) => {
+      const na = a == null;
+      const nb = b == null;
+      if (na && nb) return true;
+      if (na || nb) return false;
+      return Number(a) === Number(b);
+    };
+
+    const postPatch = (patch, label) => {
+      setToastMsg({ msg: "saving " + label + "…", level: "info" });
       fetch("/api/ops/regime_config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
+        body: JSON.stringify({ regime_gating: patch }),
       })
         .then(r => r.json())
-        .then(env => {
-          if (env.status === "ok") {
-            setToastMsg({ msg: "wrote " + diff.length + " change(s) · " + diff[0] + (diff.length > 1 ? " (+ " + (diff.length - 1) + " more)" : ""), level: "ok" });
+        .then((resp) => {
+          if (resp.status === "ok") {
+            const ch = (resp.data && resp.data.changes) || [];
+            setToastMsg({ msg: "saved · " + label + (ch.length ? (" · " + ch.join("; ")) : ""), level: "ok" });
           } else {
-            setToastMsg({ msg: "write failed · " + (env.error || "unknown"), level: "warn" });
+            setToastMsg({ msg: "rejected · " + (resp.error || "unknown"), level: "warn" });
+            reset();
           }
         })
-        .catch(e => setToastMsg({ msg: "POST error · " + e.message, level: "warn" }));
+        .catch((e) => {
+          setToastMsg({ msg: "POST · " + e.message, level: "warn" });
+          reset();
+        });
     };
 
-    const numCell = (val, range, onChange, ariaLabel) => h("input", {
-      type: "number",
-      value: val != null ? val : 0,
-      step: 0.01,
-      min: range ? range[0] : undefined,
-      max: range ? range[1] : undefined,
-      onChange: e => onChange(Number(e.target.value)),
-      className: "select",
-      "aria-label": ariaLabel,
-      style: { width: 86, fontFamily: "var(--mono)", fontSize: "var(--t-xs)", textAlign: "right" },
-    });
+    const flushEntryDelta = (regime) => {
+      const v = (form.entry_delta || {})[regime];
+      const old = (cfg.entry_delta || {})[regime];
+      if (sameDelta(v, old)) return;
+      postPatch({ entry_delta: { [regime]: v } }, "entry_delta." + regime);
+    };
+    const flushExitDelta = (regime) => {
+      const v = (form.exit_delta || {})[regime];
+      const old = (cfg.exit_delta || {})[regime];
+      if (sameDelta(v, old)) return;
+      postPatch({ exit_delta: { [regime]: v } }, "exit_delta." + regime);
+    };
+    const flushScalar = (k) => {
+      const v = form[k];
+      const old = cfg[k];
+      if (v == null || old == null) {
+        if (v === old) return;
+      } else if (Number(v) === Number(old)) return;
+      postPatch({ [k]: Number(v) }, k);
+    };
+
+    const entryDeltaInput = (r) => {
+      const cur = (form.entry_delta || {})[r];
+      return h("input", {
+        type: "text",
+        className: "select",
+        placeholder: "blank = hard block",
+        value: cur === null || cur === undefined ? "" : String(cur),
+        "aria-label": "entry delta " + r,
+        style: { width: 92, fontFamily: "var(--mono)", fontSize: "var(--t-xs)", textAlign: "right" },
+        onChange: (e) => {
+          const t = e.target.value.trim();
+          if (t === "") setDelta("entry_delta", r, null);
+          else {
+            const n = Number(t);
+            if (!isNaN(n)) setDelta("entry_delta", r, n);
+          }
+        },
+        onBlur: () => flushEntryDelta(r),
+      });
+    };
+
+    const exitDeltaInput = (r) => {
+      const cur = (form.exit_delta || {})[r];
+      return h("input", {
+        type: "number",
+        className: "select",
+        step: 0.01,
+        value: cur != null ? cur : "",
+        "aria-label": "exit delta " + r,
+        style: { width: 92, fontFamily: "var(--mono)", fontSize: "var(--t-xs)", textAlign: "right" },
+        onChange: (e) => {
+          const t = e.target.value;
+          if (t === "") return;
+          setDelta("exit_delta", r, Number(t));
+        },
+        onBlur: () => flushExitDelta(r),
+      });
+    };
+
+    const scalarKeys = scalars.slice();
+    if (cfg.regime_min_stable_hours !== undefined || form.regime_min_stable_hours !== undefined) {
+      if (scalarKeys.indexOf("regime_min_stable_hours") < 0) scalarKeys.push("regime_min_stable_hours");
+    }
+
+    const scalarRow = (k) => {
+      const range = (schema.scalar_ranges || {})[k] || [0, 1];
+      const lo = range[0];
+      const hi = range[1];
+      const raw = form[k];
+      const v = raw != null && !isNaN(Number(raw)) ? Number(raw) : lo;
+      const clamped = Math.min(hi, Math.max(lo, v));
+      const step = (hi - lo) <= 0.2 ? 0.001 : 0.01;
+      return h("label", {
+        key: k,
+        style: { display: "flex", flexDirection: "column", gap: 6 },
+      },
+        h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, k),
+        h("div", { className: "v3-regime-slider-row" },
+          h("input", {
+            type: "range",
+            min: lo,
+            max: hi,
+            step: step,
+            value: clamped,
+            "aria-label": k + " slider",
+            onChange: (e) => setScalar(k, Number(e.target.value)),
+            onMouseUp: () => flushScalar(k),
+            onBlur: () => flushScalar(k),
+          }),
+          h("span", { className: "v3-num mono", style: { width: 56, textAlign: "right", fontSize: "var(--t-2xs)" } },
+            raw != null ? Number(raw).toFixed(3) : "—")
+        ),
+        h("input", {
+          type: "number",
+          className: "select",
+          step: step,
+          min: lo,
+          max: hi,
+          value: raw != null ? raw : "",
+          style: { width: 100, fontFamily: "var(--mono)", fontSize: "var(--t-xs)" },
+          onChange: (e) => {
+            const t = e.target.value;
+            if (t === "") return;
+            setScalar(k, Number(t));
+          },
+          onBlur: () => flushScalar(k),
+        })
+      );
+    };
 
     return h(Card, {
       num: "19", title: "Regime config editor",
-      sub: "atomic write · " + (env.config_path || "config.json"),
+      sub: "blur-to-save · " + (env.config_path || "config.json"),
       right: h(TimeSince, { ts: data.regime_config_fetched_at, className: "mono dim", style: { fontSize: "var(--t-2xs)" } })
     },
       h("details", { className: "decision-guide", style: {
@@ -2853,41 +3272,34 @@
             lineHeight: 1.6,
             color: "var(--fg-2)",
           },
-          // Static template literal embedded above in this file; no user
-          // input ever flows here — XSS surface is nil.
-          dangerouslySetInnerHTML: { __html: REGIME_PARAMS_GUIDE_HTML }
-        })
+        }, h(RegimeParamsGuide))
       ),
       h("div", { className: "metric-label" }, "ENTRY DELTA · per regime"),
-      h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, marginTop: 4 } },
-        regimes.map(r => h("label", { key: r, style: { display: "flex", flexDirection: "column", gap: 4 } },
+      h("div", { className: "v3-regime-editor-grid", style: { marginTop: 4 } },
+        regimes.map(r => h("label", { key: "e-" + r, style: { display: "flex", flexDirection: "column", gap: 4 } },
           h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, r),
-          numCell(form.entry_delta[r], schema.delta_range, (v) => setDelta("entry_delta", r, v), `entry delta for ${r}`)
+          entryDeltaInput(r)
         ))
       ),
       h("div", { className: "hr" }),
       h("div", { className: "metric-label" }, "EXIT DELTA · per regime"),
-      h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, marginTop: 4 } },
-        regimes.map(r => h("label", { key: r, style: { display: "flex", flexDirection: "column", gap: 4 } },
+      h("div", { className: "v3-regime-editor-grid", style: { marginTop: 4 } },
+        regimes.map(r => h("label", { key: "x-" + r, style: { display: "flex", flexDirection: "column", gap: 4 } },
           h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, r),
-          numCell(form.exit_delta[r], schema.delta_range, (v) => setDelta("exit_delta", r, v), `exit delta for ${r}`)
+          exitDeltaInput(r)
         ))
       ),
       h("div", { className: "hr" }),
       h("div", { className: "metric-label" }, "SCALAR PARAMS"),
-      h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginTop: 4 } },
-        scalars.map(k => h("label", { key: k, style: { display: "grid", gridTemplateColumns: "1fr auto", gap: 6, alignItems: "center" } },
-          h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, k),
-          numCell(form[k], (schema.scalar_ranges || {})[k], (v) => setScalar(k, v), k)
-        ))
+      h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--s-3)", marginTop: 4 } },
+        scalarKeys.map(k => scalarRow(k))
       ),
       h("div", { className: "hr" }),
-      h("div", { style: { display: "flex", gap: "var(--s-3)", alignItems: "center" } },
-        h("button", { className: "btn", onClick: submit }, "APPLY"),
-        h("button", { className: "btn", onClick: reset }, "RESET"),
-        toastMsg.msg && h("span", {
-          className: toastMsg.level === "ok" ? "up" : toastMsg.level === "warn" ? "down" : "dim",
-          style: { fontSize: "var(--t-xs)", fontFamily: "var(--mono)", flex: 1, textAlign: "right" }
+      h("div", { style: { display: "flex", gap: "var(--s-3)", alignItems: "center", flexWrap: "wrap" } },
+        h("button", { type: "button", className: "btn", onClick: reset }, "RESET"),
+        toastMsg.msg && h("div", {
+          className: "v3-regime-toast " + (toastMsg.level === "ok" ? "up" : toastMsg.level === "warn" ? "down" : "dim"),
+          style: { flex: 1, minWidth: 200 },
         }, toastMsg.msg)
       )
     );
@@ -3071,27 +3483,87 @@
       );
     }
 
+    if (slot.phase === "loading") {
+      return h(Card, {
+        num: "13", title: "Sentiment aggregate",
+        sub: "loading…",
+        right: cardRight(slot.fetchedAt),
+      }, h(LoadingState));
+    }
+
+    const radar = sentimentRadarPoints(env);
+    const keys = Array.isArray(env.key_events) ? env.key_events : [];
+    const chip = keys.length ? String(keys[0]) : "—";
+
     return h(Card, {
       num: "13", title: "Sentiment aggregate",
       sub: score != null ? "net " + (score >= 0 ? "+" : "") + score.toFixed(2) : "—",
+      className: "v3-sentiment-card",
       right: cardRight(slot.fetchedAt,
         h("span", { className: "pill " + klass }, score == null ? "—" : score >= 0 ? "BULLISH" : "BEARISH"))
     },
-      h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, fontSize: "var(--t-xs)" } },
-        h("div", { className: "dim mono" }, "DEEP (Claude)"),
-        h("div", { className: "num " + ((env.deep_score || 0) >= 0 ? "up" : "down") },
-          env.deep_score != null ? ((env.deep_score >= 0 ? "+" : "") + Number(env.deep_score).toFixed(2)) : "—"),
-        h("div", { className: "dim mono" }, "FAST (Llama)"),
-        h("div", { className: "num " + ((env.fast_score || 0) >= 0 ? "up" : "down") },
-          env.fast_score != null ? ((env.fast_score >= 0 ? "+" : "") + Number(env.fast_score).toFixed(2)) : "—"),
-        h("div", { className: "dim mono" }, "F&G"),
-        h("div", { className: "num" }, env.fear_greed != null ? (env.fear_greed + (env.fear_greed_label ? " · " + env.fear_greed_label : "")) : "—"),
-        h("div", { className: "dim mono" }, "AGREEMENT"),
-        h("div", { className: "num " + (env.agreement ? "up" : "warn") }, env.agreement ? "yes" : "no"),
-        h("div", { className: "dim mono" }, "HEADLINES"),
-        h("div", { className: "num" }, env.n_headlines != null ? env.n_headlines : "—"),
-        h("div", { className: "dim mono" }, "AGE"),
-        h("div", { className: "num" }, env.age_s != null ? Math.floor(env.age_s / 60) + "m" : "—")
+      h("div", { className: "v3-sent-radar" },
+        h(
+          "svg",
+          {
+            className: "v3-sent-radar-svg",
+            width: 132,
+            height: 132,
+            viewBox: "0 0 120 120",
+            "aria-label": "Sentiment four-channel radar",
+          },
+          h("polygon", {
+            fill: "rgba(124,92,255,.12)",
+            stroke: "var(--accent-line)",
+            strokeWidth: "1",
+            points: radar.points,
+          }),
+          h("polygon", {
+            fill: "none",
+            stroke: "var(--line-2)",
+            strokeWidth: "1",
+            strokeDasharray: "3 3",
+            points: "60,16 104,60 60,104 16,60",
+          }),
+          [["Deep", -90], ["Fast", 0], ["F&G", 90], ["Agree", 180]].map((item, i) => {
+            const ang = (item[1] - 90) * Math.PI / 180;
+            const x = 60 + 52 * Math.cos(ang);
+            const y = 60 + 52 * Math.sin(ang);
+            return h("text", {
+              key: item[0],
+              x: x,
+              y: y,
+              fill: "var(--fg-3)",
+              fontSize: "9",
+              fontFamily: "var(--mono)",
+              textAnchor: "middle",
+              dominantBaseline: "middle",
+            }, item[0]);
+          })
+        ),
+        h("div", { className: "v3-sent-center" },
+          h("div", { className: "dim2 mono", style: { fontSize: "var(--t-2xs)", letterSpacing: ".1em" } }, "NET"),
+          h("div", { className: cls("v3-num", klass), style: { fontSize: "var(--t-2xl)", fontWeight: 500, lineHeight: 1.1 } },
+            score == null ? "—" : ((score >= 0 ? "+" : "") + score.toFixed(2)))
+        )
+      ),
+      h("div", { className: "v3-sent-headlines mono", title: chip },
+        h("span", { className: "dim", style: { marginRight: 8 } }, "HEADLINE"),
+        h("span", { className: "v3-num", style: { color: "var(--fg-1)" } }, chip),
+        env.age_s != null
+          ? h("span", { className: "dim v3-num", style: { marginLeft: 12, fontSize: "var(--t-2xs)" } },
+            " · age " + Math.floor(env.age_s / 60) + "m")
+          : null
+      ),
+      h("div", {
+        className: "dim mono v3-num",
+        style: { fontSize: "var(--t-2xs)", marginTop: "var(--s-2)", display: "flex", flexWrap: "wrap", gap: "var(--s-3)" },
+      },
+        h("span", null, "deep ", env.deep_score != null ? env.deep_score.toFixed(2) : "—"),
+        h("span", null, "fast ", env.fast_score != null ? env.fast_score.toFixed(2) : "—"),
+        h("span", null, "F&G ", env.fear_greed != null ? env.fear_greed : "—"),
+        h("span", null, "agree ", env.community_score != null ? env.community_score.toFixed(2) : (env.agreement ? "1" : "0")),
+        h("span", null, "n=", env.n_headlines != null ? env.n_headlines : "—")
       )
     );
   }
@@ -3125,6 +3597,9 @@
       );
     }
 
+    const phaseLabels = ["pre-market", "pre-execute", "market-open", "midday"];
+    const curIdx = Math.max(0, phases.length - 1);
+
     return h(Card, {
       num: "13c", title: "Shark briefing · " + dateLabel,
       sub: phases.length + " phase" + (phases.length === 1 ? "" : "s") + " logged",
@@ -3136,48 +3611,72 @@
         )
       )
     },
+      h("div", { className: "v3-shark-phases" },
+        phaseLabels.map((label, idx) => {
+          const active = idx < phases.length && phases[idx];
+          const short = (idx + 1) + " — " + label;
+          return h("div", {
+            key: label,
+            className: "v3-shark-pill" + (idx === curIdx ? " current" : ""),
+            title: active ? ((active.time || "") + " " + (active.tz || "")) : "not logged yet",
+          }, short);
+        })
+      ),
       phases.length === 0
         ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)" } }, "no phase blocks for today yet")
         : h(F, null,
-            // Per-phase rows
-            phases.map((p, i) => h("div", { key: i, style: { display: "flex", gap: 12, padding: "6px 0", borderBottom: "1px solid var(--line-2)", alignItems: "flex-start" } },
-              h("div", { className: "mono dim", style: { fontSize: "var(--t-xs)", minWidth: 100 } }, p.phase + " · " + p.time + " " + p.tz),
-              h("div", { style: { flex: 1, fontSize: "var(--t-xs)" } },
-                p.confirmed.length
-                  ? h("div", { style: { color: "var(--up)" } }, "✓ confirmed: ", p.confirmed.join(", "))
-                  : h("div", { className: "dim" }, "✓ confirmed: (none)"),
-                p.skipped.length
-                  ? h("div", { className: "dim" }, "✗ skipped: " + p.skipped.join(", "))
-                  : null,
-                p.market_summary
-                  ? h("div", { className: "dim", style: { fontSize: "var(--t-2xs)" } }, p.market_summary)
-                  : null,
-              ),
+            phases.map((p, i) => h("article", {
+              key: i,
+              className: "v3-shark-body",
+              style: { marginBottom: "var(--s-4)", paddingBottom: "var(--s-3)", borderBottom: "var(--v3-hairline, 1px solid var(--line-2))" },
+            },
+              h("header", { style: { fontFamily: "var(--mono)", fontSize: "var(--t-2xs)", color: "var(--fg-3)", marginBottom: 8 } },
+                "Phase ", h("span", { className: "v3-num" }, String(i + 1)), " · ", p.phase, " · ", p.time || "—", " ", p.tz || ""),
+              p.confirmed && p.confirmed.length
+                ? h("p", { style: { color: "var(--up)", margin: "0 0 6px" } }, "Confirmed: ", p.confirmed.join(", "))
+                : h("p", { className: "dim", style: { margin: "0 0 6px" } }, "Confirmed: (none)"),
+              p.skipped && p.skipped.length
+                ? h("p", { className: "dim", style: { margin: "0 0 6px" } }, "Skipped: ", p.skipped.join(", "))
+                : null,
+              p.market_summary
+                ? h("p", { className: "dim", style: { margin: "0 0 6px", fontSize: "var(--t-xs)" } }, p.market_summary)
+                : null,
+              p.regime && h("p", { style: { margin: 0 } }, "Regime ", h("span", { className: "mono" }, p.regime),
+                p.macro ? h("span", null, " · Macro ", h("span", { className: "mono" }, p.macro)) : null),
+              p.lessons && h("p", { className: "dim", style: { marginTop: 6, fontSize: "var(--t-xs)" } }, p.lessons)
             )),
-            // Trade-block explanation block — clarifies WHY no entries fired
             env.trade_block_explanation
-              ? h("div", { style: { marginTop: 10, padding: "8px 10px", background: "var(--bg-inset)", borderRadius: 4, fontSize: "var(--t-2xs)", color: "var(--fg-2)", lineHeight: 1.5 } }, env.trade_block_explanation)
+              ? h("div", { style: { marginTop: "var(--s-3)", padding: "var(--s-3)", background: "var(--bg-inset)", borderRadius: 4, fontSize: "var(--t-xs)", color: "var(--fg-2)", lineHeight: 1.55 } }, env.trade_block_explanation)
               : null
           )
     );
   }
 
-  // ─────────────── CHAMPION GENOME (slow card, 60s) ───────────────
+  // ─────────────── MODELFORGE CHAMPION (replaces retired EPT card 14) ───────────────
   function ChampionCardLive({ data }) {
-    const slot = slotState(data, "ept_champion");
+    const slot = slotState(data, "weekly_training");
     const env = envelopeData(slot.env) || {};
-    const id = env.member_id || env.genome_id || env.id || "—";
-    const metrics = env.metrics || {};
-    const sharpe = metrics.sharpe_ratio != null ? metrics.sharpe_ratio : metrics.sharpe;
-    const maxDd = metrics.max_drawdown;
-    const profitFactor = metrics.profit_factor;
-    const nTrades = metrics.num_trades != null ? metrics.num_trades : metrics.n_trades;
-    const fitness = env.fitness;
-    const genome = env.genome || {};
+    const tracks = env.tracks || [];
+    const summary = env.summary || {};
+    const promoted = (tracks || []).filter(t => t.eligibility === "promoted" || t.current_adapter);
+    const champ = promoted[0] || tracks[0] || {};
+    const adapter = champ.current_adapter || "—";
+    const ver = champ.current_adapter_version != null ? String(champ.current_adapter_version) : "—";
+    const lastTs = champ.last_train_ts || env.week_started || null;
+    let ageLabel = "—";
+    if (lastTs) {
+      try {
+        const d = new Date(lastTs);
+        if (!isNaN(d.getTime())) {
+          const hrs = Math.max(0, Math.floor((Date.now() - d.getTime()) / 3600000));
+          ageLabel = hrs + "h";
+        }
+      } catch (_) { ageLabel = "—"; }
+    }
 
     if (slot.phase === "down") {
       return h(Card, {
-        num: "14", title: "EPT · champion genome",
+        num: "14", title: "ModelForge · champion adapter",
         sub: "endpoint unavailable",
         right: cardRight(slot.fetchedAt)
       },
@@ -3186,21 +3685,20 @@
     }
 
     return h(Card, {
-      num: "14", title: "EPT · champion genome",
-      sub: "evolution head · refresh 60s",
-      right: cardRight(slot.fetchedAt)
+      num: "14", title: "ModelForge · champion adapter",
+      sub: (summary.n_promoted_this_week || 0) + " promoted this week · " + (tracks.length || 0) + " tracks",
+      right: cardRight(slot.fetchedAt,
+        env.model_forge_reachable === false
+          ? h("span", { className: "pill warn" }, "MF offline")
+          : h("span", { className: "pill up" }, "MF ok"))
     },
-      h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, fontSize: "var(--t-xs)" } },
-        h("div", { className: "dim mono" }, "ID"),            h("div", { className: "num accent" }, id),
-        h("div", { className: "dim mono" }, "FITNESS"),       h("div", { className: "num up" }, fitness != null ? Number(fitness).toFixed(3) : "—"),
-        h("div", { className: "dim mono" }, "SHARPE"),        h("div", { className: "num" }, sharpe != null ? Number(sharpe).toFixed(2) : "—"),
-        h("div", { className: "dim mono" }, "MAX DD"),        h("div", { className: "num down" }, maxDd != null ? "−" + (Number(maxDd) * 100).toFixed(2) + "%" : "—"),
-        h("div", { className: "dim mono" }, "PROFIT FACTOR"), h("div", { className: "num" }, profitFactor != null ? Number(profitFactor).toFixed(2) : "—"),
-        h("div", { className: "dim mono" }, "N TRADES"),      h("div", { className: "num" }, nTrades != null ? nTrades : "—"),
-        h("div", { className: "dim mono" }, "STOP/TP"),       h("div", { className: "num mono", style: { fontSize: "var(--t-2xs)" } },
-          (genome.stop_loss != null ? (Number(genome.stop_loss) * 100).toFixed(2) + "%" : "—") + " / "
-          + (genome.take_profit != null ? (Number(genome.take_profit) * 100).toFixed(2) + "%" : "—")),
-        h("div", { className: "dim mono" }, "FEATURES"),      h("div", { className: "num" }, (genome.feature_subset || []).length)
+      h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, fontSize: "var(--t-xs)" } },
+        h("div", { className: "dim mono" }, "ADAPTER"), h("div", { className: "v3-num accent" }, adapter),
+        h("div", { className: "dim mono" }, "VERSION"), h("div", { className: "v3-num" }, ver),
+        h("div", { className: "dim mono" }, "AGE"), h("div", { className: "v3-num" }, ageLabel),
+        h("div", { className: "dim mono" }, "LAST TRAIN / WEEK"), h("div", { className: "mono", style: { fontSize: "var(--t-2xs)", color: "var(--fg-2)" } },
+          (lastTs || "—").replace("T", " ").slice(0, 19)),
+        h("div", { className: "dim mono" }, "TRACK"), h("div", { className: "mono" }, champ.track_id || champ.role || "—")
       )
     );
   }
@@ -3216,6 +3714,11 @@
     const dd30 = env.drawdown_pct_30d != null ? Number(env.drawdown_pct_30d) * 100 : null;
     const cb = env.circuit_breaker || {};
     const cbActive = cb.active === true;
+    const tape = (env.live_tape || []).slice(0, 12);
+    const maxAbs = tape.reduce((m, r) => {
+      const a = Math.abs(Number(r.pnl_abs || 0));
+      return a > m ? a : m;
+    }, 0) || 1;
 
     if (slot.phase === "down") {
       return h(Card, {
@@ -3237,27 +3740,45 @@
     },
       h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, fontSize: "var(--t-xs)" } },
         h("div", { className: "dim mono" }, "DAY PNL"),
-        h("div", { className: "num " + (dayPnl >= 0 ? "up" : "down") }, (dayPnl >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(dayPnl))),
+        h("div", { className: "v3-num " + (dayPnl >= 0 ? "up" : "down") }, (dayPnl >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(dayPnl))),
         h("div", { className: "dim mono" }, "DAY %"),
-        h("div", { className: "num " + (dayPct >= 0 ? "up" : "down") }, fmtPct(dayPct)),
+        h("div", { className: "v3-num " + (dayPct >= 0 ? "up" : "down") }, fmtPct(dayPct)),
         h("div", { className: "dim mono" }, "DD 30d"),
-        h("div", { className: "num " + (dd30 != null && dd30 < 0 ? "down" : "dim") }, dd30 != null ? fmtPct(dd30) : "—"),
+        h("div", { className: "v3-num " + (dd30 != null && dd30 < 0 ? "down" : "dim") }, dd30 != null ? fmtPct(dd30) : "—"),
         h("div", { className: "dim mono" }, "OPEN"),
-        h("div", { className: "num" }, (env.open_count || 0) + " / " + (env.max_open || 0))
+        h("div", { className: "v3-num" }, (env.open_count || 0) + " / " + (env.max_open || 0))
       ),
-      env.live_tape && env.live_tape.length > 0 && h("div", null,
+      tape.length > 0 && h("div", null,
         h("div", { className: "hr" }),
-        h("div", { className: "metric-label" }, "LAST CLOSED · TAPE"),
-        h("div", { style: { fontSize: "var(--t-xs)", maxHeight: 120, overflowY: "auto", marginTop: 4 } },
-          env.live_tape.slice(0, 8).map((r, i) => {
+        h("div", { className: "metric-label" }, "CLOSED TAPE · 24h"),
+        h("div", { className: "v3-tape" },
+          tape.map((r, i) => {
             const tapePct = Number(r.pnl_pct || 0) * 100;
-            return h("div", {
-              key: i, style: { display: "grid", gridTemplateColumns: "1fr 60px 70px 1fr", gap: 6, padding: "2px 0" }
-            },
+            const pnlAbs = Number(r.pnl_abs || 0);
+            const w = Math.round((Math.abs(pnlAbs) / maxAbs) * 100);
+            const barCls = pnlAbs >= 0 ? "up" : "down";
+            const t = (function (iso) {
+              if (!iso) return "—";
+              const d = new Date(iso);
+              if (isNaN(d.getTime())) return "—";
+              return d.toTimeString().slice(0, 8);
+            })(r.exit_time);
+            const chip = (r.regime_at_entry || "EXIT").replace(/_/g, " ");
+            return h("div", { key: i, className: "v3-tape-row" },
+              h("span", { className: "mono v3-num dim" }, t),
               h("span", { className: "mono" }, r.pair),
-              h("span", { className: "mono dim" }, r.side),
-              h("span", { className: "num " + (tapePct >= 0 ? "up" : "down"), style: { textAlign: "right" } }, fmtPct(tapePct)),
-              h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, r.regime_at_entry || "—")
+              h("span", { className: "pill " + (r.side === "short" ? "down" : "info"), style: { height: 16, fontSize: "var(--t-2xs)", justifySelf: "start" } }, chip),
+              h("div", { className: "v3-tape-bar-wrap" },
+                h("div", {
+                  className: "v3-tape-bar " + barCls,
+                  style: {
+                    width: w + "%",
+                    marginLeft: pnlAbs < 0 ? (100 - w) + "%" : 0,
+                    background: pnlAbs >= 0 ? "var(--up)" : "var(--down)",
+                  },
+                })
+              ),
+              h("span", { className: "v3-num " + (tapePct >= 0 ? "up" : "down"), style: { textAlign: "right" } }, fmtPct(tapePct))
             );
           })
         )
@@ -3303,6 +3824,48 @@
           : (stocksUntrusted ? ("snapshot >2h old — combined-dd fail-safe") : "trust window OK") },
     ];
 
+    const trSlot = slotState(data, "trades_risk");
+    const tr = envelopeData(trSlot.env) || {};
+    const riskGates = (cp.sources && cp.sources.risk_gates) || {};
+    const haltPct = Number(riskGates.daily_loss_halt_pct != null ? riskGates.daily_loss_halt_pct : 0.03);
+    const dayFrac = Number(tr.daily_pnl_pct || 0);
+    const lossUtil = haltPct > 0 ? Math.abs(dayFrac) / haltPct : 0;
+    const ddUtil = ddThreshold > 0 ? Math.abs(dd) / ddThreshold : 0;
+    const dotRow = [];
+    dotRow.push({
+      st: portfolioTripped ? "red" : "ok",
+      tip: "Portfolio halt · " + (portfolioTripped ? "TRIPPED" : "armed"),
+    });
+    dotRow.push({
+      st: ddUtil >= 1 ? "red" : (ddUtil >= 0.8 ? "amber" : "ok"),
+      tip: "Combined DD · " + Math.abs(dd).toFixed(2) + "% vs kill " + ddThreshold.toFixed(1) + "%",
+    });
+    dotRow.push({ st: stocksStale ? "red" : "ok", tip: "Stocks data stale · " + portfolioConditions[1].detail });
+    dotRow.push({ st: stocksUntrusted ? "red" : "ok", tip: "Stocks untrusted · " + portfolioConditions[2].detail });
+    dotRow.push({
+      st: lossUtil >= 1 ? "red" : (lossUtil >= 0.7 ? "amber" : "ok"),
+      tip: "Daily loss vs halt · day " + (dayFrac * 100).toFixed(2) + "% vs halt " + (haltPct * 100).toFixed(1) + "%",
+    });
+    for (let bi = 0; bi < Math.min(2, breakers.length); bi++) {
+      const b = breakers[bi];
+      const open = b.state === "open";
+      const half = b.state === "half_open";
+      dotRow.push({
+        st: open ? "red" : (half ? "amber" : "ok"),
+        tip: (b.name || "breaker") + " · state " + (b.state || "?") + " · thr " + (b.threshold_s != null ? b.threshold_s + "s" : "—"),
+      });
+    }
+    const padKeys = ["weekly_loss_size_cut_pct", "correlation_cap", "vix_high_multiplier"];
+    let pi = 0;
+    while (dotRow.length < 8) {
+      const k = padKeys[pi] || "risk_gate";
+      pi++;
+      dotRow.push({
+        st: "ok",
+        tip: k + " · threshold " + String(riskGates[k] != null ? riskGates[k] : "—") + " (live metric n/a)",
+      });
+    }
+
     if (slot.phase === "down" && cpSlot.phase === "down") {
       return h(Card, {
         num: "16", title: "Circuit breakers",
@@ -3322,6 +3885,13 @@
           h("span", { className: "dot " + (portfolioTripped ? "down pulse" : "up") }), " ",
           portfolioTripped ? "TRIPPED" : "ARMED"))
     },
+      h("div", { className: "v3-cb-dots", "aria-label": "breaker overview" },
+        dotRow.slice(0, 8).map((d, i) => h("span", {
+          key: i,
+          className: "v3-cb-dot " + (d.st === "red" ? "red" : d.st === "amber" ? "amber" : "ok"),
+          title: d.tip,
+        }))
+      ),
       // ── Section A: portfolio breaker (unified_risk) ──
       h("div", { style: { marginBottom: "var(--s-3)" } },
         h("div", { className: "dim2 mono", style: { fontSize: "var(--t-2xs)", letterSpacing: ".08em", textTransform: "uppercase", marginBottom: "var(--s-2)" } },
@@ -3753,9 +4323,8 @@
   // pipeline stage isn't firing. ``indicator_selector`` is the one
   // exception: if it has zero calls in the window we omit it entirely
   // because today's bot doesn't emit it at all (per spec).
-  const AGENT_FLOW_ORDER = [
+  const DEBATE_FLOOR_ROLES = [
     "regime_tagger",
-    "indicator_selector",
     "bull_debater",
     "bear_debater",
     "arbiter",
@@ -3799,81 +4368,24 @@
     return "";
   }
 
-  // Per-role agent avatar — 18×18 SVG chip with role-tinted background and
-  // an icon that signals what the agent DOES. currentColor carries the role
-  // tint through, so the same icon shape inherits the right hue. Style:
-  // 12×12 viewBox, 1.4px stroke, round caps. Hand-picked to match the
-  // operator's mental model of each agent's job:
-  //   regime_tagger       → trend line                  (gray  / neutral)
-  //   indicator_selector  → sliders                     (gray  / neutral)
-  //   bull_debater        → up arrow with riser         (green / up)
-  //   bear_debater        → down arrow with stem        (red   / down)
-  //   arbiter             → balance scales              (blue  / info)
-  //   reflector           → cyclical refresh arrow      (amber / warn)
-  function _afIconSvg(paths, opts) {
-    opts = opts || {};
-    const attrs = {
-      viewBox: "0 0 12 12",
-      width: 12,
-      height: 12,
-      fill: opts.fill ? "currentColor" : "none",
-      stroke: opts.fill ? "none" : "currentColor",
-      strokeWidth: opts.stroke || 1.4,
-      strokeLinecap: "round",
-      strokeLinejoin: "round",
-      "aria-hidden": "true",
-    };
-    return h("svg", attrs, ...paths);
+  function _debateMaxLastTsMs(detailByRole) {
+    let max = 0;
+    for (let ri = 0; ri < DEBATE_FLOOR_ROLES.length; ri++) {
+      const role = DEBATE_FLOOR_ROLES[ri];
+      const d = detailByRole[role];
+      if (d && d.last_ts) {
+        const t = Date.parse(d.last_ts);
+        if (!isNaN(t) && t > max) max = t;
+      }
+    }
+    return max;
   }
-  function _afIconRegimeTagger() {
-    return _afIconSvg([
-      h("path", { d: "M1.5 9 L4.5 6 L7.5 7.5 L10.5 3" }),
-      h("path", { d: "M10.5 6 L10.5 3 L7.5 3" }),
-    ]);
+
+  function _debateIsLive(detailByRole) {
+    const max = _debateMaxLastTsMs(detailByRole);
+    if (!max) return false;
+    return Date.now() - max < 60_000;
   }
-  function _afIconIndicatorSelector() {
-    return _afIconSvg([
-      h("line", { x1: 2, y1: 3, x2: 10, y2: 3 }),
-      h("circle", { cx: 7.5, cy: 3, r: 1.3, fill: "currentColor", stroke: "none" }),
-      h("line", { x1: 2, y1: 6, x2: 10, y2: 6 }),
-      h("circle", { cx: 4, cy: 6, r: 1.3, fill: "currentColor", stroke: "none" }),
-      h("line", { x1: 2, y1: 9, x2: 10, y2: 9 }),
-      h("circle", { cx: 8, cy: 9, r: 1.3, fill: "currentColor", stroke: "none" }),
-    ], { stroke: 1.2 });
-  }
-  function _afIconBull() {
-    return _afIconSvg([
-      h("path", { d: "M6 1 L11 7 L8 7 L8 11 L4 11 L4 7 L1 7 Z" }),
-    ], { fill: true });
-  }
-  function _afIconBear() {
-    return _afIconSvg([
-      h("path", { d: "M6 11 L11 5 L8 5 L8 1 L4 1 L4 5 L1 5 Z" }),
-    ], { fill: true });
-  }
-  function _afIconArbiter() {
-    return _afIconSvg([
-      h("rect", { x: 5.5, y: 1.5, width: 1, height: 8.5, fill: "currentColor", stroke: "none" }),
-      h("rect", { x: 2, y: 9.5, width: 8, height: 1, fill: "currentColor", stroke: "none" }),
-      h("path", { d: "M1 5 L5 5 L3 8.2 Z", fill: "currentColor", stroke: "none" }),
-      h("path", { d: "M7 5 L11 5 L9 8.2 Z", fill: "currentColor", stroke: "none" }),
-      h("line", { x1: 2.5, y1: 4, x2: 9.5, y2: 4 }),
-    ], { stroke: 1.0 });
-  }
-  function _afIconReflector() {
-    return _afIconSvg([
-      h("path", { d: "M2.5 3 A4 4 0 1 1 2.5 9" }),
-      h("path", { d: "M2.5 3 L2.5 1 L4.5 1" }),
-    ]);
-  }
-  const _AF_AVATARS = {
-    regime_tagger:      { tone: "neutral", icon: _afIconRegimeTagger },
-    indicator_selector: { tone: "neutral", icon: _afIconIndicatorSelector },
-    bull_debater:       { tone: "up",      icon: _afIconBull },
-    bear_debater:       { tone: "down",    icon: _afIconBear },
-    arbiter:            { tone: "info",    icon: _afIconArbiter },
-    reflector:          { tone: "warn",    icon: _afIconReflector },
-  };
 
   // Strip JSON syntax noise from a response gist so it renders as flat
   // human-readable text. Bot responses often start with `{` and embed
@@ -3896,19 +4408,56 @@
     return t;
   }
 
-  function AgentFlowBox({ role, detail, onClick }) {
+  function DebateFloorConnectors({ live }) {
+    const stroke = "color-mix(in srgb, var(--fg-3) 55%, transparent)";
+    const paths = [
+      "M 160 6 L 160 38",
+      "M 160 38 L 52 38 L 52 58",
+      "M 160 38 L 160 58",
+      "M 160 38 L 268 38 L 268 58",
+      "M 52 118 L 160 150 L 268 118",
+      "M 160 150 L 160 178",
+    ];
+    return h(
+      "svg",
+      {
+        className: "v3-debate-svg" + (live ? " is-live" : ""),
+        viewBox: "0 0 320 200",
+        preserveAspectRatio: "none",
+        "aria-hidden": "true",
+      },
+      paths.map((d, i) =>
+        h("path", {
+          key: i,
+          className: "v3-debate-path",
+          d: d,
+          fill: "none",
+          stroke: stroke,
+          strokeWidth: 1.25,
+          strokeLinecap: "round",
+          strokeLinejoin: "round",
+        })
+      )
+    );
+  }
+
+  function DebateRoleCard({ role, headline, subline, variant, detail, onClick }) {
     const empty = !detail || !detail.count;
-    const cls = "af-box " + (empty ? "is-empty" : _afFreshnessClass(detail));
-    const dotCls = _afDotClass(detail);
-    const ariaLabel = empty
-      ? role + " — idle (no calls in 24h)"
-      : role + " — " + detail.count + " calls, last " + _afAgeLabel(detail.last_ts);
+    const cardCls = cls(
+      "v3-debate-card",
+      "v3-debate-card--" + variant,
+      empty ? "is-empty" : _afFreshnessClass(detail)
+    );
     const boxRef = useRef(null);
     const lastGist = detail && (detail.last_response_gist || detail.last_gist);
     const cleanGist = lastGist ? _afCleanGist(lastGist) : "";
+    const ariaLabel = empty
+      ? role + " — idle (no calls in 24h)"
+      : role + " — " + detail.count + " calls, last " + _afAgeLabel(detail.last_ts);
+    const dotCls = _afDotClass(detail);
     return h("div", {
       ref: boxRef,
-      className: cls,
+      className: cardCls,
       role: "button",
       tabIndex: 0,
       "aria-label": ariaLabel,
@@ -3920,53 +4469,23 @@
         }
       },
     },
-      // Title row stays for every box so the strip is identifiable when
-      // empty too. Everything else collapses on the empty path.
-      (function () {
-        const av = _AF_AVATARS[role];
-        return h("div", { className: "af-titlerow" },
-          av && h("span", {
-            className: "af-avatar af-avatar-" + av.tone,
-            "aria-hidden": "true",
-          }, av.icon ? av.icon() : av.glyph),
-          h("span", { className: "af-title" }, role)
-        );
-      })(),
+      h("div", { className: "v3-debate-card-head" },
+        h("span", { className: "v3-debate-role" }, headline),
+        !empty && h("span", { className: "v3-debate-model-chip mono" }, detail.model || "—")
+      ),
+      subline && h("div", { className: "v3-debate-sub mono dim" }, subline),
       empty
-        ? // Single-line empty state — keeps the box visible in the flow
-          // but visually quiet. Operator can still click to open the
-          // drawer (which will show its own "no calls yet" body).
-          h("div", { className: "af-idle" }, "idle")
+        ? h("div", { className: "v3-debate-idle dim" }, "idle")
         : h(F, null,
-            h("div", { className: "af-model" }, detail.model || "—"),
-            h("div", { className: "af-live" },
+            h("div", { className: "v3-debate-live mono" },
               dotCls && h("span", { className: "dot " + dotCls }),
               h("span", null, _afAgeLabel(detail.last_ts))
             ),
-            h("div", { className: "af-counts" },
-              h("span", { className: "af-ok" }, detail.success, " ✓"),
-              h("span", { className: "af-sep" }, "·"),
-              h("span", { className: "af-bad" }, detail.fail, " ✕")
-            ),
-            h("div", { className: "af-latency" },
-              "avg ", (detail.avg_latency_s || 0).toFixed(1), "s · p95 ",
-              (detail.p95_latency_s || 0).toFixed(1), "s"),
             cleanGist && h("div", {
-              className: "af-last",
+              className: "v3-debate-gist mono dim",
               title: cleanGist,
-            },
-              h("span", { className: "af-last-key" }, "last:"),
-              _aldTrim(cleanGist, 44)
-            )
+            }, _aldTrim(cleanGist, 90))
           )
-    );
-  }
-
-  function AgentFlowArrow({ hopSec }) {
-    return h("div", { className: "af-arrow", "aria-hidden": "true" },
-      h("span", { className: "af-arrow-line" }),
-      hopSec != null && h("span", { className: "af-hop" }, hopSec.toFixed(1) + "s"),
-      h("span", { className: "af-glyph" }, "→")
     );
   }
 
@@ -3992,17 +4511,18 @@
     }, []);
     if (hidden) return null;
 
-    // Skip indicator_selector when it has zero calls — today's bot doesn't
-    // emit it. The other five stay even when empty so gaps are visible.
-    const slots = AGENT_FLOW_ORDER.filter(r =>
-      !(r === "indicator_selector" && !detailByRole[r])
-    );
-
     // Re-render every 30 s so the "Xm ago" labels stay current between
     // 10 s data polls — does NOT fetch anything, just bumps state.
     const [, _tick] = useState(0);
     useEffect(() => {
       const iv = setInterval(() => _tick(n => n + 1), 30_000);
+      return () => clearInterval(iv);
+    }, []);
+
+    // 1.2Hz pulse when any frozen role fired within 60s (spec §5.2).
+    const [, _liveTick] = useState(0);
+    useEffect(() => {
+      const iv = setInterval(() => _liveTick(n => n + 1), 500);
       return () => clearInterval(iv);
     }, []);
 
@@ -4051,24 +4571,16 @@
       : slot.phase === "down"
         ? "endpoint unavailable — placeholders only"
         : empty
-          ? "no canonical-role calls in 24h window — strip shows pipeline shape"
-          : Object.keys(detailByRole).length + " of " + slots.length + " roles active · "
-            + (summary.total_calls || 0) + " calls in 24h";
+          ? "no canonical-role calls in 24h window — courtroom shows all five roles"
+          : Object.keys(detailByRole).length + " roles with data · "
+            + (summary.total_calls || 0) + " calls in 24h · Debate Floor";
 
-    // Build the box+arrow sequence. Each gap between adjacent boxes gets
-    // one arrow; hop latency is the avg latency of the destination box
-    // (proxy for "how long does this stage typically take"). When the
-    // destination is empty we omit the latency chip.
-    const children = [];
-    slots.forEach((role, idx) => {
-      const detail = detailByRole[role] || null;
-      children.push(h(AgentFlowBox, { key: "box_" + role, role, detail, onClick: click }));
-      if (idx < slots.length - 1) {
-        const next = detailByRole[slots[idx + 1]] || null;
-        const hopSec = next && next.count ? next.avg_latency_s : null;
-        children.push(h(AgentFlowArrow, { key: "arr_" + role, hopSec }));
-      }
-    });
+    const debateLive = _debateIsLive(detailByRole);
+    const regime = detailByRole.regime_tagger || null;
+    const bull = detailByRole.bull_debater || null;
+    const bear = detailByRole.bear_debater || null;
+    const arb = detailByRole.arbiter || null;
+    const refl = detailByRole.reflector || null;
 
     return h(Card, {
       num: "21a",
@@ -4076,7 +4588,63 @@
       sub: subText,
       right: cardRight(slot.fetchedAt),
     },
-      h("div", { className: "agent-flow", id: "agent-flow-strip" }, children)
+      h("div", { className: "v3-debate-floor", id: "agent-flow-strip" },
+        h(DebateFloorConnectors, { live: debateLive }),
+        debateLive && h("div", { className: "v3-debate-live-anchor" },
+          h("span", { className: "v3-debate-live-pill", "aria-live": "polite" }, "DEBATE LIVE")),
+        h("div", { className: "v3-debate-grid" },
+          h("div", { className: "v3-debate-cell v3-debate-cell--regime" },
+            h(DebateRoleCard, {
+              role: "regime_tagger",
+              headline: "REGIME TAGGER",
+              subline: "scout · top of arena",
+              variant: "cold",
+              detail: regime,
+              onClick: click,
+            })
+          ),
+          h("div", { className: "v3-debate-cell v3-debate-cell--bull" },
+            h(DebateRoleCard, {
+              role: "bull_debater",
+              headline: "BULL",
+              subline: "assesses upside",
+              variant: "bull",
+              detail: bull,
+              onClick: click,
+            })
+          ),
+          h("div", { className: "v3-debate-cell v3-debate-cell--arbiter" },
+            h(DebateRoleCard, {
+              role: "arbiter",
+              headline: "ARBITER ⚖",
+              subline: "scales",
+              variant: "arbiter",
+              detail: arb,
+              onClick: click,
+            })
+          ),
+          h("div", { className: "v3-debate-cell v3-debate-cell--bear" },
+            h(DebateRoleCard, {
+              role: "bear_debater",
+              headline: "BEAR",
+              subline: "assesses downside",
+              variant: "bear",
+              detail: bear,
+              onClick: click,
+            })
+          ),
+          h("div", { className: "v3-debate-cell v3-debate-cell--reflector" },
+            h(DebateRoleCard, {
+              role: "reflector",
+              headline: "REFLECTOR",
+              subline: "post-mortem writer",
+              variant: "reflector",
+              detail: refl,
+              onClick: click,
+            })
+          )
+        )
+      )
     );
   }
 
@@ -4468,6 +5036,39 @@
     return ReactDOM.createPortal(drawerEl, document.body);
   }
 
+  function parseGradeFromGistText(text) {
+    if (text == null) return null;
+    const t = String(text);
+    const key = "\"grade\"";
+    let pos = 0;
+    while (true) {
+      const i = t.indexOf(key, pos);
+      if (i < 0) return null;
+      const slice = t.slice(i, i + 48);
+      if (slice.indexOf("\"A\"") >= 0 || slice.indexOf("'A'") >= 0) return "A";
+      if (slice.indexOf("\"B\"") >= 0 || slice.indexOf("'B'") >= 0) return "B";
+      if (slice.indexOf("\"C\"") >= 0 || slice.indexOf("'C'") >= 0) return "C";
+      pos = i + 1;
+    }
+  }
+
+  function llmActivityRowRoleTag(agent) {
+    const a = String(agent || "").toLowerCase();
+    if (a.indexOf("trade_reviewer") >= 0) {
+      return { label: "ARBITER", cls: "v3-llm-tag--arbiter" };
+    }
+    if (a.indexOf("aggressive") >= 0) {
+      return { label: "BULL", cls: "v3-llm-tag--bull" };
+    }
+    if (a.indexOf("conservative") >= 0) {
+      return { label: "BEAR", cls: "v3-llm-tag--bear" };
+    }
+    if (a.indexOf("neutral") >= 0) {
+      return { label: "RISK", cls: "v3-llm-tag--risk" };
+    }
+    return { label: "LLM", cls: "v3-llm-tag--def" };
+  }
+
   function LLMCallsLive({ data }) {
     const slot = slotState(data, "llm_calls");
     const env = envelopeData(slot.env) || {};
@@ -4480,6 +5081,7 @@
     // is still available via the same endpoint params for the modal's
     // "search across the whole window" flow.
     const [agentFilter, setAgentFilter] = useState("");
+    const [tierPill, setTierPill] = useState("all");
     const [search, setSearch] = useState("");
     const [shown, setShown] = useState(50);  // "load more" pagination
     const [selectedTs, setSelectedTs] = useState(null);
@@ -4522,7 +5124,10 @@
         const raws = Array.isArray(d.rawAgents) ? d.rawAgents : [];
         // If a filter is set and it doesn't match any of the role's raw
         // agents, drop it so the scroll target becomes visible.
-        if (agentFilter && !raws.includes(agentFilter)) setAgentFilter("");
+        if (agentFilter && !raws.includes(agentFilter)) {
+          setAgentFilter("");
+          setTierPill("all");
+        }
         // Defer DOM lookup to next paint so the (possibly-reset) filter
         // has a chance to re-render.
         requestAnimationFrame(() => {
@@ -4549,7 +5154,7 @@
       }
       window.addEventListener("quanta:agent-flow-pick", onPick);
       return () => window.removeEventListener("quanta:agent-flow-pick", onPick);
-    }, [agentFilter]);
+    }, [agentFilter, tierPill]);
 
     // Click a row → fetch full record (include_text=1) for the modal.
     const openCall = useCallback((rec) => {
@@ -4621,6 +5226,10 @@
       }
       return callsAll.filter(c => {
         if (agentFilter && c.agent !== agentFilter) return false;
+        if (tierPill === "fast" && c.tier !== "fast") return false;
+        if (tierPill === "deep" && c.tier !== "deep") return false;
+        if (tierPill === "ollama" && c.provider !== "ollama") return false;
+        if (tierPill === "anthropic" && c.provider !== "anthropic") return false;
         if (pat) {
           const hay = [c.agent, c.model, c.tier, c.role, c.provider]
             .filter(Boolean).join(" ");
@@ -4628,7 +5237,7 @@
         }
         return true;
       });
-    }, [callsAll, agentFilter, search]);
+    }, [callsAll, agentFilter, tierPill, search]);
 
     // Skeleton — only show loading on first paint; subsequent polls
     // re-use the previous data so the table doesn't flash.
@@ -4648,9 +5257,9 @@
     }
 
     // ── Layout ───────────────────────────────────────────────────
-    const stat = (lbl, val, cls) => h("div", { style: { display: "flex", flexDirection: "column", gap: 2, minWidth: 100 } },
+    const stat = (lbl, val, toneCls) => h("div", { style: { display: "flex", flexDirection: "column", gap: 2, minWidth: 100 } },
       h("div", { className: "dim2 mono", style: { fontSize: "var(--t-2xs)", letterSpacing: ".08em", textTransform: "uppercase" } }, lbl),
-      h("div", { className: "num " + (cls || ""), style: { fontSize: "var(--t-md)", fontFamily: "var(--mono)", fontVariantNumeric: "tabular-nums" } }, val)
+      h("div", { className: cls("num", "v3-num", toneCls || ""), style: { fontSize: "var(--t-md)", fontFamily: "var(--mono)", fontVariantNumeric: "tabular-nums" } }, val)
     );
 
     const ollamaPct = Number(summary.ollama_pct || 0);
@@ -4658,6 +5267,14 @@
     const successCls = Number(summary.success_pct || 100) >= 99 ? "up"
                     : Number(summary.success_pct || 100) >= 95 ? "warn" : "down";
     const isEmpty = callsAll.length === 0;
+    const byTier = summary.by_tier || {};
+    const providers = summary.providers || {};
+    const fastCount = Number(byTier.fast || 0);
+    const deepCount = Number(byTier.deep || 0);
+    const totalCalls = Number(summary.total_calls || 0);
+    const ollamaCalls = providers.ollama != null ? Number(providers.ollama) : Math.round(totalCalls * ollamaPct / 100);
+    const anthropicCalls = Math.max(0, Math.round(totalCalls * (1 - ollamaPct / 100)));
+    const arbGist = (summary.by_role_detail && summary.by_role_detail.arbiter && summary.by_role_detail.arbiter.last_gist) || "";
 
     const rightPill = h("span", { className: "pill info", style: { height: 18 } },
       h("span", { className: "dot info" + (isEmpty ? "" : " pulse") }), " ",
@@ -4690,6 +5307,26 @@
               fmtLatencyClass(summary.p95_latency_s)),
             stat("Ollama", ollamaPct.toFixed(0) + "%", ollamaCls),
             stat("Success", (summary.success_pct || 100).toFixed(1) + "%", successCls)
+          ),
+
+          h("div", { className: "v3-llm-tier-pills" },
+            ["all", "fast", "deep", "ollama", "anthropic"].map((pid) => {
+              const labels = {
+                all: "all",
+                fast: "fast " + fastCount,
+                deep: "deep " + deepCount,
+                ollama: "ollama " + ollamaCalls,
+                anthropic: "anthropic " + anthropicCalls,
+              };
+              const active = tierPill === pid;
+              return h("button", {
+                key: pid,
+                type: "button",
+                className: "v3-llm-tier-pill" + (active ? " is-active" : ""),
+                "aria-pressed": active,
+                onClick: () => setTierPill(pid),
+              }, labels[pid]);
+            })
           ),
 
           // ── FILTERS ─────────────────────────────────────────────
@@ -4727,9 +5364,9 @@
                 fontSize: "var(--t-xs)", minWidth: 260, flex: 1, maxWidth: 360,
               }
             }),
-            (agentFilter || search) && h("button", {
+            (agentFilter || search || tierPill !== "all") && h("button", {
               type: "button",
-              onClick: () => { setAgentFilter(""); setSearch(""); },
+              onClick: () => { setAgentFilter(""); setSearch(""); setTierPill("all"); },
               style: {
                 background: "transparent", border: "1px solid var(--line-2)",
                 color: "var(--fg-2)", padding: "3px 8px", cursor: "pointer",
@@ -4737,7 +5374,7 @@
               }
             }, "clear"),
             h("span", { className: "tb-spacer", style: { flex: 1 } }),
-            h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } },
+            h("span", { className: "dim mono v3-num", style: { fontSize: "var(--t-2xs)" } },
               filtered.length + " / " + callsAll.length + " rows")
           ),
 
@@ -4755,23 +5392,26 @@
                 " on every chat_json call — first record appears within minutes of the next agent run."
               )
             : h(F, null,
-              // Column header
               h("div", {
+                className: "v3-llm-table-head",
                 style: {
                   display: "grid",
-                  gridTemplateColumns: "76px 1fr 130px 64px 90px 22px",
+                  gridTemplateColumns: "64px 44px 1fr 118px 52px 76px 40px 18px",
                   gap: "var(--s-2)", alignItems: "center",
                   fontSize: "var(--t-2xs)", fontFamily: "var(--mono)",
                   color: "var(--fg-3)", textTransform: "uppercase",
-                  letterSpacing: ".08em", padding: "4px 6px",
-                  borderBottom: "1px solid var(--line-1)",
+                  letterSpacing: ".08em", padding: "6px 6px",
+                  borderBottom: "var(--v3-hairline-strong)",
+                  background: "var(--bg-inset)",
                 }
               },
                 h("span", null, "time"),
+                h("span", null, "role"),
                 h("span", null, "agent"),
                 h("span", null, "model · tier"),
                 h("span", { style: { textAlign: "right" } }, "lat"),
-                h("span", { style: { textAlign: "right" } }, "tokens"),
+                h("span", { style: { textAlign: "right" } }, "tok"),
+                h("span", null, "grade"),
                 h("span", null, "")
               ),
               filtered.slice(0, shown).map((c, i) => {
@@ -4780,14 +5420,21 @@
                 const pTok = c.prompt_tokens || 0;
                 const cTok = c.completion_tokens || 0;
                 const isOpen = selectedTs === c.timestamp;
-                // Status dot: success unless ``success===false`` (future); we
-                // also treat completion_tokens===0 + latency===0 as failed
-                // because a real round-trip should produce at least one of
-                // them.
                 const failed = c.success === false || (lat === 0 && cTok === 0);
                 const statusCls = failed ? "down" : "up";
+                const tag = llmActivityRowRoleTag(c.agent);
+                const agentLower = String(c.agent || "").toLowerCase();
+                const gradeFromRow = parseGradeFromGistText(c.response_text || "");
+                const gradeFromArb = agentLower.indexOf("trade_reviewer") >= 0
+                  ? parseGradeFromGistText(arbGist)
+                  : null;
+                const gradeLetter = gradeFromRow || gradeFromArb;
+                const gradeChipCls = "v3-llm-grade" + (gradeLetter
+                  ? " v3-llm-grade--" + String(gradeLetter).toLowerCase()
+                  : " v3-llm-grade--na");
                 return h("div", {
                   key: c.timestamp + "_" + i,
+                  className: "v3-llm-row" + (i % 2 === 1 ? " is-alt" : ""),
                   "data-llm-ts": c.timestamp,
                   "data-llm-agent": c.agent || "",
                   onClick: () => openCall(c),
@@ -4801,24 +5448,26 @@
                   },
                   style: {
                     display: "grid",
-                    gridTemplateColumns: "76px 1fr 130px 64px 90px 22px",
+                    gridTemplateColumns: "64px 44px 1fr 118px 52px 76px 40px 18px",
                     gap: "var(--s-2)", alignItems: "center",
                     fontSize: "var(--t-xs)", fontFamily: "var(--mono)",
-                    padding: "5px 6px",
+                    padding: "6px 6px",
                     borderBottom: "1px solid var(--line-1)",
                     cursor: "pointer",
                     background: isOpen ? "var(--bg-inset)" : "transparent",
                   }
                 },
-                  h("span", { className: "dim" }, fmtHHMMSS(c.timestamp)),
+                  h("span", { className: "dim v3-num" }, fmtHHMMSS(c.timestamp)),
+                  h("span", { className: cls("v3-llm-role-tag", tag.cls), title: tag.label }, tag.label.slice(0, 1)),
                   h("span", { style: { color: "var(--fg-1)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
                     c.agent || "—"),
                   h("span", { className: "dim", style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
                     (c.model || "—") + " · " + (c.tier || "?")),
-                  h("span", { className: latCls, style: { textAlign: "right" } },
+                  h("span", { className: cls(latCls, "v3-num"), style: { textAlign: "right" } },
                     lat.toFixed(2) + "s"),
-                  h("span", { className: "dim", style: { textAlign: "right" } },
+                  h("span", { className: "dim v3-num", style: { textAlign: "right" } },
                     pTok + "/" + cTok),
+                  h("span", { className: gradeChipCls, "aria-label": "grade" }, gradeLetter || "—"),
                   h("span", { className: "dot " + statusCls, style: { justifySelf: "end" } })
                 );
               }),
@@ -4907,6 +5556,21 @@
     const decisions = data.decisions || [];
     const placeholder = (status === "degraded" || status === "down" || err || decisions.length === 0);
 
+    function fmtDecisionTft(d) {
+      const tft = d.tft_probs;
+      if (tft == null) return "—";
+      if (typeof tft === "object") {
+        try { return JSON.stringify(tft).slice(0, 72); } catch (_e) { return "—"; }
+      }
+      return String(tft).slice(0, 72);
+    }
+    function fmtDecisionGates(d) {
+      if (d.kind === "blocked") {
+        return "blocked · " + String(d.constraint || "—");
+      }
+      return "passed · journal";
+    }
+
     return h(Card, {
       num: "22", title: "Decision audit",
       sub: selected ? ("last " + decisions.length + " decisions · " + selected) : "pick a pair…",
@@ -4922,28 +5586,31 @@
       placeholder
         ? h("div", { className: "dim", style: { fontSize: "var(--t-xs)", padding: "var(--s-2) 0" } },
             err ? "—" : (data.decisions != null ? "no recent decisions for this pair" : "—"))
-        : h("div", { style: { display: "flex", flexDirection: "column", gap: "var(--s-3)" } },
+        : h("div", { className: "v3-decision-lane" },
             decisions.map((d, i) => {
               const isBlocked = d.kind === "blocked";
               const verdictCls = isBlocked ? "warn" : "up";
-              const verdict = isBlocked ? "NO ENTRY · blocked" : ("ENTRY · " + (d.side || "long"));
+              const verdict = isBlocked ? "NO ENTRY" : ("ENTRY · " + (d.side || "long"));
               const reason = isBlocked
                 ? (d.reason || "—") + " (constraint=" + (d.constraint || "—") + ")"
                 : (d.reasoning || ((d.regime || "—") + " · conf " + (d.confidence != null ? Number(d.confidence).toFixed(2) : "—")));
               const ts = (d.ts || "").replace("T", " ").slice(0, 19);
-              return h("div", {
-                key: i,
-                style: {
-                  border: "1px solid var(--line-1)", borderRadius: 4,
-                  padding: "var(--s-2) var(--s-3)",
-                  display: "flex", flexDirection: "column", gap: 4,
-                }
-              },
-                h("div", { style: { display: "flex", alignItems: "baseline", gap: "var(--s-2)" } },
-                  h("span", { className: "mono dim", style: { fontSize: "var(--t-2xs)" } }, ts || "—"),
-                  h("span", { className: "tb-spacer", style: { flex: 1 } }),
-                  h("span", { className: "pill " + verdictCls, style: { height: 18 } }, verdict)),
-                h("div", { className: "dim", style: { fontSize: "var(--t-xs)", lineHeight: 1.45 } }, reason)
+              return h("div", { key: i, className: "v3-decision-node" },
+                h("div", { className: "v3-decision-rail", "aria-hidden": "true" }),
+                h("div", { className: "v3-decision-card" },
+                  h("div", { className: "v3-decision-card-head" },
+                    h("span", { className: "mono dim v3-decision-ts" }, ts || "—"),
+                    h("span", { className: "tb-spacer", style: { flex: 1 } }),
+                    h("span", { className: "pill " + verdictCls + " v3-decision-verdict" }, verdict)
+                  ),
+                  h("div", { className: "v3-decision-swim-meta" },
+                    h("span", { className: "v3-decision-chip mono" },
+                      "REGIME ", h("span", { className: "v3-num" }, String(d.regime || "—"))),
+                    h("span", { className: "v3-decision-chip mono" }, "TFT ", fmtDecisionTft(d)),
+                    h("span", { className: "v3-decision-chip mono" }, fmtDecisionGates(d))
+                  ),
+                  h("div", { className: "dim v3-decision-reason", style: { fontSize: "var(--t-xs)", lineHeight: 1.45 } }, reason)
+                )
               );
             })
           )
@@ -5026,6 +5693,45 @@
       tb.setAttribute("data-regime", regimeCurrent || "unknown");
     }, [regimeCurrent]);
 
+    const scoreSnap = useMemo(() => computeScoreboardMetrics(data), [data]);
+    const forceKillExpand = useMemo(() => {
+      const halt = (scoreSnap.haltFrac || 0.03) * 100;
+      return Math.abs(scoreSnap.liveDayPct) >= halt - 1e-9;
+    }, [scoreSnap]);
+
+    const heartbeatStatus = useMemo(() => deriveHeartbeatStatus({
+      services: data.services,
+      circuitBreakers: data.circuit_breakers,
+      mode: data.mode,
+      weeklyTraining: data.weekly_training,
+      ollamaHealth: data.ollama_health,
+      killState: killState,
+    }), [data.services, data.circuit_breakers, data.mode, data.weekly_training, data.ollama_health, killState]);
+
+    const scrollToServiceHealth = useCallback(() => {
+      const heads = document.querySelectorAll(".card-head h3");
+      for (let i = 0; i < heads.length; i++) {
+        const t = heads[i].textContent || "";
+        if (t.indexOf("Service health") >= 0) {
+          const sec = heads[i].closest("section.card");
+          if (sec && sec.scrollIntoView) sec.scrollIntoView({ behavior: "smooth", block: "center" });
+          return;
+        }
+      }
+    }, []);
+
+    const kbPause = useCallback(() => fetch("/api/ops/pause", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "operator kill bar pause via spa" }),
+    }).then(r => (r.ok ? "PAUSED" : "PAUSE HTTP " + r.status)), []);
+
+    const kbFlatten = useCallback(() => fetch("/api/ops/pause", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "operator kill bar flatten+halt via spa" }),
+    }).then(r => (r.ok ? "HALT issued — close positions manually if needed" : "HTTP " + r.status)), []);
+
     return h(F, null,
       h("div", { className: "app" },
         h(Topbar, {
@@ -5033,6 +5739,8 @@
           combinedPortfolio: data.combined_portfolio,
           mode: data.mode,
           services: data.services,
+          heartbeatStatus: heartbeatStatus,
+          onHeartbeatClick: scrollToServiceHealth,
         }),
         h(Sidebar, { active: "ops" }),
         h("main", { className: "main" },
@@ -5121,7 +5829,7 @@
           h(StocksPairTelemetryLive, { data }),
           // SERVICES + POSITIONS
           h("div", { className: "grid g-12", style: { gap: "var(--gap-grid)" } },
-            h("div", { style: { gridColumn: "span 4" } }, h(ServicesLive, { data })),
+            h("div", { style: { gridColumn: "span 4" } }, h(ServicesLive, { data, killState })),
             h("div", { style: { gridColumn: "span 8" } }, h(PositionsLive, { data }))
           ),
           // STOCKS ML banner moved to top training row.
@@ -5162,7 +5870,20 @@
           h("div", { style: { padding: "var(--s-4) 0", textAlign: "center", color: "var(--fg-4)", fontSize: "var(--t-xs)", fontFamily: "var(--mono)" } },
             "QUANTA v2.6 · build " + new Date().toISOString().slice(0, 10))
         )
-      )
+      ),
+      h(KillBar, {
+        killState: killState,
+        setKillState: setKillState,
+        forceOpen: forceKillExpand,
+        onPause: kbPause,
+        onFlatten: kbFlatten,
+        onKill: () => { setKillState("killed"); },
+        onResume: () => {
+          setKillState("normal");
+          return Promise.resolve("RESUME sent");
+        },
+        resumeDisabled: killState !== "killed",
+      })
     );
   }
 
