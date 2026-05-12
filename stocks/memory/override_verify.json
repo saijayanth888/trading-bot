@@ -1,0 +1,15 @@
+{
+  "date": "2026-05-11",
+  "regime": "BEAR_VOLATILE",
+  "override_expected": true,
+  "override_applied": true,
+  "candidates_evaluated": 0,
+  "candidates_passing_override": 0,
+  "trades_placed": 0,
+  "status": "healthy",
+  "stalled_runs": 0,
+  "last_trade_at": null,
+  "reason": "no candidates from pre-market \u2014 nothing to evaluate",
+  "checked_at": "2026-05-12T01:52:52.288136+00:00",
+  "source_file": "/home/saijayanthai/.hermes/cron/output/da38c6eb6673/2026-05-11_09-35-42.md"
+}

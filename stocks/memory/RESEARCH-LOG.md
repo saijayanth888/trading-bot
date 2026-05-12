@@ -110,3 +110,12 @@ Sections: date, watchlist scanned, top candidates, rejected with reasons.
 |--------|--------|-------|
 | NVDA | RESEARCH_CANDIDATE | 5 |
 
+## 2026-05-12 — NVDA
+**Sentiment:** 0.7
+**Thesis:** Vera Rubin GPU trial production launch (June 2026); Vera Rubin shipments to major CSPs beginning (July 2026); TSMC revenue growth acceleration (17.5% YoY)
+**Entry:** 0.0 | **Stop:** 0.0 | **Target:** 0.0
+
+| Symbol | Status | Score |
+|--------|--------|-------|
+| NVDA | RESEARCH_CANDIDATE | 6 |
+
