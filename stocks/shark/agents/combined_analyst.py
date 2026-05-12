@@ -23,6 +23,43 @@ except ImportError:
 
 from shark.agents.trade_reviewer import get_recent_lessons
 
+try:
+    # Optional: injects past realized REFLECTIONs from stocks/memory/decisions.md.
+    # Wrapped so the analyst still works in environments without the helper.
+    from shark.memory import get_past_context as _get_past_context
+except Exception:  # pragma: no cover — defensive
+    _get_past_context = None
+
+try:
+    from shark.config import get_settings as _get_settings
+except Exception:  # pragma: no cover
+    _get_settings = None
+
+
+def _build_system_prompt(symbol: str) -> str:
+    """Return the base system prompt, optionally suffixed with the past-lessons
+    block from decisions.md. Controlled by INJECT_PAST_LESSONS env var
+    (default True). Returns the base prompt unchanged on any failure so the
+    analyst never crashes due to a memory-log issue."""
+    base = _SYSTEM_PROMPT
+    if _get_past_context is None or _get_settings is None:
+        return base
+    try:
+        s = _get_settings()
+        if not getattr(s, "inject_past_lessons", True):
+            return base
+        block = _get_past_context(
+            symbol,
+            k_same_symbol=getattr(s, "past_lessons_k_same", 5),
+            k_cross_symbol=getattr(s, "past_lessons_k_cross", 3),
+        )
+        if not block:
+            return base
+        return f"{base}\n\n{block}"
+    except Exception as exc:
+        logger.debug("past-lessons injection failed for %s: %s", symbol, exc)
+        return base
+
 logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = (
@@ -335,7 +372,7 @@ Rules: Only set decision=BUY if confidence >= 0.70 AND risk_reward_ratio >= 2.0.
 
     try:
         raw, _usage, _model = chat_json(
-            system_prompt=_SYSTEM_PROMPT,
+            system_prompt=_build_system_prompt(symbol),
             user_message=user_prompt,
             max_tokens=1200,
             temperature=0.2,
