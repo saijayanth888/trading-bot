@@ -3923,7 +3923,12 @@
           // the top stays uncrowded — operator clicks a row to see the full
           // prompt + response (provided SHARK_LLM_LOG_FULL_TEXT=1 was on
           // when the call was logged).
+          //
+          // AgentFlow strip sits ABOVE the activity list — same data, but
+          // a per-role pipeline view (regime_tagger → … → reflector). Both
+          // consume the same /api/ops/llm_calls response; no extra poll.
           h("div", { id: "llm-calls", className: "anchor", style: { gridColumn: "span 12" } },
+            h(AgentFlow, { data }),
             h(LLMCallsLive, { data })
           ),
           // AGENT TIMELINE + RESEARCH FEED
