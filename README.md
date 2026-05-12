@@ -1,3 +1,6 @@
+<!-- Licensed under the MIT License — see LICENSE at repo root.
+     Copyright (c) 2026 Sai Jayanth. -->
+
 # Trading bot — TFT + DRL ensemble + EPT evolution (crypto + stocks)
 
 A self-hosted, dual-venue algorithmic trading system that combines deep learning
