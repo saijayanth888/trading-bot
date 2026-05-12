@@ -163,6 +163,11 @@
     // WeeklyTrainingLive card under TodayScoreboard. Degrades soft when
     // model-forge is offline (card still renders with local-only fields).
     weekly_training: "/api/ops/weekly_training",
+    // Per-pair TFT model.zip validation status — surfaces the
+    // TrainingHealthLive card next to WeeklyTrainingLive. Powered by
+    // pair_dictionary.json + the post-write validation gate. Red
+    // rows when a pair is quarantined (stub/missing); amber when stale.
+    training_health: "/api/ops/training_health",
     // LLM activity feed — last N calls from stocks/memory/llm-calls.jsonl
     // with summary aggregates (tokens, avg latency, ollama % share).
     // Default page is metadata-only (include_text=0) so the polling payload
@@ -756,6 +761,209 @@
       abs ? h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, abs) : null
     );
   }
+
+  // ─────────────── TRAINING HEALTH — per-pair TFT model.zip validation ───────────────
+  //
+  // Sits next to WeeklyTrainingLive. One row per pair in pair_dictionary.json.
+  // Backed by /api/ops/training_health on the 10s fast-poll tick. Red rows
+  // when the model is a stub or missing; amber when stale (>72h). The
+  // existing CSS tokens (up / warn / down + dim, line-1) carry the colour
+  // semantics so this card matches the rest of the dashboard automatically.
+  function TrainingHealthLive({ data }) {
+    const slot = slotState(data, "training_health");
+    const env = envelopeData(slot.env) || {};
+    const pairs = env.pairs || [];
+    const counts = env.counts || {};
+    const staleThreshold = env.stale_hours_threshold || 72;
+
+    if (slot.phase === "down") {
+      return h(Card, {
+        num: "00d", title: "TFT model health · per pair",
+        sub: "endpoint unavailable",
+        right: cardRight(slot.fetchedAt),
+      }, h(EmptyState, { reason: slot.reason, fetchedAt: slot.fetchedAt, period: 10 }));
+    }
+    if (slot.phase === "loading") {
+      return h(Card, {
+        num: "00d", title: "TFT model health · per pair",
+        sub: "loading…",
+        right: cardRight(slot.fetchedAt),
+      }, h(LoadingState));
+    }
+
+    const okN = counts.ok || 0;
+    const stubN = counts.stub || 0;
+    const missingN = counts.missing || 0;
+    const staleN = counts.stale || 0;
+    const errN = counts.error || 0;
+    const badN = stubN + missingN + errN;
+
+    // Pip — same vocabulary as WeeklyTrainingLive.
+    let pillCls, pillText;
+    if (badN > 0) {
+      pillCls = "down"; pillText = badN + " QUARANTINED";
+    } else if (staleN > 0) {
+      pillCls = "warn"; pillText = staleN + " STALE";
+    } else if (pairs.length === 0) {
+      pillCls = "info"; pillText = "NO PAIRS YET";
+    } else {
+      pillCls = "up"; pillText = okN + "/" + pairs.length + " HEALTHY";
+    }
+
+    return h(Card, {
+      num: "00d", title: "TFT model health · per pair",
+      sub: "validates model.zip on every poll · stale = > " + Math.round(staleThreshold) + "h",
+      right: cardRight(slot.fetchedAt,
+        h("span", { className: "pill " + pillCls, style: { height: 18 } },
+          h("span", { className: "dot " + pillCls + (pillCls === "up" ? " pulse" : "") }),
+          " ", pillText))
+    },
+      h("div", {
+        style: {
+          display: "grid",
+          gridTemplateColumns:
+            "minmax(110px, 1.3fr) minmax(80px, .9fr) minmax(90px, 1fr) minmax(70px, .8fr) minmax(90px, 1fr)",
+          gap: 0,
+          marginTop: "var(--s-2)",
+          borderTop: "1px solid var(--line-1)",
+        }
+      },
+        h(F, null,
+          h(WeeklyTrainingHeaderCell, { label: "Pair" }),
+          h(WeeklyTrainingHeaderCell, { label: "Status" }),
+          h(WeeklyTrainingHeaderCell, { label: "Last train" }),
+          h(WeeklyTrainingHeaderCell, { label: "Age" }),
+          h(WeeklyTrainingHeaderCell, { label: "Size", align: "right" }),
+        ),
+        pairs.length === 0
+          ? h("div", {
+              className: "dim mono",
+              style: {
+                gridColumn: "span 5", padding: "var(--s-3)",
+                fontSize: "var(--t-xs)", textAlign: "center",
+              }
+            }, "pair_dictionary.json not yet written — bot is still in warm-up")
+          : pairs.map(p => h(TrainingHealthRow, { key: p.pair, p })),
+      ),
+      h("div", {
+        className: "dim mono",
+        style: { fontSize: "var(--t-2xs)", padding: "var(--s-2) 0 0",
+                 letterSpacing: ".06em" }
+      },
+        badN > 0
+          ? "stub = size < 1 MB or no data.pkl · missing = trained_ts = 0 (last save failed) · investigate before next retrain"
+          : staleN > 0
+            ? "stale rows have not retrained in the last " + Math.round(staleThreshold) + "h — check freqai live_retrain_hours"
+            : "all artifacts pass: size > 1 MB · data.pkl present · tensor blobs > 0")
+    );
+  }
+
+  function TrainingHealthRow({ p }) {
+    // Red for stub/missing/error, amber for stale, default for ok.
+    const status = p.status || "ok";
+    let rowCls, statusText, statusCls;
+    if (status === "stub") {
+      rowCls = "down"; statusText = "STUB"; statusCls = "down";
+    } else if (status === "missing") {
+      rowCls = "down"; statusText = "MISS"; statusCls = "down";
+    } else if (status === "error") {
+      rowCls = "down"; statusText = "ERR"; statusCls = "down";
+    } else if (status === "stale") {
+      rowCls = "warn"; statusText = "STALE"; statusCls = "warn";
+    } else {
+      rowCls = "up"; statusText = "OK"; statusCls = "up";
+    }
+
+    const cell = (kids, extra) => h("div", {
+      style: Object.assign({
+        padding: "var(--s-2) var(--s-2)",
+        borderBottom: "1px solid var(--line-1)",
+        fontSize: "var(--t-xs)",
+        display: "flex", alignItems: "center", gap: 6,
+        minHeight: 30,
+      }, extra || {})
+    }, kids);
+
+    // Pair name. On stub/missing the cell stays default colour but the
+    // status pill carries the red.
+    const pairCell = cell(
+      h("span", {
+        className: "mono",
+        style: { color: "var(--fg-1)", fontFamily: "var(--mono)" },
+        title: p.reason || ""
+      }, p.pair)
+    );
+
+    const statusCell = cell(
+      h("span", {
+        className: "pill " + statusCls,
+        style: { height: 16, fontSize: "var(--t-2xs)" },
+        title: p.reason || ""
+      },
+        h("span", { className: "dot " + statusCls }),
+        " ", statusText)
+    );
+
+    // Last train — ISO short time. Same component used by the weekly card.
+    const lastTs = p.last_train_ts ? (p.last_train_ts * 1000) : null;
+    let trainText;
+    if (lastTs) {
+      try {
+        const dt = new Date(lastTs);
+        trainText = String(dt.getUTCHours()).padStart(2, "0")
+                  + ":" + String(dt.getUTCMinutes()).padStart(2, "0")
+                  + " UTC";
+      } catch (_) {
+        trainText = "—";
+      }
+    } else {
+      trainText = "never";
+    }
+    const trainCell = cell(
+      h("span", {
+        className: "mono " + (lastTs ? "" : "dim"),
+        style: { fontFamily: "var(--mono)", fontSize: "var(--t-xs)" }
+      }, trainText)
+    );
+
+    // Age in hours, formatted with the same helper as the rest of the page.
+    const ageText = p.age_hours == null ? "—" : durToHM(p.age_hours);
+    const ageCls = (status === "stale") ? "warn" : "";
+    const ageCell = cell(
+      h("span", {
+        className: "mono " + ageCls,
+        style: {
+          fontFamily: "var(--mono)",
+          fontVariantNumeric: "tabular-nums",
+          fontSize: "var(--t-xs)",
+        }
+      }, ageText)
+    );
+
+    // Size — bytes -> MB / KB with one decimal. Stub artifacts show in red.
+    const sz = Number(p.zip_size_bytes || 0);
+    let szText;
+    if (!sz) szText = "—";
+    else if (sz < 1024) szText = sz + " B";
+    else if (sz < 1_000_000) szText = (sz / 1024).toFixed(0) + " KB";
+    else szText = (sz / 1_000_000).toFixed(1) + " MB";
+    const szCls = (status === "stub" && sz > 0 && sz < 10000) ? "down" : "";
+    const sizeCell = cell(
+      h("span", {
+        className: "mono " + szCls,
+        style: {
+          fontFamily: "var(--mono)",
+          fontVariantNumeric: "tabular-nums",
+          fontSize: "var(--t-xs)",
+          width: "100%", textAlign: "right",
+        }
+      }, szText),
+      { justifyContent: "flex-end" }
+    );
+
+    return h(F, null, pairCell, statusCell, trainCell, ageCell, sizeCell);
+  }
+
 
   // ─────────────── HERO — combined equity + 3-cell status ───────────────
   function HeroLive({ data, killState }) {
@@ -4808,6 +5016,13 @@
           // Degrade-soft: still renders with local-only metrics when
           // model-forge is offline.
           h(WeeklyTrainingLive, { data }),
+          // TFT MODEL HEALTH — per-pair model.zip validation card. Surfaces
+          // the same quarantine state the strategy and freqai backend use
+          // at runtime: rows go red when a pair's model.zip is a stub or
+          // missing (trained_timestamp == 0 in pair_dictionary.json), amber
+          // when stale (> 72h since the last successful save). Powered by
+          // /api/ops/training_health on the existing 10s fast-poll tick.
+          h(TrainingHealthLive, { data }),
           // HERO
           h(HeroLive, { data, killState }),
           // TRAINING ROW — crypto FreqAI + stocks Shark TFT side-by-side.

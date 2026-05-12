@@ -350,6 +350,55 @@ class SlackAlerter:
             dedup_key=f"info:{component}:{message[:64]}",
         )
 
+    def notify_training_stub(
+        self, pair: str, size_bytes: int, files: int, tensor_blobs: int,
+        path: str | None = None, detail: str | None = None,
+    ) -> bool:
+        """Stub-artifact alert for the TFT training pipeline.
+
+        Fires from the TFT save() path when the validation gate rejects a
+        freshly-written model.zip. Uses the :rotating_light: emoji to make
+        the channel notification visually distinct from regular errors, and
+        dedups on the pair name so a stuck pair won't repeatedly page.
+
+        Dedup window is the SlackConfig.dedup_window_sec default (60s) when
+        called from the in-process alerter. The 30-min/pair window required
+        by spec is enforced by the caller via a state file in
+        ~/.hermes/state-snapshots/ so the dedup survives even if the
+        freqtrade process restarts between failures.
+        """
+        fields = [
+            ("Pair", f"`{pair}`"),
+            ("Size", f"`{size_bytes:,} B`"),
+            ("Files in zip", f"`{files}`"),
+            ("Tensor blobs", f"`{tensor_blobs}`"),
+        ]
+        if path:
+            fields.append(("Path", f"`{path}`"))
+        if detail:
+            fields.append(("Detail", f"`{detail[:200]}`"))
+
+        body = (
+            f"STUB ARTIFACT for {pair} — size={size_bytes}B, files={files}, "
+            f"tensor_blobs={tensor_blobs}. Pair quarantined from runtime. "
+            f"Investigate /ops · TrainingHealth card."
+        )
+        blocks = _blocks(
+            header=f"{EMOJI['critical']}  tft-training · stub artifact",
+            fields=fields,
+            delta=body[:200],
+            action=(
+                "open /ops · TrainingHealth card; if multiple pairs flagged "
+                "in one cycle this is a serializer regression, restart "
+                "freqtrade only after confirming the failure mode"
+            ),
+        )
+        return self._post(
+            text=body,
+            blocks=blocks,
+            dedup_key=f"tft_stub:{pair}",
+        )
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------

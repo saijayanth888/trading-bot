@@ -428,6 +428,15 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
     _rolling_sharpe_refreshed_at: float = 0.0
     # Compounded-equity log latch — emit at most one INFO line per UTC day.
     _last_compounding_log_date: str | None = None
+    # Per-pair "missing prediction columns" log latch. When freqai's
+    # load_data() fails (stub model, missing sidecar artifact, etc.) the
+    # strategy sees a dataframe with no `up` / `down` columns. The
+    # populate_entry/exit_trend methods degrade to a no-op, but without
+    # this latch the WARN would fire every candle (~12 pairs * 720
+    # candles/hour = 8.6k log lines/hour). One-line-per-pair-per-process
+    # is plenty since the pair_dictionary quarantine startup banner in
+    # the TFT module already names the offenders at boot.
+    _missing_pred_cols_logged: set = set()
 
     # ------------------------------------------------------------------
     # FreqAI feature engineering
@@ -1346,6 +1355,33 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
 
     def _populate_entry_trend_inner(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         pair = metadata.get("pair", "")
+
+        # Graceful no-op when freqai's load_data() failed for this pair.
+        # Surface: dataframe lacks `up` and/or `down` columns because the
+        # model.zip was a stub (Fix 1 prevents new stubs, but legacy stubs
+        # may still sit in pair_dictionary until the next retrain cycle).
+        # Without this guard the strategy stack-traces with KeyError('up')
+        # on every candle for that pair. We:
+        #   1. Skip every gate below
+        #   2. Leave enter_long unset (= 0)
+        #   3. Log ONCE per pair per process lifetime — the operator
+        #      already has the named banner from the TFT quarantine scan
+        #      at startup; this confirms the pair is being skipped at
+        #      runtime too.
+        if "up" not in dataframe.columns or "down" not in dataframe.columns:
+            if pair and pair not in self._missing_pred_cols_logged:
+                self._missing_pred_cols_logged.add(pair)
+                logger.info(
+                    "[strategy] %s missing prediction columns "
+                    "(up/down) — freqai load_data() likely failed for this "
+                    "pair. Skipping entry/exit signals; position management "
+                    "(stoploss, custom_exit) still applies to any open trade.",
+                    pair,
+                )
+            # No entry signal — pair stays dark until the next retrain
+            # produces a valid model.zip and freqai re-loads it.
+            return dataframe
+
         # Capital-allocation gates (no-op if config has no [capital_allocation]).
         # 1) Pair excluded entirely (weight=0): block all entries; model still
         #    trains so the data feed stays warm.
@@ -1503,6 +1539,26 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
             return dataframe
 
     def _populate_exit_trend_inner(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        pair = metadata.get("pair", "") if metadata else ""
+
+        # Same graceful no-op as the entry path. When freqai's load_data()
+        # fails the dataframe has no `down` column. Falling through to the
+        # threshold gate below would raise KeyError every candle. Position
+        # management is unaffected: any currently-open trade for this pair
+        # still goes through custom_stoploss, minimal_roi, and custom_exit
+        # which are not touched here.
+        if "up" not in dataframe.columns or "down" not in dataframe.columns:
+            if pair and pair not in self._missing_pred_cols_logged:
+                self._missing_pred_cols_logged.add(pair)
+                logger.info(
+                    "[strategy] %s missing prediction columns "
+                    "(up/down) at exit phase — no exit_long signals emitted "
+                    "this candle. Stoploss + minimal_roi still own the hard "
+                    "floor on any open position.",
+                    pair,
+                )
+            return dataframe
+
         base = float(self.exit_threshold.value)
         threshold = self._per_row_threshold(
             dataframe, base, self.REGIME_EXIT_DELTA, sentinel_no_signal=base,
