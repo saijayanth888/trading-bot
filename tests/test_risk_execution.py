@@ -94,7 +94,12 @@ def _approve(gov, **kwargs):
 
 
 def test_drawdown_pause_resume() -> None:
-    print("\n[1/13] Drawdown auto-pause + recovery (hysteresis)")
+    # P0-H: auto-resume on equity recovery was REMOVED — only a manual
+    # /api/ops/resume call (resume_after_manual_review) can clear the
+    # drawdown-pause flag. The previous test asserted the old hysteresis
+    # behaviour and started failing on every CI run after P0-H landed.
+    # Updated 2026-05-12 by the production-hardening audit.
+    print("\n[1/13] Drawdown auto-pause + MANUAL resume (P0-H)")
     gov, _ = _gov(max_portfolio_drawdown_pct=0.08)
     gov.update_equity(10_000)        # peak
     gov.update_equity(9_500)         # -5% drawdown — still OK
@@ -102,11 +107,15 @@ def test_drawdown_pause_resume() -> None:
     gov.update_equity(9_100)         # -9% drawdown → trip
     d = _approve(gov, equity=9_100)
     assert not d.approved and d.blocking_constraint == "max_drawdown_paused"
-    # Climb back to within half the limit (5% off peak * 50% = 4%)
-    gov.update_equity(9_700)         # -3% off peak — under 4% trigger → resume
+    # Equity climb back alone must NOT auto-resume (this was the old bug).
+    gov.update_equity(9_700)
+    d_blocked = _approve(gov, equity=9_700)
+    assert not d_blocked.approved, "auto-resume on recovery is FORBIDDEN (P0-H)"
+    # Operator-style manual resume clears the flag.
+    assert gov.resume_after_manual_review("test") is True
     d2 = _approve(gov, equity=9_700)
     assert d2.approved
-    _ok(f"trip at -9% → resume at -3% (hysteresis)")
+    _ok("trip at -9% → manual resume re-enables (no auto-resume)")
 
 
 def test_daily_loss_limit() -> None:

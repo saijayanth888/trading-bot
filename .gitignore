@@ -124,6 +124,13 @@ user_data/config-private.json.tmp
 # Debug screenshots from Playwright sessions — large binaries, not source.
 .tmp_screens/
 *.screenshot.png
+# Operator-local screenshots (typo-spelled folder kept for compat; both forms ignored).
+Screenshots/
+Schreenshots/
+
+# Operator's private review notes — kept out-of-tree by intent. Anything
+# you want preserved across machines goes in docs/ instead.
+private/
 
 # Hermes-generated cron scripts: most are machine-specific and regenerated
 # from the cron registry, but the hand-written wrappers checked in here
