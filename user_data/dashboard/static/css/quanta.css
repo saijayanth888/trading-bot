@@ -5,7 +5,10 @@
    ============================================================ */
 
 /* ---------- type ---------- */
-@import url('https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap');
+/* Google Fonts is now loaded via <link rel="stylesheet"> in the page
+   templates (ops_spa.html / dashboard_spa.html) so it does NOT render-
+   block initial paint. The previous @import here was render-blocking
+   even though templates had preconnect hints. */
 
 :root {
   --sans: 'Geist', 'Inter', system-ui, sans-serif;
