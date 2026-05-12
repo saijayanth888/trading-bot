@@ -3086,3 +3086,98 @@ async def stock_regime():
     if age is not None and age > 86400:
         return _envelope("degraded", data=payload, error=f"SPY data {age}s old")
     return _envelope("ok", data=payload)
+
+
+# --------------------------------------------------------------------------
+# /api/ops/shark_override_health — paper-mode BEAR_VOLATILE override verifier
+# --------------------------------------------------------------------------
+#
+# Reads the JSON status file written by ~/.hermes/scripts/shark_override_verify.sh
+# (cron 45 9 * * 1-5) and surfaces it on the operator dashboard via the
+# SharkOverrideHealthLive card. Verifier file lives at:
+#   stocks/memory/override_verify.json
+# Schema:
+#   stocks/memory/override_verify.schema.json
+#
+# Envelope status:
+#   "ok"       — verifier ran, override is healthy or not expected
+#   "degraded" — verifier ran, 1-2 stalled runs (override expected, no fire)
+#   "down"     — verifier ran, 3+ stalled runs OR file missing/stale > 36h
+#
+# The card colors map: green=healthy, yellow=degraded/stalled<3, red=stalled>=3.
+
+# Two candidate locations the verifier may write to depending on the
+# repo layout (worktree vs main checkout). First match wins.
+_OVERRIDE_VERIFY_PATHS = [
+    Path("/home/saijayanthai/Documents/trading-bot/stocks/memory/override_verify.json"),
+    Path(__file__).resolve().parents[2] / "stocks" / "memory" / "override_verify.json",
+    Path("/freqtrade/stocks/memory/override_verify.json"),
+]
+
+
+def _read_override_verify_file() -> tuple[dict | None, str | None]:
+    """Find and parse the verifier output. Returns (payload, error_str)."""
+    for p in _OVERRIDE_VERIFY_PATHS:
+        try:
+            if p.is_file():
+                return json.loads(p.read_text()), None
+        except Exception as exc:
+            return None, f"read_error at {p}: {exc}"
+    return None, (
+        "override_verify.json not found — verifier cron has not run yet. "
+        "Manually trigger via: bash ~/.hermes/scripts/shark_override_verify.sh"
+    )
+
+
+@router.get("/shark_override_health")
+async def shark_override_health() -> dict[str, Any]:
+    """Surface the latest shark BEAR_VOLATILE paper-mode override verification.
+
+    Returns the raw payload from override_verify.json plus envelope status:
+      - status="ok"       when verifier reports healthy
+      - status="degraded" when verifier reports degraded OR file > 36h old
+      - status="down"     when verifier reports stalled (>=3 consecutive
+                          BEAR-regime runs with candidates but no trade) OR
+                          the file is missing.
+    """
+    payload, err = _read_override_verify_file()
+    if payload is None:
+        return _envelope("down", data=None, error=err)
+
+    # File-age check — verifier runs Mon-Fri at 09:45 ET, so any payload
+    # older than ~36h means the cron stopped firing or weekend gap.
+    checked_at = payload.get("checked_at")
+    age_s: int | None = None
+    if checked_at:
+        try:
+            ts = datetime.fromisoformat(checked_at.replace("Z", "+00:00"))
+            age_s = int((datetime.now(timezone.utc) - ts).total_seconds())
+        except Exception:
+            age_s = None
+
+    verifier_status = (payload.get("status") or "unknown").lower()
+    stalled_runs = int(payload.get("stalled_runs") or 0)
+
+    # Map verifier status → HTTP envelope status
+    if verifier_status == "stalled" or stalled_runs >= 3:
+        env_status = "down"
+        env_error = (
+            f"override stalled — {stalled_runs} consecutive run(s) with "
+            f"candidates but no trades. See HANDOFF.md triage section."
+        )
+    elif verifier_status == "degraded" or stalled_runs >= 1:
+        env_status = "degraded"
+        env_error = f"override degraded — {stalled_runs} stalled run(s)"
+    elif verifier_status == "unknown":
+        env_status = "degraded"
+        env_error = payload.get("reason") or "verifier reported unknown"
+    elif age_s is not None and age_s > 36 * 3600:
+        env_status = "degraded"
+        env_error = f"verifier output {age_s}s old (>36h)"
+    else:
+        env_status = "ok"
+        env_error = None
+
+    enriched = dict(payload)
+    enriched["age_s"] = age_s
+    return _envelope(env_status, data=enriched, error=env_error)

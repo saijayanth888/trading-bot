@@ -148,6 +148,10 @@
     // comment. Shark Briefing card (data-num 13c) is the source of truth
     // for per-symbol stocks sentiment via Shark's analyst pipeline.
     shark_briefing: "/api/ops/shark_briefing",
+    // Shark BEAR_VOLATILE paper-mode override verifier — written by
+    // ~/.hermes/scripts/shark_override_verify.sh after each market_open
+    // run. Surfaces the SharkOverrideHealthLive card under TodayScoreboard.
+    shark_override_health: "/api/ops/shark_override_health",
   };
   const SLOW_ENDPOINTS = {
     ept_champion: { url: "/api/ops/mcp/get_champion_genome", method: "POST", body: {} },
@@ -272,6 +276,99 @@
         stat("Peak", "$" + fmtUSD(peak)),
         stat("Open", totalOpen + " (" + openCrypto + "C + " + wheelOpen + "S)"),
         stat("Closed today", closedToday)
+      )
+    );
+  }
+
+  // ─────────────── SHARK OVERRIDE HEALTH — BEAR_VOLATILE verifier ────────
+  // Surfaces ~/.hermes/scripts/shark_override_verify.sh output via
+  // /api/ops/shark_override_health. Operator-glance: "did the 0.85
+  // confidence override fire today, or has it been stalled for N runs?"
+  //
+  // Color rules (per spec):
+  //   green  — verifier status="healthy"
+  //   yellow — stalled_runs >= 1
+  //   red    — stalled_runs >= 3
+  //
+  // PRE-CONDITION: the override must have been observed firing at least
+  // once on this paper account before the verifier flips to genuine
+  // healthy. Fresh accounts will show "healthy — no candidates" or
+  // "healthy — override never fired yet" until the first BEAR-regime
+  // candidate clears the 0.85 floor. See HANDOFF.md.
+  function SharkOverrideHealthLive({ data }) {
+    const slot = slotState(data, "shark_override_health");
+    const env = envelopeData(slot.env) || {};
+
+    if (slot.phase === "down") {
+      return h(Card, {
+        num: "00b", title: "Shark · BEAR_VOLATILE override health",
+        sub: "endpoint unavailable",
+        right: cardRight(slot.fetchedAt),
+      }, h(EmptyState, { reason: slot.reason, fetchedAt: slot.fetchedAt, period: 10 }));
+    }
+    if (slot.phase === "loading") {
+      return h(Card, {
+        num: "00b", title: "Shark · BEAR_VOLATILE override health",
+        sub: "loading…",
+        right: cardRight(slot.fetchedAt),
+      }, h(LoadingState));
+    }
+
+    const status = String(env.status || "unknown").toLowerCase();
+    const stalled = Number(env.stalled_runs || 0);
+    const regime = env.regime || "—";
+    const evald = Number(env.candidates_evaluated || 0);
+    const passed = Number(env.candidates_passing_override || 0);
+    const trades = Number(env.trades_placed || 0);
+    const lastTrade = env.last_trade_at;
+    const overrideExpected = !!env.override_expected;
+    const overrideApplied = !!env.override_applied;
+
+    // Color mapping per spec
+    let cls, dot, label;
+    if (stalled >= 3 || status === "stalled") {
+      cls = "down"; dot = "down"; label = "STALLED";
+    } else if (stalled >= 1 || status === "degraded") {
+      cls = "warn"; dot = "warn"; label = "DEGRADED";
+    } else if (status === "unknown") {
+      cls = "info"; dot = "info"; label = "UNKNOWN";
+    } else {
+      cls = "up"; dot = "up"; label = "HEALTHY";
+    }
+
+    const stat = (lbl, val, valCls) => h("div", { style: { display: "flex", flexDirection: "column", gap: 2, minWidth: 100 } },
+      h("div", { className: "dim2 mono", style: { fontSize: "var(--t-2xs)", letterSpacing: ".08em", textTransform: "uppercase" } }, lbl),
+      h("div", { className: "num " + (valCls || ""), style: { fontSize: "var(--t-base)", fontFamily: "var(--mono)", fontWeight: 500, fontVariantNumeric: "tabular-nums" } }, val)
+    );
+
+    const reason = env.reason || "—";
+    const checkedAt = env.checked_at;
+
+    return h(Card, {
+      num: "00b", title: "Shark · BEAR_VOLATILE override health",
+      sub: "verifier · cron 09:45 ET · " + (regime || "—"),
+      right: cardRight(slot.fetchedAt,
+        h("span", { className: "pill " + cls, style: { height: 18 } },
+          h("span", { className: "dot " + dot + (label === "HEALTHY" ? "" : " pulse") }),
+          " ", label))
+    },
+      h("div", { style: { display: "flex", flexWrap: "wrap", gap: "var(--s-5)", alignItems: "baseline" } },
+        stat("Regime", regime, regime.indexOf("BEAR") >= 0 ? "warn" : "up"),
+        stat("Override expected", overrideExpected ? "yes" : "no"),
+        stat("Override applied", overrideApplied ? "yes" : "no",
+          overrideApplied ? "up" : (overrideExpected ? "warn" : "")),
+        stat("Candidates", evald),
+        stat("Passed override", passed, passed > 0 ? "up" : ""),
+        stat("Trades placed", trades, trades > 0 ? "up" : ""),
+        stat("Stalled runs", stalled, stalled >= 3 ? "down" : (stalled >= 1 ? "warn" : "up"))
+      ),
+      h("div", {
+        className: "dim mono",
+        style: { fontSize: "var(--t-2xs)", marginTop: "var(--s-3)", lineHeight: 1.4 }
+      },
+        reason,
+        lastTrade ? h("span", null, " · last trade: " + lastTrade) : null,
+        checkedAt ? h("span", null, " · checked " + checkedAt) : null
       )
     );
   }
@@ -2522,6 +2619,11 @@
           // trades done, open positions, drawdown. Mounted ABOVE the hero
           // so it's the first thing the eye lands on (top of the page).
           h(TodayScoreboard, { data }),
+          // SHARK OVERRIDE HEALTH — verifier card for the BEAR_VOLATILE
+          // paper-mode override. Sits directly under the scoreboard so a
+          // single glance tells the operator "override is healthy" or
+          // "override has not fired in N runs — investigate."
+          h(SharkOverrideHealthLive, { data }),
           // HERO
           h(HeroLive, { data, killState }),
           // TRAINING ROW — crypto FreqAI + stocks Shark TFT side-by-side.

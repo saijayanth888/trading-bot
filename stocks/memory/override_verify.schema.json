@@ -1,0 +1,79 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "shark_override_verify status",
+  "description": "Written by ~/.hermes/scripts/shark_override_verify.sh after every shark_market_open run. Read by GET /api/ops/shark_override_health and surfaced on the operator dashboard via the SharkOverrideHealthLive card.",
+  "type": "object",
+  "required": [
+    "date",
+    "regime",
+    "candidates_evaluated",
+    "candidates_passing_override",
+    "trades_placed",
+    "status",
+    "stalled_runs",
+    "checked_at"
+  ],
+  "properties": {
+    "date": {
+      "type": "string",
+      "format": "date",
+      "description": "ISO date the verifier ran (YYYY-MM-DD)."
+    },
+    "regime": {
+      "type": ["string", "null"],
+      "description": "Market regime parsed from the cron output (e.g. BEAR_VOLATILE, BULL_QUIET). Null if no regime line was found."
+    },
+    "override_expected": {
+      "type": "boolean",
+      "description": "True when regime contains BEAR (the paper-mode override only applies in BEAR regimes)."
+    },
+    "override_applied": {
+      "type": "boolean",
+      "description": "True if the cron output contained the 'PAPER MODE: overriding BEAR_*' marker emitted by shark.data.market_regime."
+    },
+    "candidates_evaluated": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Distinct symbols that appeared in candidate decision lines (rejected/EXECUTE/Claude-decided/TFT_GATE/Guardrails)."
+    },
+    "candidates_passing_override": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Distinct symbols that cleared all gates and reached the EXECUTE log line (confidence >= 0.85, R:R floor, TFT gate)."
+    },
+    "trades_placed": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Trades actually sent to Alpaca (Bracket order placed lines), or fallback heuristic of EXECUTE - DRY-RUN."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["healthy", "degraded", "stalled", "unknown"],
+      "description": "healthy: override fired or wasn't expected; degraded: 1-2 stalled runs; stalled: 3+ consecutive runs with override expected but no trade placed; unknown: no cron output yet."
+    },
+    "stalled_runs": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Consecutive runs where regime=BEAR, candidates were evaluated, but zero trades placed. Resets to 0 on a real trade or non-BEAR regime."
+    },
+    "last_trade_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "ISO timestamp of the last shark_market_open run that placed a trade. Null until the override has fired at least once on this paper account (see HANDOFF.md PRE-CONDITION)."
+    },
+    "reason": {
+      "type": "string",
+      "description": "Human-readable summary of why status is healthy/degraded/stalled."
+    },
+    "checked_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO timestamp when this verifier run completed."
+    },
+    "source_file": {
+      "type": ["string", "null"],
+      "description": "Absolute path of the cron output file that was parsed."
+    }
+  },
+  "additionalProperties": false
+}
