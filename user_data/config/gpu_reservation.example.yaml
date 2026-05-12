@@ -1,0 +1,37 @@
+# GPU reservation schedule — heavy GPU consumers MUST yield during these windows.
+#
+# Phase 1: this YAML is the SINGLE SOURCE OF TRUTH for GPU windows. The live
+# copy at ~/.hermes/config/gpu_reservation.yaml is read by ~/.hermes/scripts/gpu_gate.sh
+# on every invocation. Operator can edit the live copy without touching git.
+#
+# Phase 2 will replace this static schedule with a live read from ModelForge's
+# /api/forge/gpu_lease endpoint. For now the trading bot only knows about its
+# own schedule file.
+#
+# Field reference
+# ---------------
+# holder              str   — opaque identifier used by the gate to match
+#                              the caller against the reservation. If a caller's
+#                              --caller flag matches this exactly, the gate
+#                              passes (the holder never blocks itself).
+# description         str   — human-readable summary for `gpu_gate.sh status`.
+# schedule_cron       str   — 5-field cron spec (minute hour dom month dow).
+# tz                  str   — IANA timezone (e.g. America/New_York). The cron
+#                              expression is evaluated in this timezone.
+# duration_hours      float — how long the reservation runs from start time.
+# pre_drain_minutes   int   — how many minutes BEFORE start to begin evicting
+#                              GPU consumers. Pre-drain window is folded into
+#                              the "blocked" range checked by the gate.
+# grace_minutes       int   — how many minutes AFTER end the reservation
+#                              remains active to absorb training overrun.
+#
+# Multiple entries are allowed. The first matching window blocks the caller.
+
+reservations:
+  - holder: modelforge-weekly-lora-training
+    description: Weekly LoRA training for trading agent adapters
+    schedule_cron: "0 14 * * 0"           # Sunday 14:00 local-to-tz
+    tz: America/New_York
+    duration_hours: 4                      # 14:00-18:00 EST window
+    pre_drain_minutes: 5                   # evict models 5 min before training starts
+    grace_minutes: 30                      # extend lease by 30 min if training overruns
