@@ -1,14 +1,10 @@
-"""Strategy package — canonical (sync) Strategy ABC + live-engine async variant.
+"""Strategy ABC and concrete strategies.
 
-The concrete strategies (MeanRevTFT, Wheel, NFI X6, ...) port to the canonical
-synchronous :class:`Strategy` ABC; the live engine consumes the async variant
-:class:`AsyncStrategy`. The two are kept separate so backtest determinism
-(sync, foundation-locked) is not coupled to the live-engine scheduler.
+Wave 2 only ships the abstract :class:`quanta_core.strategy.base.Strategy`.
+Concrete strategies (``mean_rev_tft``, ``wheel_csp``, ``shark_debate``,
+``nfi_x6``) land in their own wave branches.
 """
 
-from __future__ import annotations
-
-from quanta_core.strategy.async_strategy import AsyncStrategy
 from quanta_core.strategy.base import Strategy
 
-__all__ = ["AsyncStrategy", "Strategy"]
+__all__ = ["Strategy"]
