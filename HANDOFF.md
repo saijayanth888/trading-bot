@@ -185,12 +185,10 @@ Bars cleared:
 ## 6. Commits
 
 ```
-4a13a73 feat(agents): 30-second deliberate debate orchestrator + tests
+0bfcfc6 feat(agents): 30s deliberate debate orchestrator (doc 05 rev2)
 ```
 
-(See `git log feat/v4-wave2-agents` after commit completes.)
-
-Single squash commit — clean ~3000-line atomic add.
+Single squash commit — clean 3009-line atomic add (14 files).
 
 Branch is NOT pushed. Up to the operator / integrator to PR.
 
