@@ -569,10 +569,24 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
             )
 
     def bot_loop_start(self, current_time, **kwargs) -> None:
-        """
-        Per-iteration tick: refresh equity, harvest newly-closed trades,
+        """Per-iteration tick: refresh equity, harvest newly-closed trades,
         emit hourly metrics snapshot + daily summary, fire risk alerts.
+
+        Exception policy: this hook absolutely cannot raise — freqtrade
+        treats a raised exception here as a fatal error and the worker
+        loop exits. Any inner block that raises is logged and swallowed.
+        See AUDIT 2026-05-12 Critical #3.
         """
+        try:
+            return self._bot_loop_start_inner(current_time, **kwargs)
+        except Exception as exc:
+            logger.exception(
+                "[strategy] bot_loop_start raised — swallowing to keep "
+                "the worker loop alive: %s", exc,
+            )
+            return None
+
+    def _bot_loop_start_inner(self, current_time, **kwargs) -> None:
         gov = self._risk_governor
         equity = 0.0
         try:
@@ -866,7 +880,27 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         trade_journal row + a duplicate Slack alert. The journal marker
         ``_journal_id_by_trade[pair@rate]`` is the same key the exit-side
         code uses to correlate rows, so reusing it here is consistent.
+
+        Exception policy: any unhandled exception → return False (block
+        the trade). The risk path absolutely must not fail-open. See
+        AUDIT 2026-05-12 Critical #3.
         """
+        try:
+            return self._confirm_trade_entry_inner(
+                pair, order_type, amount, rate, time_in_force,
+                current_time, entry_tag, side, **kwargs,
+            )
+        except Exception as exc:
+            logger.exception(
+                "[strategy] confirm_trade_entry raised on %s @ %s — BLOCKING entry: %s",
+                pair, rate, exc,
+            )
+            return False
+
+    def _confirm_trade_entry_inner(
+        self, pair: str, order_type: str, amount: float, rate: float,
+        time_in_force: str, current_time, entry_tag, side: str, **kwargs,
+    ) -> bool:
         marker_key = f"{pair}@{float(rate):.10g}"
         existing_jid = getattr(self, "_journal_id_by_trade", {}).get(marker_key)
         if existing_jid is not None:
@@ -985,6 +1019,31 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
     # ------------------------------------------------------------------
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        try:
+            return self._populate_indicators_inner(dataframe, metadata)
+        except Exception as exc:
+            # Fail-neutral: every hot-path callback in this strategy must
+            # NEVER kill freqtrade on a transient feature-engineering error.
+            # The default freqtrade behaviour is to halt the bot when a
+            # strategy raises in populate_*; we'd rather log + emit a
+            # frame with do_predict=0 (no entries, no exits) and let the
+            # next candle retry. See AUDIT 2026-05-12 Critical #3.
+            pair = metadata.get("pair", "?") if metadata else "?"
+            logger.exception(
+                "[strategy] populate_indicators raised on %s — emitting "
+                "neutral frame (no entries/exits this candle): %s", pair, exc,
+            )
+            try:
+                dataframe["do_predict"] = 0
+                if "enter_long" not in dataframe.columns:
+                    dataframe["enter_long"] = 0
+                if "exit_long" not in dataframe.columns:
+                    dataframe["exit_long"] = 0
+            except Exception:
+                pass
+            return dataframe
+
+    def _populate_indicators_inner(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         dataframe = self.freqai.start(dataframe, metadata, self)
         # Belt-and-braces: ensure gating columns survive the FreqAI pipeline
         if "regime_label" not in dataframe.columns:
@@ -1268,6 +1327,24 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
                     or (dataframe["meta_position_size"] > 0).any())
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        try:
+            return self._populate_entry_trend_inner(dataframe, metadata)
+        except Exception as exc:
+            # Fail-closed: any exception leaves enter_long=0 so we DO NOT
+            # accidentally open a position based on partially-computed
+            # gates. See AUDIT 2026-05-12 Critical #3.
+            pair = metadata.get("pair", "?") if metadata else "?"
+            logger.exception(
+                "[strategy] populate_entry_trend raised on %s — blocking entries: %s",
+                pair, exc,
+            )
+            try:
+                dataframe["enter_long"] = 0
+            except Exception:
+                pass
+            return dataframe
+
+    def _populate_entry_trend_inner(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         pair = metadata.get("pair", "")
         # Capital-allocation gates (no-op if config has no [capital_allocation]).
         # 1) Pair excluded entirely (weight=0): block all entries; model still
@@ -1404,6 +1481,28 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         return dataframe
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        try:
+            return self._populate_exit_trend_inner(dataframe, metadata)
+        except Exception as exc:
+            # Fail-OPEN on the exit side: if anything raises, we'd rather
+            # let the existing stoploss/take-profit logic handle the
+            # position than block all exits and trap the trader. Leaving
+            # exit_long unset is equivalent to "no exit signal this
+            # candle"; freqtrade's own custom_stoploss + minimal_roi
+            # still own the hard floor.
+            pair = metadata.get("pair", "?") if metadata else "?"
+            logger.exception(
+                "[strategy] populate_exit_trend raised on %s — falling through to stoploss only: %s",
+                pair, exc,
+            )
+            if "exit_long" not in dataframe.columns:
+                try:
+                    dataframe["exit_long"] = 0
+                except Exception:
+                    pass
+            return dataframe
+
+    def _populate_exit_trend_inner(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         base = float(self.exit_threshold.value)
         threshold = self._per_row_threshold(
             dataframe, base, self.REGIME_EXIT_DELTA, sentinel_no_signal=base,
@@ -1461,6 +1560,38 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         return v if v > 0.0 else None
 
     def custom_stake_amount(
+        self, pair: str, current_time, current_rate: float,
+        proposed_stake: float, min_stake: float | None,
+        max_stake: float, leverage: float, entry_tag: str | None,
+        side: str, **kwargs,
+    ) -> float:
+        """Regime + meta-agent + risk-governor sizing pipeline.
+
+        Exception policy: returns ``proposed_stake`` (freqtrade's default
+        size) if anything raises. This is conservative — proposed_stake is
+        already capped by freqtrade's max_open_trades + tradable_balance_ratio,
+        so falling back never grows a position; it just disables our
+        per-trade Kelly/regime adjustments. See AUDIT 2026-05-12 Critical #3.
+        """
+        try:
+            return self._custom_stake_amount_inner(
+                pair, current_time, current_rate, proposed_stake,
+                min_stake, max_stake, leverage, entry_tag, side, **kwargs,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[strategy] custom_stake_amount raised on %s — falling back "
+                "to proposed_stake=%.2f: %s", pair, proposed_stake, exc,
+            )
+            try:
+                fallback = min(proposed_stake, max_stake)
+                if min_stake is not None:
+                    fallback = max(fallback, min_stake)
+                return fallback
+            except Exception:
+                return proposed_stake
+
+    def _custom_stake_amount_inner(
         self, pair: str, current_time, current_rate: float,
         proposed_stake: float, min_stake: float | None,
         max_stake: float, leverage: float, entry_tag: str | None,
@@ -1533,30 +1664,59 @@ class FreqAIMeanRevV1(IStrategy, MonitoringMixin):
         self, pair: str, trade, current_time, current_rate: float,
         current_profit: float, after_fill: bool = False, **kwargs,
     ) -> float:
-        regime, _ = self._current_regime(pair)
-        # In trending_up: trail wider once meaningfully in profit.
-        if regime == "trending_up" and current_profit > self.TRENDING_UP_TRAIL_TRIGGER:
-            return self.TRENDING_UP_TRAIL_DISTANCE
-        return self.stoploss
+        """Regime-aware trailing stop.
+
+        Exception policy: any error falls back to ``self.stoploss`` (the
+        hard 5% floor). NEVER raise — freqtrade interprets exceptions in
+        this hook as "no stop change" but logs them noisily, and the worst
+        case we want is the conservative default, not a stack trace per
+        candle. See AUDIT 2026-05-12 Critical #5 — the hard-5% stoploss
+        always wins as a backstop.
+        """
+        try:
+            regime, _ = self._current_regime(pair)
+            # In trending_up: trail wider once meaningfully in profit.
+            if regime == "trending_up" and current_profit > self.TRENDING_UP_TRAIL_TRIGGER:
+                return self.TRENDING_UP_TRAIL_DISTANCE
+            return self.stoploss
+        except Exception as exc:
+            logger.warning(
+                "[strategy] custom_stoploss raised on %s — using static stoploss=%.4f: %s",
+                pair, self.stoploss, exc,
+            )
+            return self.stoploss
 
     def custom_exit(
         self, pair: str, trade, current_time, current_rate: float,
         current_profit: float, **kwargs,
     ) -> str | None:
-        regime, _ = self._current_regime(pair)
-        # BB-bounce target for the mean-reversion entry path: once price
-        # reverts to the 20-period BB middle, cash out — that's the stated
-        # thesis and holding past it gives up the edge to vanilla noise.
-        if getattr(trade, "enter_tag", None) == "bb_oversold_revert":
-            try:
-                df, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
-                if df is not None and not df.empty and "bb_middle" in df.columns:
-                    bb_mid = float(df.iloc[-1].get("bb_middle", float("nan")))
-                    if np.isfinite(bb_mid) and current_rate >= bb_mid:
-                        return "bb_bounce_target"
-            except Exception:
-                pass
-        # In mean_reverting: take quick profits at +1.5%.
-        if regime == "mean_reverting" and current_profit >= self.MEAN_REV_TAKE_PROFIT:
-            return "regime_mean_rev_tp"
-        return None
+        """Custom exit signals (BB-bounce target, mean-reversion TP).
+
+        Exception policy: any error returns None (no signal). The static
+        stoploss + minimal_roi still own the hard floors so this is the
+        safest fallthrough.
+        """
+        try:
+            regime, _ = self._current_regime(pair)
+            # BB-bounce target for the mean-reversion entry path: once price
+            # reverts to the 20-period BB middle, cash out — that's the stated
+            # thesis and holding past it gives up the edge to vanilla noise.
+            if getattr(trade, "enter_tag", None) == "bb_oversold_revert":
+                try:
+                    df, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+                    if df is not None and not df.empty and "bb_middle" in df.columns:
+                        bb_mid = float(df.iloc[-1].get("bb_middle", float("nan")))
+                        if np.isfinite(bb_mid) and current_rate >= bb_mid:
+                            return "bb_bounce_target"
+                except Exception:
+                    pass
+            # In mean_reverting: take quick profits at +1.5%.
+            if regime == "mean_reverting" and current_profit >= self.MEAN_REV_TAKE_PROFIT:
+                return "regime_mean_rev_tp"
+            return None
+        except Exception as exc:
+            logger.warning(
+                "[strategy] custom_exit raised on %s — no custom exit this candle: %s",
+                pair, exc,
+            )
+            return None
