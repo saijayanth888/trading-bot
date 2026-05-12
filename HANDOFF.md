@@ -1,169 +1,175 @@
-# HANDOFF — fix/frontend-tier-d-agent-flow
+# HANDOFF — fix/frontend-tier-e-agent-logs
 
-**Cache-bust version:** `20260512-tier-d-agent-flow`
+**Branch:** `fix/frontend-tier-e-agent-logs` (off `fix/frontend-tier-d-agent-flow`)
+**Cache-bust version:** `20260512-tier-e-agent-logs`
 
 ## What you built
 
-A new `AgentFlow` strip on the ops dashboard, sitting directly above the existing LLM Activity list. It renders 5–6 horizontally-arranged boxes for the canonical trading-bot pipeline (`regime_tagger → indicator_selector? → bull_debater → bear_debater → arbiter → reflector`), each showing the live count, success/fail tally, avg + p95 latency, last-fired age, top model, and one-line gist of the most recent response for that role. Box borders encode freshness via existing CSS tokens (`up-line` < 5 min, `warn-line` 5–60 min, `line-2` > 60 min / empty, `down-line` when the latest call failed — red wins regardless of freshness). Clicking a box dispatches a `quanta:agent-flow-pick` CustomEvent that the unchanged `LLMCallsLive` component listens for, scrolling its table to the newest matching row and pulsing it for 800 ms via the new `af-pulse-row` class. No new poll, no new endpoint — the strip piggybacks on the existing 10 s `useOpsData` tick by consuming a new `summary.by_role_detail` block added to `/api/ops/llm_calls`.
+A new `AgentLogsDrawer` component that replaces the Tier-D scroll-and-pulse behavior when an operator clicks an agent box in the AgentFlow strip. The drawer slides in from the right (480 px on desktop, 90 vw on mobile), renders the last 50 calls for that one canonical role with FULL prompt + response, and adds filter chips (`all / success / failures / slow`) + a 200 ms debounced search across prompt + response. Each entry collapses prompt + response to a 120-char snippet by default — click the caret or snippet to expand to a scrollable `<pre>` block (max-height 400 px); copy buttons on each pulse green for 600 ms on success. Mounts via `ReactDOM.createPortal` to `document.body` so the AgentFlow strip layout never reflows. Backdrop click + ESC close the drawer and return focus to the originating box. Each AgentFlow box also gains one new inline row at the bottom — `last: "..."` — showing 60 chars of the most recent response, render-skipped entirely when the role has no calls today. The Tier-D scroll-and-pulse behavior is preserved as an opt-out fallback via a new localStorage flag. No new poll loop; the drawer fetches `/api/ops/llm_calls?role=ROLE&include_text=1&limit=50` exactly once per open.
 
 ## ASCII mockup
 
 ```
-+-------------------------------------------------------------------------------------------------+
-| 21a  Agent flow                                          3 of 5 roles active * 47 calls in 24h  |
-+-------------------------------------------------------------------------------------------------+
-| +-------------+ 2.4s   +-------------+ 1.8s   +-------------+ 3.1s   +-------------+   +------+ |
-| |regime_tagger|--->--->|bull_debater |--->--->|bear_debater |--->--->|   arbiter   |-->|refle.| |
-| | -           |        | hermes3:8b  |        | hermes3:8b  |        | hermes3:8b  |   |   -  | |
-| | no calls    |        | * 2m ago    |        | o 4m ago    |        | * 1m ago    |   | no.. | |
-| | -           |        | 18 v * 0 x  |        | 17 v * 1 x  |        | 12 v * 0 x  |   |   -  | |
-| | -           |        | avg 1.8s    |        | avg 2.3s    |        | avg 3.1s    |   |   -  | |
-| | no calls    |        | p95 4.2s    |        | p95 6.1s    |        | p95 7.4s    |   | no.. | |
-| +-------------+        +-------------+        +-------------+        +-------------+   +------+ |
-|  (dim border)            (green)               (green)                (green)            (dim)  |
-+-------------------------------------------------------------------------------------------------+
-+-------------------------------------------------------------------------------------------------+
-| 21   LLM activity * last 24h                                       (unchanged - existing list)  |
-| ...                                                                                             |
-+-------------------------------------------------------------------------------------------------+
++------------------------------ AGENT LOGS - bull_debater . hermes3:8b ----[x]+
+|                                                                             |
+|  today: 12 v . 1 x . avg 5.1s . p95 8.3s . 47 tokens/call avg              |
+|                                                                             |
+|  [ all (13) ]  [ success (12) ]  [ failures (1) ]  [ slow (2) ]            |
+|  [ search prompt + response...                                       ]     |
+|                                                                             |
+|  +-------------------------------------------------------------------+      |
+|  | 14:32:11  hermes3:8b  v  5.2s  340 tok                            |     |
+|  | > prompt: "Given regime=trending_up and BTC..."          [copy]   |     |
+|  | > response: "bull lean, confidence 0.72..."              [copy]   |     |
+|  +-------------------------------------------------------------------+      |
+|  | 14:21:08  hermes3:8b  v  4.8s  295 tok                            |     |
+|  | > prompt: "..."                                          [copy]   |     |
+|  | > response: "..."                                        [copy]   |     |
+|  +-------------------------------------------------------------------+      |
+|  | 13:09:47  hermes3:8b  x  0.6s  0 tok      [SLOW]                  |     |
+|  | > prompt: "..."                                          [copy]   |     |
+|  | > response: "(empty - request timed out)"                [copy]   |     |
+|  +-------------------------------------------------------------------+      |
+|                                                                             |
+|  [ show 30 more (27 hidden) ]                                              |
+|                                                                             |
++-----------------------------------------------------------------------------+
+
+Backdrop dim layer (rgba 0,0,0,.35) behind drawer; click or press ESC to close.
 ```
 
-Border colors at a glance:
+Each AgentFlow box also gains a fourth row below the gist:
 
-- **green** border (`var(--up-line)`) — last call within 5 minutes
-- **amber** border (`var(--warn-line)`) — 5–60 minutes since last call
-- **dim** border (`var(--line-2)`) — > 60 minutes or zero calls
-- **red** border (`var(--down-line)`) — last call failed (wins regardless of freshness)
-- **empty** background (`var(--bg-rail)`) — zero calls in 24h window
+```
++-----------------+
+| bull_debater    |
+| hermes3:8b      |
+| * 2m ago        |
+| 18 v . 0 x      |
+| avg 1.8s        |
+| AAPL presents.. |  <- existing .af-gist
+| last: "trending |  <- NEW Tier-E .af-last (11 px mono, render-skipped if empty)
+|  _up, conf 0.74"|
++-----------------+
+```
 
 ## Files changed
 
 | File | Lines | Purpose |
 |---|---|---|
-| `user_data/dashboard/ops_routes.py` | +118 / -4 | `_canonical_role()` + `by_role_detail` in `_summarise_llm_window()` |
-| `user_data/dashboard/static/css/quanta.css` | +135 / -0 | `/* AgentFlow */` section + `@keyframes pulse-row` |
-| `user_data/dashboard/static/js/ops_spa.js` | +255 / -0 | `AgentFlow` component, helpers, pick-event listener in `LLMCallsLive`, integration |
-| `user_data/dashboard/templates/ops_spa.html` | +2 / -2 | Cache-bust `quanta.css` + `ops_spa.js` to `20260512-tier-d-agent-flow` |
+| `user_data/dashboard/ops_routes.py` | +26 / -0 | `?role=` query filter + `tokens_avg` + `last_response_gist` in `by_role_detail` |
+| `user_data/dashboard/static/css/quanta.css` | +285 / -0 | `.ald-*` drawer family + `.af-box .af-last` inline row |
+| `user_data/dashboard/static/js/ops_spa.js` | +438 / -9 | `AgentLogsDrawer` + `_AldEntry` + helpers + `AgentFlowBox` ref/last-line + dispatch event + mount |
+| `user_data/dashboard/templates/ops_spa.html` | +2 / -2 | Cache-bust to `20260512-tier-e-agent-logs` |
 
-Total: **510 insertions, 6 deletions** across 4 files.
+Total: **751 insertions, 11 deletions** across 4 files, 5 commits.
 
 ## Endpoint extension — before / after
 
-The existing `/api/ops/llm_calls` payload is unchanged in shape EXCEPT for one new key inside `data.summary`:
+The `/api/ops/llm_calls` endpoint gained ONE new query parameter and TWO new keys in the existing `summary.by_role_detail` shape. All previously-shipped fields are unchanged.
 
-**Before:**
+### Query parameters — before
+
+```
+GET /api/ops/llm_calls?limit=50&agent=&since=&q=&include_text=0
+                     &model=&min_latency=&max_latency=
+```
+
+### Query parameters — after (one new key)
+
+```
+GET /api/ops/llm_calls?limit=50&agent=&since=&q=&include_text=0
+                     &model=&min_latency=&max_latency=
+                     &role=bull_debater          <-- NEW
+```
+
+When `role` is set, only records whose raw `agent` field maps to that canonical role (via `_canonical_role()`) are returned. Substring filter on `agent` is orthogonal — operator can still pass either.
+
+The drawer always opens with `?role={role}&include_text=1&limit=50` so the prompt + response are present in each row.
+
+### `summary.by_role_detail[role]` shape — before
 
 ```json
 {
-  "status": "ok",
-  "data": {
-    "calls": [...],
-    "summary": {
-      "total_calls": 47,
-      "avg_latency_s": 2.4,
-      "p95_latency_s": 5.1,
-      "by_agent": {"analyst_bull": 18, "analyst_bear": 17, "...": "..."},
-      "by_model": {"hermes3:8b": 47},
-      "by_tier": {"fast": 0, "deep": 47},
-      "ollama_pct": 100.0,
-      "success_pct": 100.0
-    }
-  }
+  "count": 18, "success": 18, "fail": 0,
+  "avg_latency_s": 1.8, "p95_latency_s": 4.2,
+  "last_ts": "...", "last_success": true,
+  "last_gist": "...", "last_agent": "analyst_bull",
+  "model": "hermes3:8b",
+  "raw_agents": {"analyst_bull": 12, "debate.bull.r1": 6}
 }
 ```
 
-**After (new key shown):**
+### `summary.by_role_detail[role]` shape — after (two new keys)
 
 ```json
 {
-  "status": "ok",
-  "data": {
-    "calls": ["..."],
-    "summary": {
-      "total_calls": 47, "avg_latency_s": 2.4, "...": "...",
-      "by_role_detail": {
-        "bull_debater": {
-          "count": 18, "success": 18, "fail": 0,
-          "avg_latency_s": 1.8, "p95_latency_s": 4.2,
-          "last_ts": "2026-05-12T14:45:18.105182+00:00",
-          "last_success": true,
-          "last_gist": "AAPL presents an attractive high-reward opportunity with strong upside potential...",
-          "last_agent": "analyst_bull",
-          "model": "hermes3:8b",
-          "raw_agents": {"analyst_bull": 12, "debate.bull.r1": 6}
-        },
-        "bear_debater": {"...": "..."},
-        "arbiter":      {"...": "..."}
-      }
-    }
-  }
+  "count": 18, "success": 18, "fail": 0,
+  "avg_latency_s": 1.8, "p95_latency_s": 4.2,
+  "tokens_avg": 295.5,                    // NEW: mean completion_tokens
+  "last_ts": "...", "last_success": true,
+  "last_gist": "...",                      // unchanged
+  "last_response_gist": "...",             // NEW: same value, drawer-spec name
+  "last_agent": "analyst_bull",
+  "model": "hermes3:8b",
+  "raw_agents": {"analyst_bull": 12, "debate.bull.r1": 6}
 }
 ```
 
-Raw-agent → canonical-role mapping (in `ops_routes.py`):
-
-| Canonical role | Mapped raw agents |
-|---|---|
-| `regime_tagger` | `regime_tagger`, `trading-regime-tagger` |
-| `indicator_selector` | `indicator_selector` |
-| `bull_debater` | `analyst_bull`, `debate.bull.*` |
-| `bear_debater` | `analyst_bear`, `debate.bear.*` |
-| `arbiter` | `decision_arbiter`, `debate.arbiter`, `combined_analyst`, `risk_debate.judge`, `trade_reviewer` |
-| `reflector` | `outcome_resolver`, `reflector` |
-
-`risk_debate.aggressive`/`.conservative`/`.neutral` deliberately do NOT map to any flow role — they're parallel personalities, not pipeline stages. They still appear in the unchanged LLM activity list below.
+`last_gist` is kept as a duplicate so the Tier-D AgentFlow strip's existing read path doesn't break; `last_response_gist` is the Tier-E spec name and is what the new inline preview line reads (with a fallback to `last_gist`).
 
 ## Commit SHAs
 
 | SHA | Subject |
 |---|---|
-| `6c58006` | ops: extend /api/ops/llm_calls summary with by_role_detail |
-| `10837fc` | css: add AgentFlow strip rules + pulse-row keyframe |
-| `83ed9f9` | ops_spa: add AgentFlow component + pulse-row hook in LLMCallsLive |
-| `a49ec98` | ops_spa: mount AgentFlow above LLM activity + bump cache-bust |
+| `6528a7f` | ops: add ?role= filter + tokens_avg to /api/ops/llm_calls (Tier-E) |
+| `74c90a5` | css: AgentLogsDrawer + inline last-preview rules (Tier-E) |
+| `6f4fbfd` | ops_spa: add AgentLogsDrawer component (Tier-E) |
+| `5d11c93` | ops_spa: wire AgentFlow box click to AgentLogsDrawer + inline last-line |
+| `77bd781` | templates: cache-bust quanta.css + ops_spa.js to tier-e-agent-logs |
 
-Branch: `fix/frontend-tier-d-agent-flow` — **NOT pushed**. Local worktree at `.claude/worktrees/agent-a97b2db35e5b9e9b1/`.
+Branch is **NOT pushed**.
 
-## How to disable in one console line
+## Two opt-outs
 
-```js
-localStorage.setItem("quanta.agent_flow", "0"); location.reload();
-```
+Both opt-outs survive page reloads. Re-enable by `removeItem` then `location.reload()`.
 
-The strip disappears entirely (component returns `null`); the LLM Activity list below renders identically. To re-enable: `localStorage.removeItem("quanta.agent_flow"); location.reload();`.
+| Flag | Effect |
+|---|---|
+| `localStorage.setItem("quanta.agent_flow", "0")` | **Inherited from Tier D.** Hides the entire AgentFlow strip — the LLM Activity card below renders identically to pre-Tier-D. The inline "last:" preview line goes away with the strip; the drawer is unreachable. |
+| `localStorage.setItem("quanta.agent_logs_drawer", "0")` | **New in Tier E.** Disables the drawer but keeps the strip and the inline preview line. Clicking an agent box falls back to the Tier-D scroll-and-pulse behavior on the LLM Activity list below. |
 
 ## Known limits + future enhancements
 
 **Known limits:**
 
-1. **`regime_tagger` always shows "no calls today"** in the current bot configuration. The agent doesn't exist in the production codepath yet — only in `WeeklyTrainingLive` planning copy and an unrelated test file. The placeholder box is correct behavior per spec (operators see which stage isn't firing), but until the agent goes live the leftmost box will stay dim.
-2. **`indicator_selector` is omitted entirely** when it has zero calls (also currently the case). This is per the spec's edge-case rule — when it goes live and starts logging, the strip will gain a sixth box automatically.
-3. **Hop-latency chip between boxes** uses the destination role's avg latency as a proxy ("how long does the next stage take") — not literal hop time. The ledger doesn't currently log a "previous-call → this-call" delta, so a true inter-stage hop would need a new field (e.g. `decision_id` shared across the bull→bear→arbiter chain for a single trade).
-4. **Strip re-renders every 30 s** for age-label freshness via a local `setInterval`. This is a NO-OP state tick (no fetch, no DOM thrash on stable data), but it does add one extra render every 30 s when the strip is on screen.
-5. **Last-gist on stripped (metadata-only) payloads:** the backend computes `last_gist` from the FULL `window_24h` records (with `response_text` intact) — but if `SHARK_LLM_LOG_FULL_TEXT=0` was set when the call was logged, `response_text` is absent and `last_gist` falls back to `"—"`. Same constraint that already affects the modal.
-6. **Single role with 50+ calls:** the box renders aggregates only (count, avg, p95, last) — no per-call list. Full list lives in the LLM Activity card below, per spec.
+1. **No live tailing.** The drawer fetches once on open. If a new call lands while the drawer is open, the operator has to close + re-open (or click a different role then back) to see it. Adding a small EventSource / SSE tail is feasible but explicitly out of scope for this tier.
+2. **Search has no in-text highlight.** Matches narrow the rows but matched text inside expanded `<pre>` blocks is not visually highlighted. Highlighting would require DOM string surgery on the prompt/response; out of scope here.
+3. **Records written before `SHARK_LLM_LOG_FULL_TEXT=1` have no prompt/response.** The entry still renders (timestamp + model + status + latency + tokens) with a one-line note: `no prompt/response captured (SHARK_LLM_LOG_FULL_TEXT was off)`. Same constraint that already affects the LLM Activity modal.
+4. **Aggregate row reads from `by_role_detail`** (which uses the 24h window — same source the strip already reads). The 50 calls listed in the body may be a SUBSET of those 24h aggregates if a role fires more than 50 times per day; counts displayed in filter chips are computed only over the loaded 50.
+5. **Pagination is one-direction.** `show 30 more` appends; there is no "show fewer". Operator can close + reopen to reset.
+6. **Drawer always re-fetches on different role,** even if the new role was loaded earlier in the session. No client-side cache — keeps the implementation small and the data fresh. Trivial to add a `Map<role, calls>` cache later.
 
 **Future enhancements:**
 
-1. **Real hop latency** — add a `decision_id` to ledger records so we can compute the actual gap between bull → bear → arbiter calls for a single trade.
-2. **Per-role sparkline** — a 12-bar histogram of latency over the last hour, mounted inside each box at the bottom edge.
-3. **Click-to-pin** — Shift-click a box to filter the LLM activity list below to just that role, rather than only scrolling.
-4. **Strip auto-hides** when all six roles show "no calls today" so the operator isn't staring at six empty boxes during off-hours.
-5. **Failure-pulse on box** — when a box flips to `is-fail` between polls, briefly flash the border red (single 200 ms keyframe).
-6. **Per-role token throughput** — a small `~N tok/s` chip in the corner so operators see model utilization, not just latency.
+1. **Live tailing while open** — open an EventSource on `/api/ops/llm_calls_stream?role=…` (would need a new backend endpoint), prepend new rows as they arrive.
+2. **In-text search highlight** — wrap matches in `<mark>` inside expanded `<pre>` blocks.
+3. **Export to clipboard** — "copy all visible" button that dumps the filtered set as JSONL.
+4. **Per-call jump** — clicking a row in the drawer opens the existing LLMCallModal for that timestamp.
+5. **Sticky aggregate row** — pin the today: line at the top while scrolling the body.
+6. **Keyboard nav** — `j`/`k` to move between entries, `Enter` to expand both prompt + response of the focused entry.
 
 ## Verification checklist
 
-- [x] Strip renders ABOVE the LLM Activity list
-- [x] LLM Activity list renders identically to before in every code path (only addition: `data-llm-ts` + `data-llm-agent` attributes on each row, used by the strip's click handler)
-- [x] No new fetch URLs (strip + list share `/api/ops/llm_calls`)
-- [x] Clean Python compile (`python3 -m py_compile ops_routes.py`)
-- [x] Clean JS parse (`node --check ops_spa.js`)
+- [x] Branched from Tier D's tip; Tier-D commits present (`git log --oneline -10`)
+- [x] Python compiles (`python3 -m py_compile ops_routes.py`)
+- [x] JS parses (`node --check ops_spa.js`)
 - [x] Cache-bust bumped on both CSS and JS
-- [x] Click on a box dispatches `quanta:agent-flow-pick`; listener scrolls + pulses
-- [x] Opt-out flag honored (`localStorage.quanta.agent_flow === "0"` returns `null`)
-- [ ] **Operator-side:** hard refresh `http://localhost:8081/ops`, confirm strip appears, click each role, confirm Network tab shows no extra requests at rest over 30 s before vs after
+- [x] No new fetch URLs (drawer fetches `/api/ops/llm_calls` — same endpoint, new `role=` param)
+- [x] Tier-D behavior preserved when `quanta.agent_logs_drawer === "0"`
+- [x] One atomic commit per concern (5 commits)
+- [ ] **Operator-side:** hard refresh `http://localhost:8081/ops`, click each role, walk the 10-step verification list from the task spec
 
 ## Cache-bust version
 
-`?v=20260512-tier-d-agent-flow` on both `quanta.css` and `ops_spa.js` in `templates/ops_spa.html`.
+`?v=20260512-tier-e-agent-logs` on both `quanta.css` and `ops_spa.js` in `templates/ops_spa.html`.
