@@ -842,6 +842,16 @@ table.t .row-strike td { color: var(--fg-3); }
 .blocker-banner-detail .bb-row .bb-sym { color: var(--fg-1); }
 .blocker-banner-detail .bb-row .bb-cause { color: var(--warn); }
 
+/* Bonus #1 — Row flash on new fill.
+   Applied to <tr> in PositionsLive when a row's synthetic trade key was
+   not present on the previous render. 200ms one-shot, pure CSS, no JS
+   animation library. Detection happens in ops_spa.js by diffing
+   row-key sets between renders. */
+@keyframes flash-buy  { 0% { background-color: rgba(74,246,195,0.18); } 100% { background-color: transparent; } }
+@keyframes flash-sell { 0% { background-color: rgba(255,67,61,0.18);  } 100% { background-color: transparent; } }
+table.t tbody tr.flash-buy  { animation: flash-buy 200ms cubic-bezier(0.2, 0, 0, 1) 1; }
+table.t tbody tr.flash-sell { animation: flash-sell 200ms cubic-bezier(0.2, 0, 0, 1) 1; }
+
 /* Move #9 — Regime-aware page chrome.
    The topbar bottom border (2px) tints with the current BTC regime:
      trending_up      → --up

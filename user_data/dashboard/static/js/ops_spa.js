@@ -1827,10 +1827,33 @@
   }
 
   // ─────────────── POSITIONS — live trades + wheel ───────────────
+  // Bonus #1 · row-flash on new fill. We detect "new" by comparing each
+  // row's synthetic trade key against the previous render's set; rows that
+  // weren't there before get a one-shot 200ms CSS animation class
+  // (flash-buy or flash-sell). Pure CSS, no animation lib. The first-ever
+  // render seeds the set, so a hard-refresh does NOT flash every existing
+  // row (operator was clear: flash on NEW fills only).
+  function tradeRowKey(t) {
+    return [t.label, t.kind, t.subkind, t.opened_at, t.entry].filter(Boolean).join("|");
+  }
   function PositionsLive({ data }) {
     const slot = slotState(data, "live_trades");
     const env = envelopeData(slot.env) || {};
     const trades = env.trades || [];
+
+    const prevKeysRef = useRef(null);   // null = first render; seed on next paint
+    const newKeys = useMemo(() => {
+      const cur = new Set(trades.map(tradeRowKey));
+      if (prevKeysRef.current === null) {
+        // first render → no flash, just seed
+        prevKeysRef.current = cur;
+        return new Set();
+      }
+      const fresh = new Set();
+      cur.forEach(k => { if (!prevKeysRef.current.has(k)) fresh.add(k); });
+      prevKeysRef.current = cur;
+      return fresh;
+    }, [trades]);
 
     if (slot.phase === "down") {
       return h(Card, {
@@ -1858,17 +1881,23 @@
         h("tbody", null,
           trades.length === 0
             ? h("tr", null, h("td", { colSpan: 8, className: "dim", style: { fontSize: "var(--t-xs)", padding: "var(--s-3)" } }, "no open positions"))
-            : trades.map((t, i) => h("tr", { key: i },
-                h("td", null, h("strong", { className: "mono" }, t.label)),
-                h("td", { className: "dim" }, t.kind === "crypto" ? "Coinbase" : t.kind === "wheel" ? "Alpaca" : t.kind),
-                h("td", { className: "mono " + ((t.subkind || "").includes("short") ? "down" : "up") }, (t.subkind || "—").toUpperCase()),
-                h("td", { className: "num", style: { textAlign: "right" } }, t.qty != null ? t.qty : "—"),
-                h("td", { className: "num", style: { textAlign: "right" } }, t.entry != null ? fmtUSD(t.entry, t.entry < 10 ? 4 : 2) : "—"),
-                h("td", { className: "num", style: { textAlign: "right" } }, t.current != null ? fmtUSD(t.current, t.current < 10 ? 4 : 2) : "—"),
-                h("td", { className: "num " + ((t.pnl_pct || 0) >= 0 ? "up" : "down"), style: { textAlign: "right" } },
-                  t.pnl_pct != null ? fmtPct(t.pnl_pct) : "—"),
-                h("td", { className: "dim", style: { fontSize: "var(--t-xs)" } }, t.extra || "")
-              ))
+            : trades.map((t, i) => {
+                const key = tradeRowKey(t);
+                const isShort = (t.subkind || "").includes("short");
+                const isNew = newKeys.has(key);
+                const flashCls = isNew ? (isShort ? "flash-sell" : "flash-buy") : "";
+                return h("tr", { key: key || i, className: flashCls },
+                  h("td", null, h("strong", { className: "mono" }, t.label)),
+                  h("td", { className: "dim" }, t.kind === "crypto" ? "Coinbase" : t.kind === "wheel" ? "Alpaca" : t.kind),
+                  h("td", { className: "mono " + (isShort ? "down" : "up") }, (t.subkind || "—").toUpperCase()),
+                  h("td", { className: "num", style: { textAlign: "right" } }, t.qty != null ? t.qty : "—"),
+                  h("td", { className: "num", style: { textAlign: "right" } }, t.entry != null ? fmtUSD(t.entry, t.entry < 10 ? 4 : 2) : "—"),
+                  h("td", { className: "num", style: { textAlign: "right" } }, t.current != null ? fmtUSD(t.current, t.current < 10 ? 4 : 2) : "—"),
+                  h("td", { className: "num " + ((t.pnl_pct || 0) >= 0 ? "up" : "down"), style: { textAlign: "right" } },
+                    t.pnl_pct != null ? fmtPct(t.pnl_pct) : "—"),
+                  h("td", { className: "dim", style: { fontSize: "var(--t-xs)" } }, t.extra || "")
+                );
+              })
         )
       )
     );
