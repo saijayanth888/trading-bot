@@ -187,6 +187,14 @@
     },
     "logfile": "user_data/logs/freqtrade.log",
     "db_url": "__OVERRIDDEN_BY__FREQTRADE__DB_URL__",
+    "strategy_overrides": {
+        "_doc": "OPTIONAL strategy-level overrides. Default behaviour is unchanged when this block is absent or fields are missing. tft_blind_fallback: when TFT prediction columns (up/down) are missing \u2014 either freqai cold-init (5-10 min after restart) or a quarantined pair (stub model.zip / missing artifact) \u2014 the strategy normally returns a no-signal dataframe (safe, but the pair stays dark until next successful retrain). Setting enabled=true makes the strategy fall through to a pure BollingerRSI mean-reversion entry path at degraded sizing (position_size_multiplier). ALL other safety gates (regime_confidence, capital_allocation, drawdown, risk_governor) still apply. Operator must opt in by flipping enabled to true.",
+        "tft_blind_fallback": {
+            "enabled": false,
+            "position_size_multiplier": 0.5,
+            "log_per_pair_once": true
+        }
+    },
     "regime_gating": {
         "_doc": "Per-regime tuning. entry_delta values are added to entry_threshold; exit_delta values are added to exit_threshold. null means 'hard-block long entries in this regime'. Override at runtime with FREQTRADE__REGIME_GATING__<KEY> env vars. AGGRESSIVE first-30-day stance for $1k/mo target \u2014 risk_management floor (8% DD, 3% daily, 5-loss breaker, Kelly 0.5) is unchanged.",
         "entry_delta": {
