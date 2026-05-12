@@ -18,6 +18,8 @@ WOULD have had if the operator hadn't migrated to local Ollama. Update
 
 from __future__ import annotations
 
+import errno
+import fcntl
 import json
 import logging
 import os
@@ -28,7 +30,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from shark.llm.redaction import redact, redact_messages
+
 logger = logging.getLogger(__name__)
+
+
+def _full_text_enabled() -> bool:
+    """`SHARK_LLM_LOG_FULL_TEXT=1` opts in to persisting prompt/response text.
+
+    Read on every call (not cached) so tests + the operator can toggle the
+    flag at runtime without re-importing.
+    """
+    return os.environ.get("SHARK_LLM_LOG_FULL_TEXT", "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
 # Counterfactual pricing — what the call WOULD have cost on Sonnet 4.6.
 SONNET_PRICING_USD_PER_M = {"input": 3.0, "output": 15.0}
@@ -59,6 +74,15 @@ class LLMCallRecord:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    # Optional full-text payload (only persisted when SHARK_LLM_LOG_FULL_TEXT=1)
+    # — all fields default to None so the in-memory ring stays compact for the
+    # 99% of consumers (dashboard /api/ops/llm-stats) that only need metadata.
+    prompt: str | None = None
+    system_message: str | None = None
+    response_text: str | None = None
+    messages: list[dict] | None = None
+    redacted_count: int | None = None
 
     @property
     def total_tokens(self) -> int:
@@ -91,6 +115,14 @@ class LLMTracker:
         completion_tokens: int = 0,
         tier: str = "deep",
         role: str = "default",
+        *,
+        # Optional full-text payload — only persisted when
+        # SHARK_LLM_LOG_FULL_TEXT=1. Callers pass these unconditionally;
+        # the flag check happens inside so caller code stays uniform.
+        system_message: str | None = None,
+        user_message: str | None = None,
+        response_text: str | None = None,
+        messages: list[dict] | None = None,
     ) -> LLMCallRecord:
         rec = LLMCallRecord(
             agent=agent,
@@ -102,6 +134,27 @@ class LLMTracker:
             prompt_tokens=int(prompt_tokens),
             completion_tokens=int(completion_tokens),
         )
+
+        # Full-text fields are gated AND redacted before they touch the
+        # record so the in-memory ring also never holds raw secrets.
+        if _full_text_enabled():
+            total_redactions = 0
+
+            if system_message is not None:
+                rec.system_message, n = redact(system_message)
+                total_redactions += n
+            if user_message is not None:
+                rec.prompt, n = redact(user_message)
+                total_redactions += n
+            if response_text is not None:
+                rec.response_text, n = redact(response_text)
+                total_redactions += n
+            if messages is not None:
+                rec.messages, n = redact_messages(messages)
+                total_redactions += n
+
+            rec.redacted_count = total_redactions
+
         with _LOCK:
             self.calls.append(rec)
         self._append_jsonl(rec)
@@ -114,12 +167,58 @@ class LLMTracker:
         return rec
 
     def _append_jsonl(self, rec: LLMCallRecord) -> None:
+        """Append a single record as one JSON line.
+
+        Concurrency model
+        -----------------
+        Multiple shark crons can be writing this file at the same time
+        (pre-market + midday + sentiment refresh overlap). We:
+
+          1. Build the full JSON payload + trailing newline in memory.
+          2. Hold an fcntl LOCK_EX on the open file descriptor for the
+             write — this serialises writers within and across processes
+             so two records can't interleave.
+          3. Seek to end (O_APPEND would also work; the explicit seek is
+             belt-and-braces in case the OS doesn't honour O_APPEND
+             atomically for >PIPE_BUF writes).
+          4. fsync so a crash mid-cron doesn't leave us with kernel-
+             buffered-but-not-on-disk records on the next read.
+
+        Falling back to disabled on OSError keeps the trading loop alive
+        if the disk fills up — the in-memory ring continues to work.
+        """
         if self._log_disabled:
             return
+        # asdict serialises nested dataclasses + dicts fine; None-valued
+        # optional fields are kept so the schema stays stable (consumers
+        # can rely on key presence).
+        payload = json.dumps(asdict(rec), default=str) + "\n"
         try:
             _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with _LOG_PATH.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(asdict(rec), default=str) + "\n")
+            fd = os.open(
+                str(_LOG_PATH),
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+                0o644,
+            )
+            try:
+                # Block until we own the file. fcntl flock is advisory
+                # but every writer in this codebase routes through this
+                # function so the advisory contract holds.
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                try:
+                    os.lseek(fd, 0, os.SEEK_END)
+                    data = payload.encode("utf-8")
+                    written = 0
+                    while written < len(data):
+                        n = os.write(fd, data[written:])
+                        if n <= 0:
+                            raise OSError(errno.EIO, "short write to llm-calls.jsonl")
+                        written += n
+                    os.fsync(fd)
+                finally:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
         except OSError as exc:  # pragma: no cover
             logger.warning("LLM tracker JSONL write failed: %s — disabling further writes", exc)
             self._log_disabled = True
@@ -183,6 +282,14 @@ def read_log_window(
                     prompt_tokens=int(obj.get("prompt_tokens") or 0),
                     completion_tokens=int(obj.get("completion_tokens") or 0),
                     timestamp=ts_str,
+                    # Optional full-text fields — only present in lines
+                    # written while SHARK_LLM_LOG_FULL_TEXT was set. Older
+                    # lines simply leave these as None.
+                    prompt=obj.get("prompt"),
+                    system_message=obj.get("system_message"),
+                    response_text=obj.get("response_text"),
+                    messages=obj.get("messages"),
+                    redacted_count=obj.get("redacted_count"),
                 ))
     except OSError:
         return []
