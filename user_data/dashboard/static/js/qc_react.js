@@ -1113,7 +1113,7 @@
             className: "mono",
             style: { fontSize: "var(--t-2xs)", color: "var(--fg-3)", marginTop: 2 },
           },
-          "local · 192.168.1.49:8081"
+          "local · " + (typeof window !== "undefined" && window.location ? window.location.host : "")
         )
       )
     );
