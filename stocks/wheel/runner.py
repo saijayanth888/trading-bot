@@ -295,6 +295,15 @@ def _try_sell_csp(
         entry_credit=limit_price * 100,  # USD
         opened_at=now_iso(),
     ))
+    # Claim ownership (Shark/Wheel isolation, Fix 3). Both the OCC ticker
+    # and the underlying symbol — covers the short-put leg now, and the
+    # underlying-share leg if assignment happens. Idempotent.
+    try:
+        from shared.subsystem_ownership import claim
+        claim("wheel", best.symbol)
+        claim("wheel", sym)
+    except Exception as exc:
+        logger.warning("[wheel] ownership claim failed for %s: %s", sym, exc)
     summary["actions"].append({
         "underlying": sym,
         "action": "sell_to_open_put",
@@ -393,6 +402,14 @@ def _check_one_assignment(
             source="wheel_assignment",
         ))
         update_position(pos.contract_symbol, status="assigned")
+        # Re-claim ownership of the underlying explicitly (Fix 3). The
+        # CSP open already claimed it, but if a Wheel install pre-dates
+        # that wiring this catches up. Idempotent.
+        try:
+            from shared.subsystem_ownership import claim
+            claim("wheel", pos.underlying)
+        except Exception as exc:
+            logger.warning("[wheel] assignment claim failed for %s: %s", pos.underlying, exc)
         append_trade(TradeRecord(
             timestamp=now_iso(),
             underlying=pos.underlying,
@@ -424,6 +441,21 @@ def _check_one_assignment(
         pos.contract_symbol, broker_shares, journal_shares,
     )
     remove_position(pos.contract_symbol)
+    # Release ownership of the OCC ticker (Fix 3) — option is no longer
+    # open. Keep the underlying claim only if Wheel still holds shares.
+    try:
+        from shared.subsystem_ownership import release
+        release("wheel", pos.contract_symbol)
+        # Drop the underlying claim if no remaining shares/positions on it
+        still_held = any(
+            (p.contract_symbol == pos.underlying or p.underlying == pos.underlying)
+            for p in all_positions
+            if p.contract_symbol != pos.contract_symbol
+        )
+        if not still_held:
+            release("wheel", pos.underlying)
+    except Exception as exc:
+        logger.warning("[wheel] ownership release failed for %s: %s", pos.contract_symbol, exc)
     summary["actions"].append({
         "underlying": pos.underlying,
         "action": "stale_csp_removed",
@@ -505,6 +537,19 @@ def _check_csp_profit_take(broker, pos: Position, cfg, summary: dict) -> None:
             notes=f"closed at ${quote.mid:.2f} (entry ${credit_per_share:.2f}, threshold ${threshold:.2f})",
         ))
         remove_position(pos.contract_symbol)
+        # Release ownership of the OCC ticker (Fix 3). Drop the underlying
+        # claim only if Wheel has no other open positions on that symbol.
+        try:
+            from shared.subsystem_ownership import release
+            release("wheel", pos.contract_symbol)
+            remaining = [
+                p for p in load_positions()
+                if (p.contract_symbol == pos.underlying or p.underlying == pos.underlying)
+            ]
+            if not remaining:
+                release("wheel", pos.underlying)
+        except Exception as exc:
+            logger.warning("[wheel] ownership release failed for %s: %s", pos.contract_symbol, exc)
         summary["actions"].append({
             "underlying": pos.underlying,
             "action": "buy_to_close_profit_take",
@@ -586,6 +631,13 @@ def sell_covered_calls() -> dict:
                 entry_credit=limit * 100 * qty,
                 opened_at=now_iso(),
             ))
+            # Claim the OCC ticker (Fix 3). Underlying is already owned
+            # via the assignment that created these shares.
+            try:
+                from shared.subsystem_ownership import claim
+                claim("wheel", best.symbol)
+            except Exception as exc:
+                logger.warning("[wheel] ownership claim failed for %s: %s", best.symbol, exc)
             summary["actions"].append({
                 "underlying": sym,
                 "action": "sell_to_open_call",
