@@ -499,6 +499,445 @@
   }
 
   // ──────────────────────────────────────────────────────────────────
+  // CommandPalette (V3 §5.7) — Cmd/Ctrl+K, fuzzy filter, sections.
+  // Mount inside each SPA React tree (ops_spa / dashboard_spa). No portal.
+  // ──────────────────────────────────────────────────────────────────
+  var PALETTE_RECENT_KEY = "quanta.cmdp.recent.v1";
+
+  function paletteReadHermesKey() {
+    try { return global.sessionStorage.getItem("hermesMcpKey") || ""; }
+    catch (e) { return ""; }
+  }
+  function paletteEnsureHermesKey() {
+    var k = paletteReadHermesKey();
+    if (k) return k;
+    var p = global.prompt("Enter Hermes MCP key (stored in session for mutating actions):");
+    if (p && String(p).trim()) {
+      try { global.sessionStorage.setItem("hermesMcpKey", String(p).trim()); } catch (e2) { /* ignore */ }
+      return String(p).trim();
+    }
+    return "";
+  }
+  function paletteAuthHeadersJson() {
+    var headers = { "Content-Type": "application/json" };
+    var k = paletteReadHermesKey();
+    if (k) {
+      headers.Authorization = "Bearer " + k;
+      headers["X-Hermes-MCP-Key"] = k;
+    }
+    return headers;
+  }
+  function palettePushRecent(entry) {
+    try {
+      var raw = global.sessionStorage.getItem(PALETTE_RECENT_KEY) || "[]";
+      var arr = [];
+      try { arr = JSON.parse(raw); } catch (e) { arr = []; }
+      if (!Array.isArray(arr)) arr = [];
+      arr.unshift({ title: entry.title, ts: Date.now(), kind: entry.kind || "" });
+      var seen = {};
+      var dedup = [];
+      for (var i = 0; i < arr.length; i++) {
+        var t = String(arr[i].title || "");
+        if (seen[t]) continue;
+        seen[t] = 1;
+        dedup.push(arr[i]);
+        if (dedup.length >= 5) break;
+      }
+      global.sessionStorage.setItem(PALETTE_RECENT_KEY, JSON.stringify(dedup));
+    } catch (e3) { /* ignore */ }
+  }
+
+  /** Simple substring + token-boundary score (no RegExp.exec). */
+  function paletteFuzzyScore(query, text) {
+    var t = String(text || "").toLowerCase();
+    var q = String(query || "").toLowerCase().trim();
+    if (!q.length) return 1;
+    var score = 0;
+    var idx = t.indexOf(q);
+    if (idx >= 0) score += 80 + Math.max(0, 20 - idx);
+    var parts = q.split(/\s+/);
+    for (var pi = 0; pi < parts.length; pi++) {
+      var tok = parts[pi];
+      if (!tok) continue;
+      var pos = 0;
+      while (true) {
+        var j = t.indexOf(tok, pos);
+        if (j < 0) break;
+        var prev = j > 0 ? t.charCodeAt(j - 1) : 32;
+        var boundary = j === 0 || prev < 48 || (prev > 57 && prev < 65) || (prev > 90 && prev < 97) || prev > 122;
+        score += boundary ? 12 : 4;
+        pos = j + tok.length;
+      }
+    }
+    return score;
+  }
+
+  function paletteEnvData(env) {
+    if (env && typeof env === "object" && "data" in env) return env.data;
+    return env;
+  }
+
+  function CommandPalette(props) {
+    var React = global.React;
+    if (!React) return null;
+    var h = React.createElement;
+    var F = React.Fragment;
+    var useState = React.useState;
+    var useEffect = React.useEffect;
+    var useMemo = React.useMemo;
+    var useRef = React.useRef;
+    var variant = props.variant || "ops";
+    var opsData = props.opsData || {};
+    var dash = props.dash || {};
+    var setKillState = props.setKillState;
+    var HTC = global.HoldToConfirmButton;
+
+    var openState = useState(false);
+    var open = openState[0], setOpen = openState[1];
+    var qState = useState("");
+    var query = qState[0], setQuery = qState[1];
+    var idxState = useState(0);
+    var selIdx = idxState[0], setSelIdx = idxState[1];
+    var toolsState = useState([]);
+    var tools = toolsState[0], setTools = toolsState[1];
+    var pendState = useState(null);
+    var pending = pendState[0], setPending = pendState[1];
+
+    var riskDraftState = useState({ daily: 0.03, nameCap: 0.1, corr: 0.85 });
+    var riskDraft = riskDraftState[0], setRiskDraft = riskDraftState[1];
+    var riskInitRef = useRef(false);
+
+    useEffect(function () {
+      riskInitRef.current = false;
+    }, [opsData.risk_gates]);
+
+    useEffect(function () {
+      function onKey(e) {
+        var metaK = (e.metaKey || e.ctrlKey) && String(e.key).toLowerCase() === "k";
+        if (metaK) {
+          var t = e.target;
+          if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) {
+            if (!(t.getAttribute && t.getAttribute("data-cmdp-input") === "1")) return;
+          }
+          e.preventDefault();
+          setOpen(function (v) { return !v; });
+        }
+      }
+      global.document.addEventListener("keydown", onKey, true);
+      return function () { global.document.removeEventListener("keydown", onKey, true); };
+    }, []);
+
+    useEffect(function () {
+      if (!open) return;
+      setSelIdx(0);
+      setPending(null);
+      var ctrl = new AbortController();
+      global.fetch("/api/ops/tools", { signal: ctrl.signal })
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          var d = paletteEnvData(j) || {};
+          var list = Array.isArray(d.tools) ? d.tools : [];
+          setTools(list);
+        })
+        .catch(function () { setTools([]); });
+      return function () { ctrl.abort(); };
+    }, [open]);
+
+    useEffect(function () {
+      if (variant !== "ops" || !open) return;
+      var rg = paletteEnvData(opsData.risk_gates) || {};
+      var resolved = rg.resolved || rg.risk_gates || {};
+      if (!riskInitRef.current && resolved && typeof resolved === "object") {
+        riskInitRef.current = true;
+        setRiskDraft({
+          daily: Number(resolved.daily_loss_halt_pct != null ? resolved.daily_loss_halt_pct : 0.03),
+          nameCap: Number(resolved.single_name_cap_pct != null ? resolved.single_name_cap_pct : 0.1),
+          corr: Number(resolved.correlation_cap != null ? resolved.correlation_cap : 0.85),
+        });
+      }
+    }, [variant, open, opsData.risk_gates]);
+
+    function scrollToId(id) {
+      var el = global.document.getElementById(id);
+      if (el && el.scrollIntoView) el.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+
+    var items = useMemo(function () {
+      var out = [];
+      function add(section, title, sub, mutating, run, extra) {
+        var hay = section + " " + title + " " + (sub || "");
+        var sc = paletteFuzzyScore(query, hay);
+        if (query && sc <= 0) return;
+        out.push({ section: section, title: title, sub: sub || "", mutating: !!mutating, run: run, score: sc + (extra || 0) });
+      }
+
+      add("Navigation", "Go to crypto pair telemetry (card 06)", "scroll #pair-telemetry-crypto", false, function () { scrollToId("pair-telemetry-crypto"); setOpen(false); }, 2);
+      add("Navigation", "Go to stocks pair telemetry (card 23)", "scroll #pair-telemetry-stocks", false, function () { scrollToId("pair-telemetry-stocks"); setOpen(false); }, 2);
+      add("Navigation", "Go to card 21a Agent flow strip", "scroll #agent-flow-strip", false, function () { scrollToId("agent-flow-strip"); setOpen(false); }, 2);
+      add("Navigation", "Open Service health card", "scroll #service-health", false, function () { scrollToId("service-health"); setOpen(false); }, 2);
+      add("Navigation", "Open Quick actions control panel", "scroll #quick-actions", false, function () { scrollToId("quick-actions"); setOpen(false); }, 2);
+      add("Navigation", "Open MCP tool console", "scroll #mcp-console", false, function () { scrollToId("mcp-console"); setOpen(false); }, 2);
+      add("Navigation", "Go to LLM activity section", "scroll #llm-calls", false, function () { scrollToId("llm-calls"); setOpen(false); }, 1);
+      add("Navigation", "Go to training row", "scroll #training", false, function () { scrollToId("training"); setOpen(false); }, 1);
+      add("Navigation", "Go to risk gates matrix", "scroll #risk", false, function () { scrollToId("risk"); setOpen(false); }, 1);
+
+      var cryptoPairs = [];
+      if (variant === "ops") {
+        var sp = paletteEnvData(opsData.sparklines) || {};
+        var pm = sp.pairs || {};
+        cryptoPairs = Object.keys(pm);
+      } else if (dash.cryptoPairs && dash.cryptoPairs.length) {
+        cryptoPairs = dash.cryptoPairs;
+      }
+      for (var ci = 0; ci < cryptoPairs.length; ci++) {
+        var cp = cryptoPairs[ci];
+        (function (pairSym) {
+          add("Pairs", pairSym, "crypto · open dashboard", false, function () {
+            global.location.href = "/?pair=" + encodeURIComponent(pairSym) + "&venue=crypto";
+          }, 0);
+        })(cp);
+      }
+
+      var stockSyms = [];
+      if (variant === "ops") {
+        var ss = paletteEnvData(opsData.stocks_sparklines) || {};
+        stockSyms = Array.isArray(ss.basket) ? ss.basket : Object.keys(ss.symbols || {});
+      } else if (dash.stockSymbols && dash.stockSymbols.length) {
+        stockSyms = dash.stockSymbols;
+      }
+      for (var si = 0; si < stockSyms.length; si++) {
+        var st = stockSyms[si];
+        (function (sym) {
+          add("Pairs", sym, "stocks · open dashboard", false, function () {
+            global.location.href = "/?pair=" + encodeURIComponent(sym) + "&venue=stocks";
+          }, 0);
+        })(st);
+      }
+
+      if (variant === "ops") {
+        add("Actions", "Pause all entries", "POST /api/ops/pause", true, function () {
+          var k = paletteEnsureHermesKey();
+          if (!k) return;
+          return global.fetch("/api/ops/pause", { method: "POST", headers: paletteAuthHeadersJson(), body: JSON.stringify({ reason: "operator command palette pause" }) })
+            .then(function () { palettePushRecent({ title: "Pause all entries", kind: "action" }); setOpen(false); });
+        }, 0);
+        add("Actions", "Flatten all positions", "POST /api/ops/pause flatten payload", true, function () {
+          var k = paletteEnsureHermesKey();
+          if (!k) return;
+          return global.fetch("/api/ops/pause", { method: "POST", headers: paletteAuthHeadersJson(), body: JSON.stringify({ reason: "operator kill bar flatten+halt via palette" }) })
+            .then(function () { palettePushRecent({ title: "Flatten all positions", kind: "action" }); setOpen(false); });
+        }, 0);
+        add("Actions", "Kill bot (UI halt state)", "sets kill strip to KILLED", true, function () {
+          if (setKillState) setKillState("killed");
+          palettePushRecent({ title: "Kill bot (UI halt state)", kind: "action" });
+          setOpen(false);
+        }, 0);
+        add("Actions", "Resume after manual review", "POST /api/ops/resume", true, function () {
+          var k = paletteEnsureHermesKey();
+          if (!k) return;
+          return global.fetch("/api/ops/resume", { method: "POST", headers: paletteAuthHeadersJson(), body: JSON.stringify({ reason: "operator command palette resume", confirm: true }) })
+            .then(function () { palettePushRecent({ title: "Resume after manual review", kind: "action" }); setOpen(false); });
+        }, 0);
+      }
+
+      add("Settings", "Switch theme to control", "", false, function () {
+        try { global.localStorage.setItem("quanta.theme", "control"); global.document.documentElement.setAttribute("data-theme", "control"); } catch (e) { /* */ }
+        setOpen(false);
+      }, 0);
+      add("Settings", "Switch theme to geist", "", false, function () {
+        try { global.localStorage.setItem("quanta.theme", "geist"); global.document.documentElement.setAttribute("data-theme", "geist"); } catch (e) { /* */ }
+        setOpen(false);
+      }, 0);
+      add("Settings", "Switch theme to bloomberg", "", false, function () {
+        try { global.localStorage.setItem("quanta.theme", "bloomberg"); global.document.documentElement.setAttribute("data-theme", "bloomberg"); } catch (e) { /* */ }
+        setOpen(false);
+      }, 0);
+      add("Settings", "Switch density to compact", "", false, function () {
+        try { global.localStorage.setItem("quanta.density", "compact"); global.document.documentElement.setAttribute("data-density", "compact"); } catch (e) { /* */ }
+        setOpen(false);
+      }, 0);
+      add("Settings", "Switch density to default", "", false, function () {
+        try { global.localStorage.setItem("quanta.density", "default"); global.document.documentElement.setAttribute("data-density", "default"); } catch (e) { /* */ }
+        setOpen(false);
+      }, 0);
+      add("Settings", "Switch density to roomy", "", false, function () {
+        try { global.localStorage.setItem("quanta.density", "roomy"); global.document.documentElement.setAttribute("data-density", "roomy"); } catch (e) { /* */ }
+        setOpen(false);
+      }, 0);
+
+      if (variant === "ops") {
+        var rg2 = paletteEnvData(opsData.risk_gates) || {};
+        var rgMap = rg2.risk_gates || rg2.resolved || {};
+        var keys = Object.keys(rgMap || {});
+        for (var ki = 0; ki < keys.length; ki++) {
+          var ky = keys[ki];
+          (function (keyName) {
+            add("Risk config", "risk gate key · " + keyName, String(rgMap[keyName]), false, function () { scrollToId("risk"); setOpen(false); }, 0);
+          })(ky);
+        }
+        add("Risk config", "Apply risk draft (daily halt / name cap / correlation)", "POST /api/ops/risk_gates", true, function () {
+          var k = paletteEnsureHermesKey();
+          if (!k) return;
+          var base = paletteEnvData(opsData.risk_gates) || {};
+          var cur = Object.assign({}, base.resolved || base.risk_gates || {});
+          cur.daily_loss_halt_pct = riskDraft.daily;
+          cur.single_name_cap_pct = riskDraft.nameCap;
+          cur.correlation_cap = riskDraft.corr;
+          return global.fetch("/api/ops/risk_gates", { method: "POST", headers: paletteAuthHeadersJson(), body: JSON.stringify({ risk_gates: cur }) })
+            .then(function () { palettePushRecent({ title: "Apply risk draft", kind: "risk" }); setOpen(false); });
+        }, 0);
+      }
+
+      for (var ti = 0; ti < tools.length; ti++) {
+        var tool = tools[ti];
+        (function (t) {
+          var title = (t.mutating ? "❗ " : "") + "MCP tool · " + t.name;
+          add("MCP tools", title, t.doc || "POST /api/ops/mcp/" + t.name, !!t.mutating, function () {
+            global.location.hash = "mcp-console";
+            scrollToId("mcp-console");
+            palettePushRecent({ title: title, kind: "mcp" });
+            setOpen(false);
+          }, 0);
+        })(tool);
+      }
+
+      var recent = [];
+      try { recent = JSON.parse(global.sessionStorage.getItem(PALETTE_RECENT_KEY) || "[]"); } catch (e4) { recent = []; }
+      if (!Array.isArray(recent)) recent = [];
+      for (var ri = 0; ri < recent.length; ri++) {
+        (function (rec) {
+          add("Recent", rec.title || "—", "last used", false, function () { setOpen(false); }, 0);
+        })(recent[ri]);
+      }
+
+      out.sort(function (a, b) { return b.score - a.score; });
+      return out;
+    }, [variant, query, tools, opsData, dash, riskDraft]);
+
+    useEffect(function () {
+      if (selIdx >= items.length) setSelIdx(Math.max(0, items.length - 1));
+    }, [items.length, selIdx]);
+
+    function runItem(it) {
+      if (!it || !it.run) return;
+      if (it.mutating) {
+        setPending(it);
+        return;
+      }
+      try { it.run(); } catch (e) { /* */ }
+      palettePushRecent({ title: it.title, kind: "run" });
+    }
+
+    useEffect(function () {
+      if (!open) return;
+      function onNav(e) {
+        if (e.key === "Escape") { e.preventDefault(); setOpen(false); return; }
+        if (e.key === "ArrowDown") { e.preventDefault(); setSelIdx(function (i) { return Math.min(items.length - 1, i + 1); }); }
+        if (e.key === "ArrowUp") { e.preventDefault(); setSelIdx(function (i) { return Math.max(0, i - 1); }); }
+        if (e.key === "Enter") {
+          e.preventDefault();
+          var it = items[selIdx];
+          runItem(it);
+        }
+      }
+      global.document.addEventListener("keydown", onNav, true);
+      return function () { global.document.removeEventListener("keydown", onNav, true); };
+    }, [open, items, selIdx]);
+
+    if (!open) return null;
+
+    var sections = {};
+    for (var ii = 0; ii < items.length; ii++) {
+      var it0 = items[ii];
+      if (!sections[it0.section]) sections[it0.section] = [];
+      sections[it0.section].push({ idx: ii, item: it0 });
+    }
+    var sectionOrder = ["Navigation", "Pairs", "Actions", "Settings", "Risk config", "MCP tools", "Recent"];
+
+    return h("div", {
+      className: "v3-cmdp-backdrop",
+      role: "presentation",
+      onMouseDown: function (e) { if (e.target && e.target.classList && e.target.classList.contains("v3-cmdp-backdrop")) setOpen(false); },
+    },
+      h("div", { className: "v3-cmdp-panel", role: "dialog", "aria-label": "Command palette" },
+        h("div", { className: "v3-cmdp-head" }, "Command palette · ⌘K · fuzzy search"),
+        h("input", {
+          className: "v3-cmdp-input",
+          "data-cmdp-input": "1",
+          autoFocus: true,
+          placeholder: "Search cards, pairs, tools, settings…",
+          value: query,
+          onChange: function (e) { setQuery(e.target.value); setSelIdx(0); },
+        }),
+        h("div", { className: "v3-cmdp-list" },
+          sectionOrder.map(function (sec) {
+            var rows = sections[sec];
+            if (!rows || !rows.length) return null;
+            return h(F, { key: sec },
+              h("div", { className: "v3-cmdp-section" }, sec),
+              rows.map(function (row) {
+                var it1 = row.item;
+                var active = row.idx === selIdx;
+                return h("div", {
+                  key: sec + "-" + row.idx,
+                  className: "v3-cmdp-item" + (active ? " v3-cmdp-item--active" : ""),
+                  onMouseEnter: function () { setSelIdx(row.idx); },
+                  onClick: function () { runItem(it1); },
+                },
+                  h("div", { className: "v3-cmdp-item-title" },
+                    it1.title,
+                    it1.mutating ? h("span", { className: "v3-cmdp-badge" }, "mutating") : null),
+                  h("div", { className: "v3-cmdp-item-sub" }, it1.sub)
+                );
+              })
+            );
+          }),
+          variant === "ops" ? h("div", { key: "risk-sliders", className: "v3-cmdp-section" }, "Risk sliders (draft)") : null,
+          variant === "ops" ? h("div", { key: "risk-ui", style: { padding: "8px 14px", fontSize: "var(--t-2xs)" } },
+            h("label", { style: { display: "block", marginBottom: 6 } }, "daily_loss_halt_pct · ", h("span", { className: "v3-num" }, (riskDraft.daily * 100).toFixed(1)), "%",
+              h("input", {
+                type: "range", min: 0, max: 0.2, step: 0.005, value: riskDraft.daily,
+                style: { width: "100%" },
+                onChange: function (e) { setRiskDraft(function (d) { return Object.assign({}, d, { daily: Number(e.target.value) }); }); },
+              })),
+            h("label", { style: { display: "block", marginBottom: 6 } }, "single_name_cap_pct · ", h("span", { className: "v3-num" }, (riskDraft.nameCap * 100).toFixed(1)), "%",
+              h("input", {
+                type: "range", min: 0, max: 0.5, step: 0.01, value: riskDraft.nameCap,
+                style: { width: "100%" },
+                onChange: function (e) { setRiskDraft(function (d) { return Object.assign({}, d, { nameCap: Number(e.target.value) }); }); },
+              })),
+            h("label", { style: { display: "block" } }, "correlation_cap · ", h("span", { className: "v3-num" }, riskDraft.corr.toFixed(2)),
+              h("input", {
+                type: "range", min: 0, max: 1, step: 0.01, value: riskDraft.corr,
+                style: { width: "100%" },
+                onChange: function (e) { setRiskDraft(function (d) { return Object.assign({}, d, { corr: Number(e.target.value) }); }); },
+              }))
+          ) : null
+        ),
+        pending && HTC ? h("div", { className: "v3-cmdp-hold-wrap" },
+          h("div", { className: "dim mono", style: { fontSize: "var(--t-2xs)", marginBottom: 6 } }, "Hold 1500ms to run · ", pending.title),
+          h(HTC, {
+            label: "CONFIRM · RUN ACTION",
+            variant: "compact",
+            danger: !!pending.mutating,
+            ariaLabel: "Confirm command palette action",
+            onHoldComplete: function () {
+              var p = pending;
+              setPending(null);
+              if (p && p.run) {
+                try {
+                  var ret = p.run();
+                  if (ret && typeof ret.then === "function") ret.then(function () {}).catch(function () {});
+                } catch (e5) { /* */ }
+              }
+            },
+          })
+        ) : null
+      )
+    );
+  }
+
+  // ──────────────────────────────────────────────────────────────────
   // TweaksFab — React FAB + drawer that toggles theme + density and
   // persists the operator's choice to localStorage. Ported from the
   // legacy /ops in-page script at templates/ops.html:1402-1440 so the
@@ -667,5 +1106,6 @@
     holdToConfirm, flashChange,
     NumberRoll, killHoldProto, TimeSince,
     TweaksFab,
+    CommandPalette,
   };
 })(window);

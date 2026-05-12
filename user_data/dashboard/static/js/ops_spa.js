@@ -2480,29 +2480,38 @@
       right: h("div", null,
         h(TimeSince, { ts: data.llm_stats_fetched_at, className: "mono dim", style: { fontSize: "var(--t-2xs)", marginRight: 8 } }),
         h("span", { className: "metric-label", style: { marginRight: 8 } }, "SAVED · 24h"),
-        h("span", { className: "up num", style: { fontSize: "var(--t-lg)" } }, "$" + fmtUSD(saved, 2))
+        h(NumberRoll, { value: Number(saved), decimals: 2, prefix: "$", className: "v3-num" })
       )
     },
-      h("div", { style: { display: "flex", flexDirection: "column" } },
-        h(StatusRow, {
-          status: oh.healthy ? "up" : "down",
-          name: "Ollama (primary)",
-          sub: oh.healthy
-            ? (ollamaModels.length + " models" + (oh.status_age_seconds != null ? " · probed " + Math.round(oh.status_age_seconds) + "s ago" : ""))
-            : (oh.error || "down"),
-          value: h("span", null, h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, "lat ", ollamaLatencyMs != null ? ollamaLatencyMs + "ms" : "—"))
-        }),
-        breakers.length === 0
-          ? h(StatusRow, { status: "up", name: "Anthropic (fallback)", sub: "no breakers tripped", value: h("span", { className: "dim mono" }, "armed") })
-          : breakers.map(b => h(StatusRow, {
-              key: b.name || b.id,
-              status: b.state === "open" ? "down" : b.state === "half_open" ? "warn" : "up",
-              name: b.name || b.id,
-              sub: "state " + (b.state || "?") + " · failures " + (b.failure_count || 0),
-              value: h("span", null,
-                b.opened_at ? h("span", { className: "dim mono" }, "opened ", b.opened_at) : "—")
-            }))
-      )
+      h("div", { className: "v3-llm-two-tile" },
+        h("div", { className: "v3-llm-tile" },
+          h("div", { className: "metric-label" }, "OLLAMA · primary"),
+          h("div", { style: { marginTop: 8 } },
+            h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, "calls 24h · "),
+            h(NumberRoll, { value: Number(cryptoCalls != null ? cryptoCalls : 0), decimals: 0, suffix: " calls", className: "v3-num" })),
+          h("div", { className: "dim", style: { fontSize: "var(--t-2xs)", marginTop: 6 } }, "latency · ",
+            ollamaLatencyMs != null ? h("span", { className: "mono v3-num" }, ollamaLatencyMs + " ms") : "—"),
+          h("div", { className: "dim", style: { fontSize: "var(--t-2xs)", marginTop: 4 } }, "saved vs Anthropic baseline"),
+          h("div", { style: { marginTop: 4 } },
+            h(NumberRoll, { value: Number(saved), decimals: 2, prefix: "$", className: "v3-num" }))
+        ),
+        h("div", { className: "v3-llm-tile" },
+          h("div", { className: "metric-label" }, "ANTHROPIC · fallback"),
+          h("div", { style: { marginTop: 10 } }, h("span", { className: "pill down" }, "DISABLED")),
+          h("div", { className: "dim mono", style: { fontSize: "var(--t-2xs)", marginTop: 8 } }, "circuit · ",
+            breakers.length ? (breakers.length + " breaker(s)") : "armed · no trips"))
+      ),
+      breakers.length > 0 ? h("div", { style: { marginTop: "var(--s-3)" } },
+        h("div", { className: "metric-label" }, "CIRCUIT DETAIL"),
+        breakers.map(b => h(StatusRow, {
+          key: b.name || b.id,
+          status: b.state === "open" ? "down" : b.state === "half_open" ? "warn" : "up",
+          name: b.name || b.id,
+          sub: "state " + (b.state || "?") + " · failures " + (b.failure_count || 0),
+          value: h("span", null,
+            b.opened_at ? h("span", { className: "dim mono" }, "opened ", b.opened_at) : "—")
+        }))
+      ) : null
     );
   }
 
@@ -2558,7 +2567,7 @@
           h("th", { style: { textAlign: "right" } }, "Qty"),
           h("th", { style: { textAlign: "right" } }, "Entry"),
           h("th", { style: { textAlign: "right" } }, "Mark"),
-          h("th", { style: { textAlign: "right" } }, "uPnL %"),
+          h("th", { style: { textAlign: "right" } }, "uPnL"),
           h("th", null, "Note")
         )),
         h("tbody", null,
@@ -2754,6 +2763,15 @@
           .filter(p => p.kind === "short_put")
           .reduce((s, p) => s + Number(p.strike || 0) * Number(p.qty || 1) * 100, 0);
         return h(F, null,
+          h("div", { style: { display: "flex", gap: "var(--s-5)", alignItems: "baseline", marginBottom: "var(--s-2)" } },
+            h("div", null,
+              h("div", { className: "metric-label" }, "OPEN CONTRACTS"),
+              h("div", { className: "mono v3-num", style: { fontSize: "var(--t-xl)", marginTop: 4 } }, String(positions.length))),
+            h("div", { className: "vr", style: { alignSelf: "stretch" } }),
+            h("div", null,
+              h("div", { className: "metric-label" }, "PREMIUM COLLECTED"),
+              h("div", { className: "mono v3-num up", style: { fontSize: "var(--t-xl)", marginTop: 4 } }, "$" + fmtUSD(totalPremium)))
+          ),
           h("div", { style: { display: "flex", alignItems: "baseline", gap: "var(--s-3)" } },
             h("div", { className: "metric-label" }, "WHEEL · " + positions.length + " open"),
             h("span", { className: "tb-spacer", style: { flex: 1 } }),
@@ -2968,29 +2986,24 @@
     const cur = pairs.find(p => p.status === "training");
     const done = pairs.filter(p => p.status === "done");
     const etaMin = tft.current_pair_eta_s != null ? Math.round(tft.current_pair_eta_s / 60) : null;
-    return h(Card, {
-      num: "17", title: "Training · FreqAI / TFT retrain status",
-      sub: cur ? ("training " + cur.pair + " · epoch " + cur.last_epoch + "/" + cur.max_epoch) : (done.length + " pairs trained"),
-      right: h(F, null,
-        h(TimeSince, { ts: data.training_fetched_at, className: "mono dim", style: { fontSize: "var(--t-2xs)", marginRight: 8 } }),
-        cur
-          ? h("span", { className: "pill accent" }, h("span", { className: "dot accent pulse" }), " LIVE")
-          : h("span", { className: "pill up" }, "IDLE")
-      )
-    },
+    const epochPct = cur && cur.max_epoch ? Math.min(100, (Number(cur.last_epoch) / Number(cur.max_epoch)) * 100) : 0;
+    const inner = h(F, null,
+      cur ? h("div", null,
+        h(ProgressBar, { value: epochPct, max: 100, cls: "accent" }),
+        h("div", { className: "hr" })) : null,
       h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, fontSize: "var(--t-xs)" } },
         h("div", { className: "dim mono" }, "CURRENT PAIR"),
         h("div", { className: "num accent" }, (cur && cur.pair) || "—"),
         h("div", { className: "dim mono" }, "EPOCH"),
-        h("div", { className: "num" }, cur ? (cur.last_epoch + " / " + cur.max_epoch) : "—"),
+        h("div", { className: "num v3-num" }, cur ? (cur.last_epoch + " / " + cur.max_epoch) : "—"),
         h("div", { className: "dim mono" }, "VAL SHARPE"),
         h("div", { className: "num " + ((cur && cur.val_sharpe >= 0) ? "up" : "down") }, cur && cur.val_sharpe != null ? Number(cur.val_sharpe).toFixed(3) : "—"),
         h("div", { className: "dim mono" }, "LOSS"),
         h("div", { className: "num" }, cur && cur.loss != null ? Number(cur.loss).toFixed(4) : "—"),
         h("div", { className: "dim mono" }, "AVG EPOCH"),
-        h("div", { className: "num" }, tft.avg_epoch_seconds != null ? tft.avg_epoch_seconds + "s" : "—"),
+        h("div", { className: "num v3-num" }, tft.avg_epoch_seconds != null ? tft.avg_epoch_seconds + "s" : "—"),
         h("div", { className: "dim mono" }, "ETA"),
-        h("div", { className: "num" }, etaMin != null ? etaMin + "m" : "—"),
+        h("div", { className: "num v3-num" }, etaMin != null ? etaMin + "m" : "—"),
         h("div", { className: "dim mono" }, "DICT READY"),
         h("div", { className: "num " + (tft.pair_dict_ready ? "up" : "warn") }, tft.pair_dict_ready ? "yes" : "no"),
         h("div", { className: "dim mono" }, "EPT GEN"),
@@ -3006,13 +3019,24 @@
           },
             h("span", { className: "mono" }, p.pair),
             h("span", { className: "pill " + (p.status === "done" ? "up" : p.status === "training" ? "accent" : "info"), style: { height: 16 } }, p.status),
-            h("span", { className: "num" }, "ep " + (p.last_epoch != null ? p.last_epoch : "—")),
+            h("span", { className: "num v3-num" }, "ep " + (p.last_epoch != null ? p.last_epoch : "—")),
             h("span", { className: "num " + ((p.val_sharpe || 0) >= 0 ? "up" : "down") }, p.val_sharpe != null ? Number(p.val_sharpe).toFixed(2) : "—"),
             h("span", { className: "dim mono" }, p.early_stopped ? "early-stop" : (p.end_ts || p.start_ts || ""))
           ))
         )
       )
     );
+    return h("div", { className: cur ? "v3-train-live-glow" : undefined },
+      h(Card, {
+        num: "17", title: "Training · FreqAI / TFT retrain status",
+        sub: cur ? ("training " + cur.pair + " · epoch " + cur.last_epoch + "/" + cur.max_epoch) : (done.length + " pairs trained"),
+        right: h(F, null,
+          h(TimeSince, { ts: data.training_fetched_at, className: "mono dim", style: { fontSize: "var(--t-2xs)", marginRight: 8 } }),
+          cur
+            ? h("span", { className: "pill accent" }, h("span", { className: "dot accent pulse" }), " LIVE")
+            : h("span", { className: "pill up" }, "IDLE")
+        ),
+      }, inner));
   }
 
   // ─────────────── READINESS — validation gate matrix (data-num 18) ───────────────
@@ -3352,11 +3376,23 @@
 
   // ─────────────── SLACK PREVIEW — next daily report (data-num 20) ───────────────
   function SlackPreviewLive({ data }) {
+    const [, tick] = useState(0);
+    useEffect(() => {
+      const iv = setInterval(() => tick((n) => n + 1), 1000);
+      return () => clearInterval(iv);
+    }, []);
     const env = envelopeData(data.slack_preview) || {};
     const sign = (env.pnl_usd || 0) >= 0 ? "+" : "−";
     const pnlAbs = Math.abs(Number(env.pnl_usd || 0));
     const emoji = (env.pnl_usd || 0) >= 0 ? "📈" : "📉";
     const regimeRows = env.regime_distribution || [];
+    const now = new Date();
+    const nextUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0));
+    const secLeft = Math.max(0, Math.floor((nextUtc.getTime() - now.getTime()) / 1000));
+    const hh = Math.floor(secLeft / 3600);
+    const mm = Math.floor((secLeft % 3600) / 60);
+    const ss = secLeft % 60;
+    const countdown = hh + "h " + String(mm).padStart(2, "0") + "m " + String(ss).padStart(2, "0") + "s · 00:00 UTC";
     return h(Card, {
       num: "20", title: "Slack preview · next daily brief",
       sub: "fires at 00:00 UTC · " + (env.date_utc || ""),
@@ -3365,22 +3401,22 @@
         h("span", { className: "pill accent" }, h("span", { className: "dot accent pulse" }), " PREVIEW")
       )
     },
-      h("div", {
-        style: {
-          background: "var(--bg-inset)", padding: "var(--s-3) var(--s-4)", borderRadius: 4,
-          fontFamily: "var(--mono)", fontSize: "var(--t-xs)", lineHeight: 1.7, color: "var(--fg-1)",
-          borderLeft: "3px solid var(--accent)",
-        }
-      },
+      h("div", { className: "dim mono v3-num", style: { fontSize: "var(--t-2xs)", marginBottom: 8 } }, "next send · ", countdown),
+      h("div", { className: "v3-slack-bubble" },
         h("div", { style: { fontWeight: 600 } },
           emoji + " Quanta · daily P&L · " + (env.date_utc || "")),
         h("div", null,
           "• Day P&L: ",
           h("span", { className: (env.pnl_usd || 0) >= 0 ? "up" : "down" },
             sign + "$" + fmtUSD(pnlAbs, 2) + "  (" + fmtPct(env.pnl_pct || 0) + ")")),
-        h("div", null, "• Trades: " + (env.trades || 0) + " · wins " + (env.wins || 0) + " · losses " + (env.losses || 0) + " · win rate " + (env.win_rate_pct || 0).toFixed(1) + "%"),
-        h("div", null, "• Sharpe (trailing): " + (env.sharpe_trailing != null ? Number(env.sharpe_trailing).toFixed(2) : "—") +
-          " · MaxDD: " + (env.max_dd_trailing != null ? Number(env.max_dd_trailing).toFixed(2) + "%" : "—")),
+        h("div", null,
+          "• Trades: ", String(env.trades || 0), " · wins ", String(env.wins || 0), " · losses ", String(env.losses || 0), " · win rate ",
+          h("span", { className: "v3-num" }, (env.win_rate_pct || 0).toFixed(1)), "%"),
+        h("div", null,
+          "• Sharpe (trailing): ",
+          env.sharpe_trailing != null ? h("span", { className: "v3-num" }, Number(env.sharpe_trailing).toFixed(2)) : "—",
+          " · MaxDD: ",
+          env.max_dd_trailing != null ? h("span", { className: "v3-num" }, Number(env.max_dd_trailing).toFixed(2) + "%") : "—"),
         env.best && h("div", null, "• Best pair: " + env.best.pair + " · $" + fmtUSD(env.best.pnl, 2) + " (n=" + env.best.n + ")"),
         env.worst && h("div", null, "• Worst pair: " + env.worst.pair + " · $" + fmtUSD(env.worst.pnl, 2) + " (n=" + env.worst.n + ")"),
         regimeRows.length > 0 && h("div", null,
@@ -3394,22 +3430,35 @@
   function MCPToolConsole({ data }) {
     const env = envelopeData(data.tools) || {};
     const tools = env.tools || [];
+    const [toolFilter, setToolFilter] = useState("");
     const [selected, setSelected] = useState("");
     const [argsText, setArgsText] = useState("{}");
     const [result, setResult] = useState(null);
     const [running, setRunning] = useState(false);
     const [err, setErr] = useState(null);
 
-    useEffect(() => {
-      if (!selected && tools.length) setSelected(tools[0].name);
-    }, [tools.length]);
+    const filtered = useMemo(() => {
+      const f = toolFilter.trim().toLowerCase();
+      if (!f) return tools;
+      return tools.filter((t) => {
+        const s = (t.name + " " + (t.doc || "")).toLowerCase();
+        return s.indexOf(f) >= 0;
+      });
+    }, [tools, toolFilter]);
 
-    const cur = tools.find(t => t.name === selected);
     useEffect(() => {
-      // Generate a default args body matching the tool's params
-      if (!cur) return;
+      if (!filtered.length) return;
+      const still = filtered.find((t) => t.name === selected);
+      if (!still) setSelected(filtered[0].name);
+    }, [filtered, selected]);
+
+    const cur = filtered.find((t) => t.name === selected) || tools.find((t) => t.name === selected);
+
+    useEffect(() => {
+      const tmeta = tools.find((t) => t.name === selected);
+      if (!tmeta) return;
       const defaults = {};
-      (cur.params || []).forEach(p => {
+      (tmeta.params || []).forEach((p) => {
         if (p.default !== null && p.default !== undefined) defaults[p.name] = p.default;
         else if (p.type === "int") defaults[p.name] = 0;
         else if (p.type === "bool") defaults[p.name] = false;
@@ -3420,8 +3469,30 @@
       setErr(null);
     }, [selected]);
 
+    function readMcpKey() {
+      try { return sessionStorage.getItem("hermesMcpKey") || ""; } catch (_) { return ""; }
+    }
+    function authHeadersJson() {
+      const headers = { "Content-Type": "application/json" };
+      const k = readMcpKey();
+      if (k) {
+        headers.Authorization = "Bearer " + k;
+        headers["X-Hermes-MCP-Key"] = k;
+      }
+      return headers;
+    }
+
     const run = () => {
       if (!selected) return;
+      const meta = tools.find((t) => t.name === selected);
+      if (meta && meta.mutating) {
+        let k = readMcpKey();
+        if (!k) {
+          const p = window.prompt("Enter X-Hermes-MCP-Key for mutating MCP tools:");
+          if (!p || !String(p).trim()) { setErr("mutating tool requires X-Hermes-MCP-Key"); return; }
+          try { sessionStorage.setItem("hermesMcpKey", String(p).trim()); } catch (_) { /* */ }
+        }
+      }
       let body;
       try { body = JSON.parse(argsText || "{}"); }
       catch (e) { setErr("invalid JSON: " + e.message); return; }
@@ -3430,16 +3501,16 @@
       setResult(null);
       fetch("/api/ops/mcp/" + selected, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeadersJson(),
         body: JSON.stringify(body),
       })
-        .then(r => r.json().then(j => ({ ok: r.ok, status: r.status, j })))
+        .then((r) => r.json().then((j) => ({ ok: r.ok, status: r.status, j })))
         .then(({ ok, status, j }) => {
           setRunning(false);
           if (!ok) setErr("HTTP " + status + " · " + (j && j.error ? j.error : ""));
           setResult(j);
         })
-        .catch(e => { setRunning(false); setErr("fetch error: " + e.message); });
+        .catch((e) => { setRunning(false); setErr("fetch error: " + e.message); });
     };
 
     return h(Card, {
@@ -3448,20 +3519,28 @@
       right: h(F, null,
         h(TimeSince, { ts: data.tools_fetched_at, className: "mono dim", style: { fontSize: "var(--t-2xs)", marginRight: 8 } }),
         cur && cur.mutating
-          ? h("span", { className: "pill warn" }, h("span", { className: "dot warn pulse" }), " MUTATING")
+          ? h("span", { className: "pill warn" }, h("span", { className: "dot warn pulse" }), " ❗ MUTATING")
           : h("span", { className: "pill" }, "read-only")
       )
     },
       h("div", { style: { display: "grid", gridTemplateColumns: "260px 1fr", gap: "var(--s-3)" } },
         h("div", null,
-          h("div", { className: "metric-label" }, "TOOL"),
+          h("div", { className: "metric-label" }, "TOOL · filter"),
+          h("input", {
+            type: "search",
+            className: "v3-mcp-console-filter",
+            placeholder: "Search tools…",
+            value: toolFilter,
+            onChange: (e) => setToolFilter(e.target.value),
+            "aria-label": "Filter MCP tools",
+          }),
           h("select", {
             className: "select",
             value: selected,
-            onChange: e => setSelected(e.target.value),
+            onChange: (e) => setSelected(e.target.value),
             style: { width: "100%", marginTop: 4, fontFamily: "var(--mono)", fontSize: "var(--t-xs)" }
           },
-            tools.map(t => h("option", { key: t.name, value: t.name }, (t.mutating ? "❗ " : "") + t.name))
+            filtered.map((t) => h("option", { key: t.name, value: t.name }, (t.mutating ? "❗ " : "") + t.name))
           ),
           cur && h("div", { style: { marginTop: 8, fontSize: "var(--t-xs)", color: "var(--fg-2)" } }, cur.doc),
           cur && (cur.params || []).length > 0 && h("div", { style: { marginTop: 8 } },
@@ -5800,6 +5879,7 @@
     }).then(r => (r.ok ? "HALT issued — close positions manually if needed" : "HTTP " + r.status)), []);
 
     return h(F, null,
+      h(CommandPalette, { variant: "ops", opsData: data, killState, setKillState }),
       h("div", { className: "app" },
         h(Topbar, {
           killState, setKillState, active: "ops",
@@ -5892,11 +5972,11 @@
           // SHARK BRIEFING — full-width because the candidate lists can be long
           h(SharkBriefingLive, { data }),
           // PAIR TELEMETRY — crypto then stocks, both full-width.
-          h(PairTelemetryLive, { data }),
-          h(StocksPairTelemetryLive, { data }),
+          h("div", { id: "pair-telemetry-crypto", className: "anchor" }, h(PairTelemetryLive, { data })),
+          h("div", { id: "pair-telemetry-stocks", className: "anchor" }, h(StocksPairTelemetryLive, { data })),
           // SERVICES + POSITIONS
           h("div", { className: "grid g-12", style: { gap: "var(--gap-grid)" } },
-            h("div", { style: { gridColumn: "span 4" } }, h(ServicesLive, { data, killState })),
+            h("div", { id: "service-health", className: "anchor", style: { gridColumn: "span 4" } }, h(ServicesLive, { data, killState })),
             h("div", { style: { gridColumn: "span 8" } }, h(PositionsLive, { data }))
           ),
           // STOCKS ML banner moved to top training row.
@@ -5915,7 +5995,7 @@
           // BREAKERS detail + CONTROL PANEL
           h("div", { id: "config", className: "grid g-12 anchor", style: { gap: "var(--gap-grid)" } },
             h("div", { style: { gridColumn: "span 6" } }, h(CircuitBreakersLive, { data })),
-            h("div", { style: { gridColumn: "span 6" } }, h(QuickActions, { killState, setKillState }))
+            h("div", { id: "quick-actions", className: "anchor", style: { gridColumn: "span 6" } }, h(QuickActions, { killState, setKillState }))
           ),
           // BACKTEST QUALITY GATES — full-width under breakers/quick-actions row.
           // Sits in the risk-gates section per stage/18 spec; clicking a row

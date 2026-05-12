@@ -19,6 +19,7 @@
     Sidebar, Card, ProgressBar, TimeSince,
     HeartbeatDot, KillBar, deriveHeartbeatStatus,
   } = window;
+  const CommandPalette = (window.QC && window.QC.CommandPalette) || function () { return null; };
 
   // ─────────────── helpers ───────────────
   function envelopeData(env) {
@@ -461,6 +462,10 @@
       : "PASS";
 
     return h(F, null,
+      h(CommandPalette, {
+        variant: "dash",
+        dash: { cryptoPairs, stockSymbols, pair, venue, setPair, setVenue },
+      }),
       h("div", { className: "app" },
         h(TopbarLive, {
           killState, setKillState,
