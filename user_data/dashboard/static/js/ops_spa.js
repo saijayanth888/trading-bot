@@ -204,6 +204,19 @@
     // refetchSlow call (and at most twice total per tick when both fast +
     // slow fire on mount). Future edits: do not move setState back inside
     // the per-fetch then/catch.
+    //
+    // Tier C P1-9: per-endpoint request token (stale-while-revalidate
+    // guard). Two refreshes for the same key can be in-flight at once
+    // (10 s tick fires while a previous tick's call is still pending).
+    // Without a guard, the slower call's result silently overwrites the
+    // faster (and fresher) call's result whenever it happens to land
+    // second. Each call now captures an incrementing per-key token and
+    // its result is dropped during flushBatch if a newer request has
+    // since been issued for the same key.
+    //
+    // INVARIANT: only the latest-token response for a key may write that
+    // key's slot. Future edits MUST keep the token comparison.
+    const tokensRef = useRef({});
 
     const buildOne = useCallback((key, urlOrSpec, signal) => {
       const isSpec = typeof urlOrSpec === "object";
@@ -214,9 +227,11 @@
             body: urlOrSpec.method === "POST" ? JSON.stringify(urlOrSpec.body || {}) : undefined,
             signal }
         : { signal };
+      const myToken = (tokensRef.current[key] || 0) + 1;
+      tokensRef.current[key] = myToken;
       return safeJsonFetch(url, opts)
-        .then(env => ({ key, ok: true, env }))
-        .catch(err => ({ key, ok: false, err }));
+        .then(env => ({ key, ok: true, env, token: myToken }))
+        .catch(err => ({ key, ok: false, err, token: myToken }));
     }, []);
 
     const flushBatch = useCallback((results) => {
@@ -226,7 +241,10 @@
       results.forEach(rv => {
         // Skip the resolved-but-aborted case
         if (!rv) return;
-        const { key, ok, env, err } = rv;
+        const { key, ok, env, err, token } = rv;
+        // P1-9: drop stale responses — a newer request for this key has
+        // already been issued (and may even have landed first).
+        if (token !== tokensRef.current[key]) return;
         if (ok) {
           patch[key] = env;
           patch[key + "_fetched_at"] = now;
