@@ -235,22 +235,32 @@ def _maybe_emit_stub_alert(pair: str, path: Path, exc: Exception) -> None:
                 pass
 
         alerter = SlackAlerter.from_env()
-        body = (
-            f"STUB ARTIFACT for {pair} — size={size_b}B, files={files}, "
-            f"tensor_blobs={tensor_blobs}. Pair quarantined from runtime. "
-            f"Investigate /ops · TrainingHealth card. Detail: {exc}"
-        )
-        alerter.notify_error(
-            "tft-training",
-            body,
-            context={
-                "pair": pair,
-                "size_bytes": size_b,
-                "files": files,
-                "tensor_blobs": tensor_blobs,
-                "path": str(path),
-            },
-        )
+        # Prefer the dedicated notify_training_stub helper (rotating-light
+        # severity, structured fields). Fall back to notify_error if a
+        # very old slack_alerts.py is on disk that predates that helper.
+        if hasattr(alerter, "notify_training_stub"):
+            alerter.notify_training_stub(
+                pair=pair, size_bytes=size_b, files=files,
+                tensor_blobs=tensor_blobs, path=str(path), detail=str(exc),
+            )
+        else:
+            body = (
+                f"STUB ARTIFACT for {pair} — size={size_b}B, files={files}, "
+                f"tensor_blobs={tensor_blobs}. Pair quarantined from "
+                f"runtime. Investigate /ops · TrainingHealth card. Detail: "
+                f"{exc}"
+            )
+            alerter.notify_error(
+                "tft-training",
+                body,
+                context={
+                    "pair": pair,
+                    "size_bytes": size_b,
+                    "files": files,
+                    "tensor_blobs": tensor_blobs,
+                    "path": str(path),
+                },
+            )
         logger.warning("[tft-training] Slack stub-artifact alert sent for %s", pair)
     except Exception as alert_exc:  # noqa: BLE001 — alerting must never raise
         logger.info(
