@@ -5,7 +5,10 @@
    ============================================================ */
 
 /* ---------- type ---------- */
-@import url('https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap');
+/* Google Fonts is now loaded via <link rel="stylesheet"> in the page
+   templates (ops_spa.html / dashboard_spa.html) so it does NOT render-
+   block initial paint. The previous @import here was render-blocking
+   even though templates had preconnect hints. */
 
 :root {
   --sans: 'Geist', 'Inter', system-ui, sans-serif;
@@ -156,6 +159,7 @@ button { font-family: inherit; }
 .up   { color: var(--up); }
 .down { color: var(--down); }
 .warn { color: var(--warn); }
+.warn-strong { color: var(--warn); font-weight: 600; }
 .accent{color: var(--accent); }
 .info { color: var(--info); }
 .uppercase { text-transform: uppercase; letter-spacing: .08em; }
@@ -401,7 +405,7 @@ button { font-family: inherit; }
   display: flex; flex-direction: column;
   min-width: 0;
 }
-.anchor { scroll-margin-top: 80px; }
+.anchor { scroll-margin-top: 52px; } /* match .topbar min-height so hash-jumps land flush */
 .card-head {
   display: flex; align-items: center; gap: var(--s-2);
   padding: 10px var(--pad-card) 8px;
