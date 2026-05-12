@@ -45,7 +45,7 @@ from quanta_core.observability.notifier import Notifier, NullNotifier
 
 if TYPE_CHECKING:
     from quanta_core.exchanges.base import Exchange
-    from quanta_core.strategy.base import Strategy
+    from quanta_core.strategy.async_strategy import AsyncStrategy as Strategy
     from quanta_core.util.types import Symbol
 
 _log = logging.getLogger(__name__)

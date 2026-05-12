@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import anyio
 
 if TYPE_CHECKING:
-    from quanta_core.strategy.base import Strategy
+    from quanta_core.strategy.async_strategy import AsyncStrategy as Strategy
     from quanta_core.util.types import Bar, Fill, OrderProposal, Tick
 
 _log = logging.getLogger(__name__)

@@ -18,7 +18,7 @@ import pytest
 
 from quanta_core.exchanges.base import Exchange, ExchangeStream, StreamEvent
 from quanta_core.live.engine import EngineConfig, LiveEngine
-from quanta_core.strategy.base import Strategy
+from quanta_core.strategy.async_strategy import AsyncStrategy as Strategy
 from quanta_core.util.types import (
     Bar,
     ClientOrderId,

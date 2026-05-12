@@ -9,7 +9,7 @@ import anyio
 import pytest
 
 from quanta_core.live.dispatcher import StrategyDispatcher
-from quanta_core.strategy.base import Strategy
+from quanta_core.strategy.async_strategy import AsyncStrategy as Strategy
 from quanta_core.util.types import (
     Bar,
     ClientOrderId,

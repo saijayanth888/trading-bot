@@ -8,7 +8,7 @@ from decimal import Decimal
 import pytest
 
 from quanta_core.observability.notifier import NullNotifier
-from quanta_core.strategy.base import Strategy
+from quanta_core.strategy.async_strategy import AsyncStrategy as Strategy
 from quanta_core.util.errors import (
     LateTickError,
     QuantaError,
