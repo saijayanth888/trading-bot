@@ -1,0 +1,15 @@
+{
+  "_comment": "Two-tier model assignment for the LangGraph-style debate. Grunts run on hermes3:8b for speed; judges (Research Manager, Portfolio Manager) run on hermes3:70b for quality. Operator can flip any node by editing this file — no code changes required.",
+  "market_analyst": "hermes3:8b",
+  "sentiment_analyst": "hermes3:8b",
+  "news_analyst": "hermes3:8b",
+  "fundamentals_analyst": "hermes3:8b",
+  "bull": "hermes3:8b",
+  "bear": "hermes3:8b",
+  "research_manager": "hermes3:70b",
+  "trader": "hermes3:8b",
+  "conservative_critic": "hermes3:8b",
+  "aggressive_critic": "hermes3:8b",
+  "neutral_critic": "hermes3:8b",
+  "portfolio_manager": "hermes3:70b"
+}
