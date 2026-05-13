@@ -18,12 +18,16 @@ RUN pip install \
         "aiohttp>=3.9,<4" \
         "psycopg[binary]>=3.1,<4" \
         "pydantic>=2.6,<3" \
-        "anyio>=4,<5"
+        "anyio>=4,<5" \
+        "numpy>=1.26,<3"
 
 # Copy the V4 core package + the strategy. `src` is the import root.
 COPY src /app/src
 COPY scripts/run_v4_shadow.py /app/run_v4_shadow.py
 COPY user_data/universe.json /app/universe.json
+# Bake the HMM model state into the image — refreshed via training cron;
+# read-only at runtime (regime compute argmax-scores against this).
+COPY user_data/data/regime_hmm.json /app/regime_hmm.json
 
 ENV PYTHONPATH=/app/src
 

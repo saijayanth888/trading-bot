@@ -42,6 +42,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -213,6 +214,203 @@ async def fetch_coinbase_candles(
             continue
     bars.sort(key=lambda b: b.timestamp_utc)
     return bars
+
+
+# ---------------------------------------------------------------------------
+# Regime compute — replaces the freqtrade-side hourly HMM cron
+# ---------------------------------------------------------------------------
+#
+# The HMM model state (means, covars, transmat, state_to_label) is loaded
+# from /app/regime_hmm.json (baked into the image). We pull BTC 1h candles
+# from Coinbase, compute the 4 features the model expects, score each
+# Gaussian state and pick argmax. Result is INSERTed into regime_log so
+# the dashboard's /api/ops/regime envelope stops going stale.
+
+_REGIME_MODEL: dict[str, Any] | None = None
+_REGIME_MODEL_PATH = Path("/app/regime_hmm.json")
+_REGIME_LAST_RUN_AT: float = 0.0
+_REGIME_INTERVAL_SEC: int = 3600  # hourly
+
+
+def _load_regime_model() -> dict[str, Any] | None:
+    global _REGIME_MODEL
+    if _REGIME_MODEL is not None:
+        return _REGIME_MODEL
+    if not _REGIME_MODEL_PATH.is_file():
+        return None
+    try:
+        _REGIME_MODEL = json.loads(_REGIME_MODEL_PATH.read_text())
+        log.info("regime model loaded: %s components, labels=%s",
+                 _REGIME_MODEL.get("n_components"),
+                 _REGIME_MODEL.get("state_to_label"))
+        return _REGIME_MODEL
+    except Exception as exc:
+        log.warning("regime model load failed: %s", exc)
+        return None
+
+
+def _rsi(closes: list[float], period: int = 14) -> float | None:
+    """Wilder RSI on close array; returns None if too few points."""
+    if len(closes) < period + 1:
+        return None
+    deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
+    gains = [max(d, 0) for d in deltas]
+    losses = [-min(d, 0) for d in deltas]
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for g, l in zip(gains[period:], losses[period:]):
+        avg_gain = (avg_gain * (period - 1) + g) / period
+        avg_loss = (avg_loss * (period - 1) + l) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - 100.0 / (1.0 + rs)
+
+
+def _compute_btc_features(bars_1h: list[Any]) -> list[float] | None:
+    """[log_return, realized_vol_30d, volume_ratio, rsi_14] from 1h bars.
+
+    Needs ≥30 days × 24h = 720 bars for the realized_vol window; we use the
+    last 30 days. Returns None if insufficient history.
+    """
+    import math
+    if len(bars_1h) < 60:
+        return None
+    closes = [float(b.close) for b in bars_1h]
+    volumes = [float(b.volume) for b in bars_1h]
+
+    # 1-bar log return (current bar close vs previous)
+    log_return = math.log(closes[-1] / closes[-2]) if closes[-2] > 0 else 0.0
+
+    # Realized vol — std of last min(720, len-1) log returns, annualised
+    n_vol = min(720, len(closes) - 1)
+    log_rets = [
+        math.log(closes[i] / closes[i-1])
+        for i in range(len(closes) - n_vol, len(closes))
+        if closes[i-1] > 0
+    ]
+    if log_rets:
+        mean = sum(log_rets) / len(log_rets)
+        var = sum((r - mean) ** 2 for r in log_rets) / len(log_rets)
+        realized_vol = math.sqrt(var) * math.sqrt(24 * 365)  # annualised
+    else:
+        realized_vol = 0.0
+
+    # Volume ratio — current bar vol / avg of last 20 bars
+    avg_vol = sum(volumes[-20:]) / 20 if len(volumes) >= 20 else 1.0
+    volume_ratio = volumes[-1] / avg_vol if avg_vol > 0 else 1.0
+
+    rsi = _rsi(closes, period=14)
+    if rsi is None:
+        return None
+
+    return [log_return, realized_vol, volume_ratio, rsi]
+
+
+def _gaussian_logpdf_diag(x: list[float], mean: list[float], covar_diag: list[list[float]]) -> float:
+    """log-pdf of a multivariate Gaussian with diagonal covariance.
+
+    `covar_diag` is the n×n covariance matrix in the JSON (zeros off-diag).
+    """
+    import math
+    n = len(x)
+    log_p = 0.0
+    for i in range(n):
+        sigma2 = covar_diag[i][i]
+        if sigma2 <= 0:
+            return -1e9
+        diff = x[i] - mean[i]
+        log_p += -0.5 * (math.log(2 * math.pi * sigma2) + diff * diff / sigma2)
+    return log_p
+
+
+def _classify_regime(features: list[float]) -> tuple[str, float] | None:
+    """Score features against each HMM state; return (label, posterior_prob)."""
+    import math
+    model = _load_regime_model()
+    if not model:
+        return None
+    # z-score using the training-set feature stats
+    fmean = model["feature_mean"]
+    fstd = model["feature_std"]
+    z = [
+        (features[i] - fmean[i]) / (fstd[i] if fstd[i] > 0 else 1.0)
+        for i in range(len(features))
+    ]
+    means = model["means"]
+    covars = model["covars"]
+    state_to_label = model["state_to_label"]
+
+    # Use UNIFORM prior — the model's `startprob` is the t=0 initial
+    # distribution (often [0,1,0,0] from training), not a meaningful
+    # steady-state prior. Argmax-of-likelihood is what we want for
+    # "which regime best explains this bar's features".
+    log_probs = []
+    for i in range(model["n_components"]):
+        log_lik = _gaussian_logpdf_diag(z, means[i], covars[i])
+        log_probs.append(log_lik)
+    # softmax for posterior probability
+    m = max(log_probs)
+    exps = [math.exp(p - m) for p in log_probs]
+    total = sum(exps)
+    posteriors = [e / total for e in exps]
+    best_state = max(range(len(posteriors)), key=lambda i: posteriors[i])
+    label = state_to_label.get(str(best_state)) or state_to_label.get(best_state) or "unknown"
+    return label, posteriors[best_state]
+
+
+async def compute_and_write_regime(
+    session: aiohttp.ClientSession,
+    conn: psycopg.AsyncConnection,
+    coinbase_base: str,
+) -> tuple[str, float] | None:
+    """Pull 30 days of BTC 1h candles, classify regime, write to regime_log.
+
+    Returns the (label, probability) tuple or None on failure.
+    """
+    bars = await fetch_coinbase_candles(session, coinbase_base, "BTC/USD", granularity_sec=3600)
+    if len(bars) < 60:
+        log.warning("regime: insufficient BTC 1h history (%d bars)", len(bars))
+        return None
+
+    feats = _compute_btc_features(bars)
+    if feats is None:
+        log.warning("regime: feature compute returned None")
+        return None
+
+    result = _classify_regime(feats)
+    if result is None:
+        log.warning("regime: model not available")
+        return None
+
+    label, prob = result
+    try:
+        async with conn.cursor() as cur:
+            # regime_log schema (existing): ts, regime, probability, regime_duration_hours
+            # Duration: how long the current regime has held. Look up most recent row.
+            await cur.execute(
+                "SELECT regime, regime_duration_hours FROM regime_log "
+                "WHERE ts > NOW() - INTERVAL '24 hours' ORDER BY ts DESC LIMIT 1"
+            )
+            row = await cur.fetchone()
+            if row and row[0] == label:
+                duration = (row[1] or 0) + 1
+            else:
+                duration = 1  # regime flipped
+            await cur.execute(
+                """
+                INSERT INTO regime_log (ts, regime, probability, regime_duration_hours)
+                VALUES (NOW(), %s, %s, %s)
+                """,
+                (label, float(prob), int(duration)),
+            )
+        await conn.commit()
+        log.info("regime written: %s (p=%.3f, duration=%dh, feats=%s)",
+                 label, prob, duration, [round(f, 4) for f in feats])
+        return label, prob
+    except Exception as exc:
+        log.exception("regime_log write failed: %s", exc)
+        return None
 
 
 async def fetch_regime(session: aiohttp.ClientSession, url: str) -> dict[str, Any]:
@@ -407,6 +605,19 @@ async def run_cycle(cfg: Cfg, session: aiohttp.ClientSession, conn: psycopg.Asyn
     if not _STRATEGY_AVAILABLE:
         log.error("strategy import failed at startup: %s", _STRATEGY_IMPORT_ERROR)
         return
+
+    # Hourly: recompute regime + INSERT into regime_log. Runs at startup
+    # (so a freshly-recycled container immediately refreshes a stale row)
+    # and then once per _REGIME_INTERVAL_SEC. Idempotent on accidental
+    # double-fire — the new row just supersedes the previous.
+    global _REGIME_LAST_RUN_AT
+    now_ts = time.time()
+    if now_ts - _REGIME_LAST_RUN_AT >= _REGIME_INTERVAL_SEC:
+        try:
+            await compute_and_write_regime(session, conn, cfg.coinbase_base)
+        except Exception as exc:
+            log.exception("regime compute failed: %s", exc)
+        _REGIME_LAST_RUN_AT = now_ts
 
     regime_payload = await fetch_regime(session, cfg.regime_url)
     regime_label = regime_payload.get("current") or "unknown"
