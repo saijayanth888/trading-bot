@@ -116,16 +116,28 @@ def heartbeat_probe(path: Path = HEARTBEAT_FILE, max_age_s: float = HEARTBEAT_MA
 async def services_summary() -> dict[str, Any]:
     """Run all service probes in parallel.
 
+    Post-2026-05-13 cutover: freqtrade is replaced by quanta_core. The
+    quanta_core probe is a postgres query (no http listener on the
+    container) — checks decision freshness in quanta_schema.decisions.
+
     The host-only services (hermes-mcp, hermes-gateway, hermes-dashboard) are
     checked via heartbeat files because the host's firewall blocks docker
     bridge traffic to those ports. Heartbeat files are written by the
     hermes-gateway-heartbeat.service (user systemd, every 30 s).
     """
-    tasks = {
+    v4_active = (os.environ.get("LIVE_ENGINE_MODE") or "").lower() in ("live", "shadow")
+
+    tasks: dict[str, Any] = {
         "ollama":     tcp_probe(HOST, 11434),
-        "freqtrade":  http_probe("http://freqtrade:8080/api/v1/ping"),
         "postgres":   tcp_probe("postgres", 5432),
     }
+    # Engine probe: post-cutover, quanta_core (decision freshness via pg).
+    # Pre-cutover, fall back to the freqtrade HTTP ping. Never probe both.
+    if v4_active:
+        tasks["quanta_core"] = _quanta_core_probe()
+    else:
+        tasks["freqtrade"] = http_probe("http://freqtrade:8080/api/v1/ping")
+
     # Heartbeat-based (sync, fast)
     results: dict[str, Any] = {
         "hermes_gateway":   heartbeat_probe(HEARTBEAT_FILE),
@@ -141,6 +153,42 @@ async def services_summary() -> dict[str, Any]:
         else:
             results[k] = out
     return results
+
+
+async def _quanta_core_probe() -> dict[str, Any]:
+    """Probe V4 by asking postgres: how stale is the latest decision?
+
+    The quanta-core container has no HTTP surface; its liveness is
+    indistinguishable from postgres reachability + decision freshness.
+    Returns up=True when there's a decision row in the last 10 minutes,
+    "stale" when older, "no_data" when the table is empty.
+    """
+    endpoint = "quanta_schema.decisions (postgres)"
+    try:
+        # Use the same sync ops_db._connect — cheap, ~1 ms.
+        from . import ops_db
+        if not ops_db._HAVE_PG:
+            return {"up": False, "via": "pg", "endpoint": endpoint,
+                    "error": "psycopg not installed"}
+        with ops_db._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT EXTRACT(EPOCH FROM (NOW() - MAX(ts)))::int FROM quanta_schema.decisions"
+            )
+            row = cur.fetchone()
+        # dict_row factory: row is a dict with one key (extracted age value)
+        age_s = None
+        if row:
+            # The value is the only column; grab it whatever key it landed under.
+            age_s = next(iter(row.values()), None)
+        if age_s is None:
+            return {"up": False, "via": "pg", "endpoint": endpoint,
+                    "error": "no decisions in ledger yet", "age_s": None}
+        if age_s < 600:
+            return {"up": True, "via": "pg", "endpoint": endpoint, "age_s": int(age_s)}
+        return {"up": False, "via": "pg", "endpoint": endpoint,
+                "error": f"last decision {age_s}s ago", "age_s": int(age_s)}
+    except Exception as exc:
+        return {"up": False, "via": "pg", "endpoint": endpoint, "error": str(exc)[:200]}
 
 
 # --------------------------------------------------------------------------
