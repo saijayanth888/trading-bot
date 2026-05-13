@@ -556,6 +556,21 @@ async def sentiment():
     llama_score = latest.get("llama_score")
     key_events = latest.get("key_events") or []
 
+    # Per-source breakdown — surface which sources contributed to this row
+    # so the operator can see at a glance whether reddit/HN/StockTwits are
+    # live or silently dark. `sources_ok` is jsonb (list of source names);
+    # `sources_failed` is jsonb (list of [name, error] pairs).
+    sources_ok_raw = latest.get("sources_ok") or []
+    sources_failed_raw = latest.get("sources_failed") or []
+    sources_ok: list[str] = [str(s) for s in sources_ok_raw] if isinstance(sources_ok_raw, list) else []
+    sources_failed: list[str] = []
+    if isinstance(sources_failed_raw, list):
+        for entry in sources_failed_raw:
+            if isinstance(entry, list) and entry:
+                sources_failed.append(str(entry[0]))
+            elif isinstance(entry, str):
+                sources_failed.append(entry)
+
     return _envelope(
         "degraded" if stale else "ok",
         data={
@@ -575,6 +590,10 @@ async def sentiment():
             "fear_greed_label": latest.get("fear_greed_classification"),
             "community_score": float(latest["community_score_avg"]) if latest.get("community_score_avg") is not None else None,
             "key_events": list(key_events)[:5] if isinstance(key_events, list) else [],
+            # Per-source breakdown — answers "which sources are alive right now?"
+            "sources_ok": sources_ok,
+            "sources_failed": sources_failed,
+            "n_reddit": int(latest.get("n_reddit") or 0),
             "hourly_24h": [
                 {"hour": r["hour"].isoformat() if hasattr(r["hour"], "isoformat") else str(r["hour"]),
                  "score": float(r["score"]),
