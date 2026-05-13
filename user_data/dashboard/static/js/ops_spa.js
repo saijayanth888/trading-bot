@@ -163,6 +163,10 @@
     // ~/.hermes/scripts/shark_override_verify.sh after each market_open
     // run. Surfaces the SharkOverrideHealthLive card under TodayScoreboard.
     shark_override_health: "/api/ops/shark_override_health",
+    // V4 FLASH-NEWS — single-row "what is V4 trading right now" strip
+    // mounted ABOVE TodayScoreboard. Open positions / closed-today P&L /
+    // regime / last fill at-a-glance. Cheap endpoint (< 200 B payload).
+    flash_status: "/api/ops/flash_status",
     // ModelForge weekly LoRA training pipeline status — surfaces the
     // WeeklyTrainingLive card under TodayScoreboard. Degrades soft when
     // model-forge is offline (card still renders with local-only fields).
@@ -358,6 +362,77 @@
       pts.push((cx + rad * Math.cos(ang)).toFixed(1) + "," + (cy + rad * Math.sin(ang)).toFixed(1));
     }
     return { points: pts.join(" "), labels: ["Deep", "Fast", "F&G", "Agree"] };
+  }
+
+  // ─────────────── FLASH-NEWS STRIP — V4 "what's trading right now" ───────
+  // Single thin row mounted ABOVE TodayScoreboard. Auto-refresh on the
+  // fast-poll tick. Designed to answer "what is V4 doing right now?" in
+  // one glance — engine + open count + open symbols + closed-today P&L
+  // + regime + last fill time. Operator-requested 2026-05-13 post-cutover.
+  function FlashNewsStripLive({ data }) {
+    const env = envelopeData(data.flash_status) || {};
+    const engine = String(env.engine || "—").toUpperCase();
+    const mode = String(env.mode || "").toUpperCase();
+    const openN = Number(env.open_positions || 0);
+    const openSyms = (env.open_symbols || []).slice(0, 6);
+    const openNotional = Number(env.open_notional_usd || 0);
+    const closedN = Number(env.closed_today || 0);
+    const closedPnl = Number(env.closed_today_pnl_usd || 0);
+    const regime = String(env.regime || "—");
+    const regimeProb = Number(env.regime_prob || 0);
+    const lastFillTs = env.last_fill_ts;
+    const lastSym = env.last_fill_symbol;
+    const lastSide = env.last_fill_side;
+
+    const regimeCls =
+      regime === "trending_up" ? "up" :
+      regime === "trending_down" ? "down" :
+      regime === "high_volatility" ? "warn" : "info";
+    const pnlCls = closedPnl > 0 ? "up" : closedPnl < 0 ? "down" : "dim";
+    const engineCls = engine === "QUANTA_CORE" ? "up" : "info";
+
+    const item = (label, value, cls) => h("div", {
+      style: { display: "inline-flex", alignItems: "baseline", gap: 6,
+               padding: "0 12px", borderRight: "1px solid var(--bd-1)",
+               flex: "0 0 auto", whiteSpace: "nowrap" },
+    },
+      h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)", letterSpacing: ".08em" } }, label),
+      h("span", { className: "num " + (cls || ""), style: { fontSize: "var(--t-sm)" } }, value)
+    );
+
+    return h("div", {
+      id: "flash-news",
+      className: "card anchor",
+      style: {
+        padding: "8px 16px",
+        marginBottom: "var(--gap-grid)",
+        display: "flex",
+        flexDirection: "row",
+        flexWrap: "nowrap",
+        alignItems: "center",
+        gap: 0,
+        overflowX: "auto",
+        overflowY: "hidden",
+        whiteSpace: "nowrap",
+      },
+    },
+      h("div", { className: "pill " + engineCls,
+                  style: { flex: "0 0 auto", padding: "2px 10px",
+                           marginRight: 8, whiteSpace: "nowrap" } },
+        h("span", { className: "dot " + engineCls + " pulse" }),
+        " ", engine, " · ", mode || "—"),
+      item("OPEN", openN + (openN > 0 ? " · " + openSyms.join(" ") : ""),
+           openN > 0 ? "up" : "dim"),
+      openN > 0 ? item("NOTIONAL", "$" + openNotional.toLocaleString("en-US", { maximumFractionDigits: 0 }), "accent") : null,
+      item("CLOSED TODAY", closedN, "info"),
+      item("REALIZED", (closedPnl >= 0 ? "+" : "") + "$" + closedPnl.toFixed(2), pnlCls),
+      item("REGIME", regime + " · " + (regimeProb * 100).toFixed(0) + "%", regimeCls),
+      lastFillTs ? item("LAST FILL",
+        (lastSym || "—") + " " + (lastSide || ""), "dim") : null,
+      lastFillTs ? h("div", { style: { marginLeft: "auto", flex: "0 0 auto", paddingLeft: 12 } },
+        h(TimeSince, { ts: lastFillTs, className: "mono dim",
+                       style: { fontSize: "var(--t-2xs)" } })) : null
+    );
   }
 
   // ─────────────── TODAY SCOREBOARD — single-card at-a-glance summary ─────
@@ -6120,9 +6195,13 @@
           // summary. Only renders when blockers exist; zero footprint at rest.
           // Reads from the existing data.gates slot — no new endpoint.
           h(BlockerBanner, { data }),
+          // FLASH-NEWS STRIP — single-row "what's V4 trading RIGHT NOW"
+          // ticker, mounted ABOVE the scoreboard so it's the first surface
+          // the operator sees on every refresh. NOT a column in the
+          // scoreboard — its own thin card (operator-requested 2026-05-13).
+          h(FlashNewsStripLive, { data }),
           // TODAY SCOREBOARD — operator's at-a-glance: capital, day P&L,
-          // trades done, open positions, drawdown. Mounted ABOVE the hero
-          // so it's the first thing the eye lands on (top of the page).
+          // trades done, open positions, drawdown.
           h(TodayScoreboard, { data }),
           // SHARK OVERRIDE HEALTH — verifier card for the BEAR_VOLATILE
           // paper-mode override. Sits directly under the scoreboard so a

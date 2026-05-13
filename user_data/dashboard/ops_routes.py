@@ -749,14 +749,16 @@ DEFAULT_PAIRS = [p.strip() for p in os.environ.get(
 
 
 @router.get("/sparklines")
-async def sparklines(timeframe: str = "5m", limit: int = 60):
+async def sparklines(timeframe: str = "5m", limit: int = 288):
     """Per-pair compact close-price arrays + 24h % change.
 
     Used by the Ops trades panel to render small inline price sparklines.
-    Reuses freqtrade's /api/v1/pair_candles so we don't add a second data
-    pipe. ``limit`` capped at 200 so payloads stay small.
+    Default `limit=288` gives true 24h coverage at 5m (288 = 24 × 12);
+    bump cap to 500 so 1h timeframe (24h = 24 candles) and 1m (24h = 1440)
+    can be requested explicitly. Coinbase REST fallback covers up to 300
+    candles per public call.
     """
-    limit = max(10, min(200, int(limit)))
+    limit = max(10, min(500, int(limit)))
     if timeframe not in ("1m", "5m", "15m", "1h", "6h"):
         timeframe = "5m"
 
@@ -2901,6 +2903,136 @@ async def market_hours():
 
 def _v4_is_active_engine() -> bool:
     return (os.environ.get("LIVE_ENGINE_MODE") or "").lower() in ("live", "shadow")
+
+
+# --------------------------------------------------------------------------
+# /api/ops/flash_status — top-of-dashboard "flash news" strip
+# --------------------------------------------------------------------------
+# A single-row at-a-glance summary the operator sees the instant they load
+# the page: which engine is live, how many positions open right now, how
+# much closed-trade P&L today, current regime, time since last fill.
+# Designed to occupy ONE row above the today's scoreboard — never a column.
+
+
+@router.get("/flash_status")
+async def flash_status():
+    """Compact ticker payload for the FlashNewsStripLive card.
+
+    Pulls (in parallel where possible) from quanta_schema (V4 open positions
+    + last fill), public.trade_journal (today's closed P&L count), regime_log
+    (current regime). Cheap — typical response < 200 bytes.
+    """
+    out: dict[str, Any] = {
+        "engine": "quanta_core" if _v4_is_active_engine() else "freqtrade",
+        "mode": os.environ.get("LIVE_ENGINE_MODE", "unknown"),
+        "open_positions": 0,
+        "open_symbols": [],
+        "open_notional_usd": 0.0,
+        "closed_today": 0,
+        "closed_today_pnl_usd": 0.0,
+        "regime": None,
+        "regime_prob": None,
+        "last_fill_ts": None,
+        "last_fill_symbol": None,
+        "last_fill_side": None,
+    }
+
+    if _v4_is_active_engine():
+        try:
+            loop = asyncio.get_running_loop()
+
+            def _pull() -> dict[str, Any]:
+                from . import ops_db
+                if not ops_db._HAVE_PG:
+                    return {}
+                with ops_db._connect() as conn, conn.cursor() as cur:
+                    # Open paper positions (sum net qty > 0)
+                    cur.execute(
+                        """
+                        SELECT p.symbol,
+                               SUM(CASE WHEN f.side='BUY'  THEN f.qty ELSE 0 END) -
+                               SUM(CASE WHEN f.side='SELL' THEN f.qty ELSE 0 END)            AS net_qty,
+                               SUM(CASE WHEN f.side='BUY' THEN f.qty * f.price ELSE 0 END) /
+                               NULLIF(SUM(CASE WHEN f.side='BUY' THEN f.qty ELSE 0 END), 0)  AS avg_buy_px
+                        FROM quanta_schema.fills f
+                        JOIN quanta_schema.proposals p USING (client_order_id)
+                        GROUP BY p.symbol
+                        HAVING SUM(CASE WHEN f.side='BUY' THEN f.qty ELSE 0 END) -
+                               SUM(CASE WHEN f.side='SELL' THEN f.qty ELSE 0 END) > 0
+                        """
+                    )
+                    open_rows = cur.fetchall()
+
+                    # Closed-today P&L from trade_journal
+                    cur.execute(
+                        """
+                        SELECT count(*), COALESCE(SUM(pnl), 0)
+                        FROM public.trade_journal
+                        WHERE closed_at IS NOT NULL
+                          AND closed_at >= date_trunc('day', NOW())
+                        """
+                    )
+                    closed_row = cur.fetchone()
+
+                    # Latest fill
+                    cur.execute(
+                        """
+                        SELECT f.ts, p.symbol, f.side
+                        FROM quanta_schema.fills f
+                        JOIN quanta_schema.proposals p USING (client_order_id)
+                        ORDER BY f.ts DESC LIMIT 1
+                        """
+                    )
+                    last_fill = cur.fetchone()
+
+                    # Current regime
+                    cur.execute(
+                        """
+                        SELECT regime, probability
+                        FROM regime_log
+                        ORDER BY ts DESC LIMIT 1
+                        """
+                    )
+                    regime_row = cur.fetchone()
+
+                # dict_row factory — extract by named keys
+                positions = []
+                notional = 0.0
+                for r in open_rows:
+                    sym = r["symbol"]
+                    qty = float(r["net_qty"] or 0)
+                    avg_px = float(r["avg_buy_px"] or 0)
+                    positions.append(sym)
+                    notional += qty * avg_px
+                return {
+                    "positions": positions,
+                    "notional": round(notional, 2),
+                    "closed_count": int((closed_row or {}).get("count", 0) or 0),
+                    "closed_pnl": float((closed_row or {}).get("coalesce", 0) or 0),
+                    "last_fill_ts": (last_fill or {}).get("ts"),
+                    "last_fill_symbol": (last_fill or {}).get("symbol"),
+                    "last_fill_side": (last_fill or {}).get("side"),
+                    "regime": (regime_row or {}).get("regime"),
+                    "regime_prob": float((regime_row or {}).get("probability") or 0),
+                }
+
+            res = await asyncio.wait_for(loop.run_in_executor(None, _pull),
+                                          timeout=ENDPOINT_TIMEOUT_S)
+            out["open_positions"] = len(res.get("positions") or [])
+            out["open_symbols"] = res.get("positions") or []
+            out["open_notional_usd"] = res.get("notional") or 0.0
+            out["closed_today"] = res.get("closed_count") or 0
+            out["closed_today_pnl_usd"] = round(res.get("closed_pnl") or 0.0, 4)
+            last_ts = res.get("last_fill_ts")
+            out["last_fill_ts"] = last_ts.isoformat() if last_ts else None
+            out["last_fill_symbol"] = res.get("last_fill_symbol")
+            out["last_fill_side"] = res.get("last_fill_side")
+            out["regime"] = res.get("regime")
+            out["regime_prob"] = res.get("regime_prob")
+        except Exception as exc:
+            logger.warning("flash_status pull failed: %s", exc)
+
+    return _envelope("ok", data=out)
 
 
 def _v4_crypto_open_positions() -> list[dict]:
