@@ -632,17 +632,26 @@ async def _write_trade_journal_row(
         )
 
 
-async def fetch_positions(conn: psycopg.AsyncConnection) -> dict[str, dict[str, Any]]:
+async def fetch_positions(
+    conn: psycopg.AsyncConnection,
+    *,
+    strategy: str | None = None,
+) -> dict[str, dict[str, Any]]:
     """Aggregate net positions per symbol from the fills ledger.
 
-    Returns {symbol: {"side": "BUY"|"SELL", "qty": Decimal, "avg_px": float}}.
-    Used to seed the in-process Context so strategies see their open inventory.
+    Returns ``{symbol: {"side": "BUY", "qty": Decimal, "avg_px": float}}``.
     Pure paper accounting; no exchange round-trip.
+
+    When ``strategy`` is provided, only fills whose proposal was emitted by
+    that strategy are counted. This is the strategy-ownership rule that
+    prevents MeanRevBB ↔ TrendFollow infighting: TrendFollow no longer
+    "sees" a position MeanRevBB opened, so it can't exit it. Each strategy
+    manages only its own positions end-to-end.
     """
     out: dict[str, dict[str, Any]] = {}
-    async with conn.cursor() as cur:
-        await cur.execute(
-            """
+    if strategy is None:
+        # legacy/global aggregate path (used by dashboard endpoints)
+        sql = """
             SELECT
                 p.symbol,
                 SUM(CASE WHEN f.side = 'BUY'  THEN f.qty ELSE 0 END) -
@@ -654,8 +663,27 @@ async def fetch_positions(conn: psycopg.AsyncConnection) -> dict[str, dict[str, 
             GROUP BY p.symbol
             HAVING SUM(CASE WHEN f.side='BUY' THEN f.qty ELSE 0 END) -
                    SUM(CASE WHEN f.side='SELL' THEN f.qty ELSE 0 END) > 0
-            """
-        )
+        """
+        params: tuple = ()
+    else:
+        sql = """
+            SELECT
+                p.symbol,
+                SUM(CASE WHEN f.side = 'BUY'  THEN f.qty ELSE 0 END) -
+                SUM(CASE WHEN f.side = 'SELL' THEN f.qty ELSE 0 END)            AS net_qty,
+                SUM(CASE WHEN f.side = 'BUY' THEN f.qty * f.price ELSE 0 END) /
+                NULLIF(SUM(CASE WHEN f.side = 'BUY' THEN f.qty ELSE 0 END), 0)  AS avg_buy_px
+            FROM quanta_schema.fills f
+            JOIN quanta_schema.proposals p USING (client_order_id)
+            WHERE p.strategy = %s
+            GROUP BY p.symbol
+            HAVING SUM(CASE WHEN f.side='BUY' THEN f.qty ELSE 0 END) -
+                   SUM(CASE WHEN f.side='SELL' THEN f.qty ELSE 0 END) > 0
+        """
+        params = (strategy,)
+
+    async with conn.cursor() as cur:
+        await cur.execute(sql, params)
         rows = await cur.fetchall()
     for sym, net_qty, avg_px in rows:
         out[sym] = {
@@ -693,19 +721,37 @@ async def run_cycle(cfg: Cfg, session: aiohttp.ClientSession, conn: psycopg.Asyn
     log.info("cycle start · regime=%s · n_symbols=%d · mode=%s",
              regime_label, len(cfg.symbols), cfg.mode)
 
-    ctx = _InProcessContext()
+    # Per-strategy positions: each strategy only sees positions IT opened.
+    # This is the ownership rule that fixes the MeanRevBB <-> TrendFollow
+    # infighting (where one strategy entered and the other exited within
+    # 5 min). When a strategy can't see another's position, it can't emit
+    # a SELL on it. Fetched once per cycle, used to seed strategy-scoped
+    # ctx instances below.
+    positions_by_strategy: dict[str, dict[str, dict[str, Any]]] = {
+        "mean_rev_bb": {},
+        "trend_follow": {},
+    }
     if cfg.mode == "live":
         # 1) Fill any pending proposals from last cycle (paper simulator).
-        # 2) Seed positions from the fills ledger so strategies see inventory.
         await fill_pending_then_collect_closes(cfg, session, conn)
-        try:
-            positions = await fetch_positions(conn)
-            ctx.set_positions(positions)
-            if positions:
-                log.info("loaded %d open positions: %s", len(positions),
-                         ", ".join(f"{s}={p['qty']}" for s, p in positions.items()))
-        except Exception as exc:
-            log.warning("position load failed: %s", exc)
+        # 2) Per-strategy position load. Each row's owning strategy comes
+        #    from quanta_schema.proposals.strategy (already written on every
+        #    BUY/SELL proposal). Fetch in parallel for both strategies.
+        for strat_name in list(positions_by_strategy.keys()):
+            try:
+                positions_by_strategy[strat_name] = await fetch_positions(
+                    conn, strategy=strat_name,
+                )
+            except Exception as exc:
+                log.warning("position load failed for %s: %s", strat_name, exc)
+        # one-line summary
+        for strat_name, ps in positions_by_strategy.items():
+            if ps:
+                log.info(
+                    "%s owns %d position(s): %s",
+                    strat_name, len(ps),
+                    ", ".join(f"{s}={p['qty']}" for s, p in ps.items()),
+                )
 
     for symbol in cfg.symbols:
         try:
@@ -718,21 +764,30 @@ async def run_cycle(cfg: Cfg, session: aiohttp.ClientSession, conn: psycopg.Asyn
             log.info("%s: %d bars (warm-up)", symbol, len(bars))
             continue
 
-        ctx.set_history(symbol, bars[:-1])  # history excludes the bar we'll feed
-        latest_bar = bars[-1]
-
-        # Build the strategy roster — each strategy gets its own clean
-        # instance per cycle (cheap; they're tiny).
+        # Build the strategy roster — each strategy gets its OWN Context
+        # instance with ONLY its own positions visible. This enforces the
+        # strategy-ownership rule that fixes the open->close 5-min stomp
+        # between MeanRevBB and TrendFollow.
         roster: list[tuple[str, Any]] = []
+
+        ctx_mr = _InProcessContext()
+        ctx_mr.set_history(symbol, bars[:-1])
+        ctx_mr.set_positions(positions_by_strategy.get("mean_rev_bb") or {})
         roster.append(("mean_rev_bb", MeanRevBB(
-            ctx=ctx,
+            ctx=ctx_mr,
             config={"symbol": symbol, "timeframe": "5m", "state": {"regime": regime_label}},
         )))
+
         if _TRENDFOLLOW_AVAILABLE:
+            ctx_tf = _InProcessContext()
+            ctx_tf.set_history(symbol, bars[:-1])
+            ctx_tf.set_positions(positions_by_strategy.get("trend_follow") or {})
             roster.append(("trend_follow", TrendFollow(
-                ctx=ctx,
+                ctx=ctx_tf,
                 config={"symbol": symbol, "timeframe": "5m", "state": {"regime": regime_label}},
             )))
+
+        latest_bar = bars[-1]
 
         for strat_name, strat in roster:
             try:
