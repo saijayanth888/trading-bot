@@ -30,11 +30,22 @@ except ImportError:
 # Perspective prompts
 # ---------------------------------------------------------------------------
 
+_EVIDENCE_RULE = (
+    "EVIDENCE RULE: Every response must cite at least TWO concrete data points "
+    "drawn from the prompt context — e.g. specific price levels ($420.55), "
+    "percentage moves (+3.2%), technical indicators (RSI 28, MACD bull cross, "
+    "ATR 1.85, EMA20 above SMA50, VWAP reclaim, ADX 32, parabolic SAR flip, "
+    "Bollinger Band squeeze), or ISO dates (2026-04-30 earnings). Generic "
+    "claims like 'strong momentum' without a number are not acceptable — the "
+    "downstream curator drops citation-thin responses from the training set."
+)
+
 _AGGRESSIVE_SYSTEM = (
     "You are an aggressive risk analyst who champions high-reward opportunities. "
     "You believe calculated risk-taking is essential for alpha generation. "
     "Focus on upside potential, market momentum, and why caution may cause missed opportunities. "
     "Counter conservative/neutral concerns with data-driven optimism. "
+    + _EVIDENCE_RULE + " "
     "Always return valid JSON."
 )
 
@@ -43,6 +54,7 @@ _CONSERVATIVE_SYSTEM = (
     "You believe avoiding losses is more important than capturing gains. "
     "Focus on downside risks, position sizing dangers, macro headwinds, and tail risks. "
     "Challenge aggressive assumptions with worst-case scenarios. "
+    + _EVIDENCE_RULE + " "
     "Always return valid JSON."
 )
 
@@ -51,6 +63,7 @@ _NEUTRAL_SYSTEM = (
     "You weigh both aggressive and conservative viewpoints objectively. "
     "Focus on finding the right position size, stop placement, and timing. "
     "Synthesize the best points from both sides into a pragmatic recommendation. "
+    + _EVIDENCE_RULE + " "
     "Always return valid JSON."
 )
 
@@ -59,6 +72,7 @@ _JUDGE_SYSTEM = (
     "(aggressive, conservative, neutral) about a proposed trade. "
     "Synthesize their arguments into a final risk-adjusted recommendation. "
     "Be decisive. If any perspective raised a legitimate dealbreaker, veto the trade. "
+    + _EVIDENCE_RULE + " "
     "Always return valid JSON."
 )
 
