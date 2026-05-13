@@ -144,8 +144,14 @@
     const dayPct = dd != null ? -dd : null;
     const modeLabel = (modeD.mode || "unknown").toUpperCase() + (modeD.dry_run ? " · DRY-RUN" : "");
     const modeCls = modeD.mode === "live" ? "up" : modeD.mode === "paused" ? "warn" : "info";
-    const ft = svc.freqtrade || {};
-    const ftOk = !!ft.up;
+    // Engine label + probe — V4 (quanta_core) post-cutover, freqtrade pre-.
+    const engineName = String(modeD.engine || "").toLowerCase();
+    const engineMeta = (engineName === "quanta_core" || svc.quanta_core)
+      ? { name: "QUANTA", up: (svc.quanta_core || {}).up }
+      : (engineName === "freqtrade" || svc.freqtrade)
+        ? { name: "FREQTRADE", up: (svc.freqtrade || {}).up }
+        : { name: "ENGINE", up: null };
+    const ftOk = engineMeta.up === true;
     const hbStatus = deriveHeartbeatStatus({
       services: services,
       mode: mode,
@@ -163,9 +169,9 @@
       h("div", { className: "tb-group" },
         h("span", { className: "pill " + modeCls },
           h("span", { className: "dot " + modeCls + " pulse" }), " ", modeLabel),
-        h("span", { className: "pill " + (ftOk ? "up" : "down") },
-          h("span", { className: "dot " + (ftOk ? "up" : "down") + " pulse" }),
-          " FREQTRADE ", ftOk ? "OK" : "DOWN")
+        h("span", { className: "pill " + (engineMeta.up === true ? "up" : engineMeta.up === false ? "down" : "") },
+          h("span", { className: "dot " + (engineMeta.up === true ? "up pulse" : engineMeta.up === false ? "down" : "dim") }),
+          " ", engineMeta.name, " ", engineMeta.up === true ? "OK" : engineMeta.up === false ? "DOWN" : "—")
       ),
       h("div", { className: "tb-divider" }),
       h("div", { className: "tb-group", "data-test": "topbar-equity" },

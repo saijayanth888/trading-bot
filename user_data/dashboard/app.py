@@ -250,6 +250,11 @@ async def api_candles(
     macd_hist = _hist_series(df, "macd_hist")
     regime = regime_segments_from_df(df)
     state = latest_state_from_df(df, pair)
+    # Post-cutover: Coinbase-sourced df has no FreqAI columns. Merge the
+    # canonical regime + sentiment from the V4-era sources so the pair
+    # table doesn't render "regime unknown" for every row.
+    if not state.get("regime"):
+        state.update(_v4_state_fallback())
     last_close = float(df["close"].iloc[-1]) if "close" in df.columns else None
     last_time = (
         int(pd.to_datetime(df["date"].iloc[-1], utc=True).timestamp())
@@ -291,6 +296,36 @@ async def api_trades(base: str, quote: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _v4_state_fallback() -> dict[str, Any]:
+    """When freqtrade is dead, derive regime + sentiment from the V4-era
+    sources of truth instead of empty dataframes.
+
+    - regime / regime_confidence  → ops_db.regime_latest()
+    - sentiment_score / confidence → ops_db.sentiment_latest()
+    Returns {} on any failure (caller already handles that path).
+    """
+    out: dict[str, Any] = {}
+    try:
+        from .ops_db import regime_latest, sentiment_latest
+    except Exception:
+        return out
+    try:
+        rl = regime_latest() or {}
+        if rl.get("regime"):
+            out["regime"] = rl["regime"]
+            out["regime_confidence"] = float(rl.get("probability") or 0.0)
+    except Exception:
+        pass
+    try:
+        sl = sentiment_latest() or {}
+        if sl.get("sentiment_score") is not None:
+            out["sentiment_score"] = float(sl["sentiment_score"])
+            out["sentiment_confidence"] = float(sl.get("confidence") or 0.0)
+    except Exception:
+        pass
+    return out
+
+
 async def _build_state_payload() -> dict[str, Any]:
     pair = (DEFAULT_PAIRS[0] if DEFAULT_PAIRS else "BTC/USD").strip()
 
@@ -304,6 +339,12 @@ async def _build_state_payload() -> dict[str, Any]:
     status = await status_task
 
     pair_state = latest_state_from_df(df, pair) if df is not None else {}
+
+    # Post-cutover: freqtrade is dead → df has no FreqAI columns → regime
+    # comes back None. Fall back to the V4-era canonical sources so the
+    # dashboard pair table doesn't render "regime unknown" everywhere.
+    if not pair_state.get("regime"):
+        pair_state.update(_v4_state_fallback())
     daily_pnl = fetch_daily_pnl()
     recent = fetch_recent_trades(limit=10)
     champion = fetch_champion()

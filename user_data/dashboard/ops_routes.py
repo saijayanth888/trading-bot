@@ -761,7 +761,16 @@ async def sparklines(timeframe: str = "5m", limit: int = 60):
         timeframe = "5m"
 
     async def _one(pair: str):
+        # Prefer freqtrade when available; fall back to Coinbase public REST
+        # post-cutover (the freqtrade container is stopped). Either source
+        # yields a df with a 'close' column; the rest of the math is the same.
         df = await fetch_freqtrade_candles(pair, timeframe=timeframe, limit=limit)
+        if df is None or df.empty:
+            try:
+                from .data_sources import fetch_coinbase_candles
+                df = await fetch_coinbase_candles(pair, timeframe=timeframe, limit=limit)
+            except Exception:
+                df = None
         if df is None or df.empty:
             return pair, {"closes": [], "current": None, "pct_24h": None}
         closes = [float(x) for x in df["close"].tolist()]
