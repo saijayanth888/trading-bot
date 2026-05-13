@@ -4266,35 +4266,62 @@ def _count_reflections_since(path: Path, since: datetime) -> int:
     We count lines starting with ``REFLECTION:`` whose enclosing block
     bears a date >= ``since``. Cheap parser — no regex backreferences.
     Returns 0 on any read error (operator card must never 500).
-    """
-    if not path.is_file():
-        return 0
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return 0
 
-    count = 0
-    current_date: datetime | None = None
-    for line in text.splitlines():
-        ls = line.strip()
-        if ls.startswith("[") and "|" in ls:
-            # Extract the first field as YYYY-MM-DD. Tolerate junk.
-            head = ls.lstrip("[").split("|", 1)[0].strip()
-            try:
-                current_date = datetime.strptime(head[:10], "%Y-%m-%d").replace(
-                    tzinfo=timezone.utc
-                )
-            except ValueError:
-                current_date = None
-        elif ls.startswith("REFLECTION:"):
-            if current_date is not None and current_date >= since:
-                # A reflection-line whose preceding block date is in window.
-                # Skip empty REFLECTION lines (e.g. "REFLECTION:" with no body).
-                body = ls[len("REFLECTION:"):].strip()
-                if body:
-                    count += 1
-    return count
+    Fallback: when decisions.md has no REFLECTION blocks in window, count
+    Shark's ``trade_reviewer`` rows in ``stocks/memory/llm-calls.jsonl``
+    (its post-trade analysis lives there since the stage/12-reflector cron
+    that would write decisions.md was never reactivated post-V4-cutover).
+    Returns whichever source had more, so once decisions.md starts being
+    populated it will dominate.
+    """
+    decisions_count = 0
+    if path.is_file():
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            current_date: datetime | None = None
+            for line in text.splitlines():
+                ls = line.strip()
+                if ls.startswith("[") and "|" in ls:
+                    head = ls.lstrip("[").split("|", 1)[0].strip()
+                    try:
+                        current_date = datetime.strptime(head[:10], "%Y-%m-%d").replace(
+                            tzinfo=timezone.utc
+                        )
+                    except ValueError:
+                        current_date = None
+                elif ls.startswith("REFLECTION:"):
+                    if current_date is not None and current_date >= since:
+                        body = ls[len("REFLECTION:"):].strip()
+                        if body:
+                            decisions_count += 1
+        except OSError:
+            pass
+
+    # Fallback to trade_reviewer JSONL rows.
+    llm_calls_path = _first_existing(_LLM_CALLS_PATHS)
+    reviewer_count = 0
+    if llm_calls_path is not None:
+        try:
+            cutoff_iso = since.isoformat()
+            with llm_calls_path.open("r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    if (obj.get("agent") or "") != "trade_reviewer":
+                        continue
+                    ts = obj.get("timestamp") or obj.get("ts") or ""
+                    if cutoff_iso and ts and ts < cutoff_iso:
+                        continue
+                    reviewer_count += 1
+        except OSError:
+            pass
+
+    return max(decisions_count, reviewer_count)
 
 
 def _count_lessons_injected_since(path: Path, since: datetime) -> int | None:
