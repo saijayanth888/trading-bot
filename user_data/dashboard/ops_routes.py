@@ -728,15 +728,56 @@ async def _freqtrade_post(endpoint: str) -> tuple[int, dict | None, str | None]:
             return r.status_code, None, "non-JSON response"
 
 
+def _run_state_set(*, paused: bool, reason: str | None, set_by: str) -> dict[str, Any]:
+    """UPSERT quanta_schema.run_state. Single source of truth for the V4
+    runner's kill switch — `run_v4_shadow.py` reads `paused` at the top
+    of each cycle and short-circuits proposal/order generation when True.
+    """
+    from . import ops_db
+    if not ops_db._HAVE_PG:
+        raise RuntimeError("postgres unavailable")
+    with ops_db._connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE quanta_schema.run_state
+               SET paused        = %s,
+                   paused_reason = %s,
+                   paused_at     = CASE WHEN %s THEN NOW() ELSE NULL END,
+                   set_by        = %s,
+                   updated_at    = NOW()
+             WHERE id = 1
+            RETURNING paused, paused_reason, paused_at, set_by, updated_at
+            """,
+            (paused, reason, paused, set_by),
+        )
+        row = cur.fetchone()
+        conn.commit()
+    if not row:
+        raise RuntimeError("run_state row missing (migration 003 not applied?)")
+    return {
+        "paused": row["paused"],
+        "paused_reason": row["paused_reason"],
+        "paused_at": row["paused_at"].isoformat() if row["paused_at"] else None,
+        "set_by": row["set_by"],
+        "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+    }
+
+
 @router.post("/pause", dependencies=[Depends(require_mcp_key)])
 async def pause(request: Request):
+    """Pause V4 trading. Post-cutover: writes to quanta_schema.run_state
+    instead of POSTing to dead freqtrade. The V4 runner reads run_state
+    on every cycle; new BUY proposals are skipped while paused. Existing
+    positions stay open (use the kill switch to flatten)."""
     body = await request.json() if request.headers.get("content-length") else {}
     note = body.get("reason", "ops-tab manual pause")
-    code, payload, err = await _freqtrade_post("/api/v1/stop")
-    if err or code >= 400:
-        raise HTTPException(status_code=code if code >= 400 else 502,
-                            detail=err or f"freqtrade {code}: {payload}")
-    return _envelope("ok", data={"freqtrade_response": payload, "reason": note})
+    set_by = body.get("set_by", "dashboard")
+    try:
+        state = _run_state_set(paused=True, reason=note, set_by=set_by)
+    except Exception as exc:
+        logger.exception("pause failed")
+        raise HTTPException(status_code=502, detail=f"run_state write failed: {exc}")
+    return _envelope("ok", data={"run_state": state, "reason": note})
 
 
 # --------------------------------------------------------------------------
@@ -1195,18 +1236,32 @@ async def resume(request: Request):
     # ops_db.trades_risk_summary returns drawdown_pct_30d as a fraction
     # (e.g. -0.012 = -1.2%); convert to percent for the threshold check
     # and the human-readable error string.
+    #
+    # Post-cutover (paper mode): the historical drawdown metric is
+    # dominated by legacy freqtrade fills with stale risk semantics.
+    # Skip the drawdown gate for paper mode; circuit breaker still
+    # applies. `force=true` in body bypasses both gates (operator escape).
     loop = asyncio.get_running_loop()
     risk = await loop.run_in_executor(None, ops_db.trades_risk_summary)
     dd_pct = (risk.get("drawdown_pct_30d") or 0) * 100
-    if dd_pct < -6.0:
+    force = bool(body.get("force"))
+    is_paper = _v4_is_active_engine()  # paper-mode paper-fill simulator
+    if not force and not is_paper and dd_pct < -6.0:
         raise HTTPException(status_code=409, detail=f"resume refused: 30d max drawdown {dd_pct:.1f}% (limit -6%)")
-    if risk.get("circuit_breaker", {}).get("active"):
+    if not force and risk.get("circuit_breaker", {}).get("active"):
         raise HTTPException(status_code=409, detail="resume refused: circuit breaker active")
 
-    code, payload, err = await _freqtrade_post("/api/v1/start")
-    if err or code >= 400:
-        raise HTTPException(status_code=code if code >= 400 else 502,
-                            detail=err or f"freqtrade {code}: {payload}")
+    # Post-cutover: signal V4 runner via quanta_schema.run_state. The
+    # legacy freqtrade /api/v1/start path is dead (container retired).
+    try:
+        rs_state = _run_state_set(
+            paused=False, reason=None,
+            set_by=body.get("set_by", "dashboard"),
+        )
+    except Exception as exc:
+        logger.exception("resume failed")
+        raise HTTPException(status_code=502, detail=f"run_state write failed: {exc}")
+    payload = {"run_state": rs_state}
 
     # P0-H: clear the risk-governor drawdown-pause flag in the persisted
     # anchor file so the strategy picks up the manual resume next tick. The

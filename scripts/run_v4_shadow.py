@@ -413,6 +413,27 @@ async def compute_and_write_regime(
         return None
 
 
+async def _read_run_state(conn: psycopg.AsyncConnection) -> tuple[bool, str | None]:
+    """Read quanta_schema.run_state (singleton row id=1).
+
+    Returns (paused, reason). Defaults to (False, None) on miss or error
+    so a transient DB hiccup doesn't accidentally halt trading. The pause
+    flag is operator-controlled via /api/ops/pause + /api/ops/resume.
+    """
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT paused, paused_reason FROM quanta_schema.run_state WHERE id = 1"
+            )
+            row = await cur.fetchone()
+        if not row:
+            return False, None
+        return bool(row[0]), row[1]
+    except Exception as exc:
+        log.warning("run_state read failed (defaulting to not-paused): %s", exc)
+        return False, None
+
+
 async def fetch_regime(session: aiohttp.ClientSession, url: str) -> dict[str, Any]:
     """Pull current regime from the dashboard. Returns {} on failure.
 
@@ -703,6 +724,14 @@ async def run_cycle(cfg: Cfg, session: aiohttp.ClientSession, conn: psycopg.Asyn
         log.error("strategy import failed at startup: %s", _STRATEGY_IMPORT_ERROR)
         return
 
+    # Kill-switch gate — quanta_schema.run_state.paused short-circuits the
+    # whole proposal+order path. We still refresh regime + write FLAT
+    # decisions so the dashboard shows the engine alive but waiting.
+    paused, paused_reason = await _read_run_state(conn)
+    if paused:
+        log.warning("RUN_STATE.paused=True (%s) — skipping proposal/order generation this cycle",
+                    paused_reason or "no reason given")
+
     # Hourly: recompute regime + INSERT into regime_log. Runs at startup
     # (so a freshly-recycled container immediately refreshes a stale row)
     # and then once per _REGIME_INTERVAL_SEC. Idempotent on accidental
@@ -837,7 +866,7 @@ async def run_cycle(cfg: Cfg, session: aiohttp.ClientSession, conn: psycopg.Asyn
                     getattr(strat, "last_conviction", 0.0),
                 )
 
-                if cfg.mode == "live":
+                if cfg.mode == "live" and not paused:
                     # Paper order: writes to proposals + orders (PROPOSED).
                     # The NEXT cycle simulates the fill at that bar's close.
                     try:
@@ -864,6 +893,11 @@ async def run_cycle(cfg: Cfg, session: aiohttp.ClientSession, conn: psycopg.Asyn
                         )
                     except Exception as exc:
                         log.exception("proposal write failed: %s", exc)
+                elif cfg.mode == "live" and paused:
+                    log.info(
+                        "  → paper proposal SKIPPED (run_state.paused; coid=%s)",
+                        str(prop.client_order_id)[:16],
+                    )
 
 
 async def fill_pending_then_collect_closes(
