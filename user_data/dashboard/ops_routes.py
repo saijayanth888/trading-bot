@@ -2885,19 +2885,21 @@ def _v4_crypto_open_positions() -> list[dict]:
                        SUM(CASE WHEN f.side='SELL' THEN f.qty ELSE 0 END) > 0
                 """
             )
-            for sym, net_qty, avg_px, last_fill_ts, strategy in cur.fetchall():
+            # ops_db._connect() uses dict_row factory; rows are dicts keyed
+            # by the SELECT-alias names (symbol, net_qty, avg_buy_px, ...).
+            for r in cur.fetchall():
                 rows.append({
                     "kind": "crypto",
                     "subkind": "long",
-                    "label": sym,
-                    "entry": float(avg_px) if avg_px is not None else None,
+                    "label": r["symbol"],
+                    "entry": float(r["avg_buy_px"]) if r["avg_buy_px"] is not None else None,
                     "current": None,  # filled by client from /api/candles
-                    "qty": float(net_qty),
+                    "qty": float(r["net_qty"]),
                     "pnl_pct": None,
                     "pnl_usd": None,
                     "duration_s": None,
-                    "opened_at": last_fill_ts.isoformat() if last_fill_ts else None,
-                    "extra": f"v4·strategy={strategy}",
+                    "opened_at": r["last_fill_ts"].isoformat() if r["last_fill_ts"] else None,
+                    "extra": f"v4·strategy={r['strategy']}",
                 })
     except Exception as exc:
         logger.warning("v4 positions read failed: %s", exc)
