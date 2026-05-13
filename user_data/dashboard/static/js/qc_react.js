@@ -1536,10 +1536,10 @@
             className: "tb-latency",
             style: { display: "inline-flex", alignItems: "center", gap: 4 },
             title: latencyMs == null
-              ? "freqtrade latency: measuring…"
+              ? "engine latency: measuring…"
               : latencyMs < 0
-                ? "freqtrade latency: feed unreachable (fetch threw)"
-                : "freqtrade latency: " + latencyMs + " ms (round-trip /api/mode)",
+                ? "engine latency: feed unreachable (fetch threw)"
+                : "engine latency: " + latencyMs + " ms (round-trip /api/mode)",
           },
           h("span", {
             className: "ltd " + (

@@ -52,12 +52,15 @@
 
   function OverviewCard() {
     return h(QC.Card, { num: "01", title: "Overview · what this bot does",
-      sub: "paper-trading multi-asset (crypto + stocks) with regime-gated entries" },
-      h(P, null, "This is a paper-trading bot running two engines side by side: ",
-        h(K, null, "freqtrade"), " for crypto (8 pairs on Coinbase-style USD quote) and ",
-        h(K, null, "wheel runner"), " for stocks (CSP / covered-call cycle via Alpaca paper). ",
-        "Total starting equity is $119,000 (crypto $19k + stocks $100k). The bot is in ",
-        h(K, null, "dry-run"), " mode — orders are simulated, not sent to exchanges."),
+      sub: "paper-trading multi-asset (crypto + stocks) — V4 quanta_core + wheel runner" },
+      h(P, null, "Post-cutover (2026-05-13): the live trading engine is ",
+        h(K, null, "quanta_core"), " (V4) running ",
+        h(K, null, "MeanRevBB + TrendFollow"), " strategies on 12 crypto pairs via the ",
+        h(K, null, "quanta-core"), " container. Stocks continue on the ",
+        h(K, null, "wheel runner"), " (CSP / covered-call cycle, Alpaca paper). ",
+        "Legacy ", h(K, null, "freqtrade"), " is stopped; image retained for ≤30s rollback. ",
+        "Total starting equity is $119,000 (crypto $19k + stocks $100k). ",
+        h(K, null, "Paper mode"), " — orders go through a paper-fill simulator, not real exchanges."),
       h(P, null, "Trade entries are gated by an 11-condition pipeline (see ", h("a", { href: "#gates" }, "Entry gates"), ")."),
       h(L, { items: [
         h("span", null, h(K, null, "Pause"), " freezes new entries; positions stay open."),
@@ -182,11 +185,11 @@
 
   function CryptoVsStocksCard() {
     return h(QC.Card, { num: "06", title: "Crypto vs Stocks · two completely separate engines",
-      sub: "freqtrade (crypto, 8 pairs) · wheel runner (stocks, 1 active symbol)" },
+      sub: "quanta_core V4 (crypto, 12 pairs) · wheel runner (stocks, 1 active symbol)" },
       h(H2, null, "Crypto"),
       h(L, { items: [
-        h("span", null, "Pairs: BTC/USD, ETH/USD, SOL/USD, ADA/USD, XRP/USD, DOGE/USD, AVAX/USD, LINK/USD"),
-        h("span", null, "Engine: ", h(K, null, "freqtrade"), " running ", h(K, null, "FreqAIMeanRevV1"), " strategy"),
+        h("span", null, "Pairs: BTC, ETH, SOL, ADA, XRP, DOGE, AVAX, LINK, DOT, ATOM, LTC, BCH — all /USD on Coinbase"),
+        h("span", null, "Engine: ", h(K, null, "quanta_core"), " (V4) running ", h(K, null, "MeanRevBB + TrendFollow"), " — Coinbase REST + paper-fill simulator. Legacy freqtrade was retired 2026-05-13 (image retained for rollback)."),
         h("span", null, "Timeframe: 5-minute candles by default"),
         h("span", null, "Regime model: HMM trained on aggregate crypto features"),
         h("span", null, "Gates: 11-condition pipeline above"),
