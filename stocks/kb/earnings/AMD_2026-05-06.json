@@ -5,6 +5,6 @@
   "gap_pct": 14.9975,
   "confirmation_close_pct": 18.693,
   "volume_ratio": 2.06,
-  "days_since_event": 2,
-  "drift_window_remaining": 58
+  "days_since_event": 4,
+  "drift_window_remaining": 56
 }

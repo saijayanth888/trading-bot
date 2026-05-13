@@ -151,3 +151,22 @@ stocks/wheel/state/.*.owned_symbols.json.*.tmp
 stocks/memory/llm-calls.jsonl
 .venv-exec/
 .qa-venv/
+
+# QA + workspace clutter from dashboard auditing sessions
+# (headless chromium screenshots, scratch HTML)
+audit-*.png
+post-*.png
+sent-*.png
+sentiment-*.png
+agent-flow-*.png
+agt-zoom-*.png
+ops-*.png
+bottom-zoom.png
+topbar-*.png
+tall-*.png
+zoom*.html
+_zoom-*.html
+# Local Claude workspace (worktrees, transcripts)
+.claude/
+# Wheel state backups created during reconciliation (rare)
+stocks/wheel/state/*.backup-*
