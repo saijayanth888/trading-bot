@@ -254,26 +254,44 @@ def _sync_repo() -> None:
     operator-visible PUSH-FAILED.flag check below catches the symmetric case.
     """
     repo_root = Path(__file__).resolve().parents[1]
+    # 2026-05-13: switched from `git pull --rebase` to `git fetch` +
+    # `git merge --ff-only`. The rebase path was aborting on EVERY shark
+    # phase because cron itself writes to git-tracked files (kb/earnings/*.json,
+    # memory/override_verify.json), and rebase refuses to apply with unstaged
+    # changes. ff-only merge is a clean no-op when our local HEAD has diverged
+    # — never touches the working tree, never alarms on dirty state.
     try:
-        result = subprocess.run(
-            ["git", "pull", "--rebase", "origin", "main"],
+        fetch_res = subprocess.run(
+            ["git", "fetch", "origin", "main"],
             cwd=str(repo_root),
             capture_output=True,
             text=True,
             timeout=60,
         )
-        if result.returncode == 0:
-            logger.info("git pull --rebase completed")
+        if fetch_res.returncode != 0:
+            logger.warning(
+                "git fetch failed — proceeding with local state. stderr=%s",
+                fetch_res.stderr.strip()[:200],
+            )
             return
 
-        logger.warning(
-            "git pull --rebase conflict — aborting and proceeding with local state. "
-            "stderr=%s", result.stderr.strip()[:200],
-        )
-        subprocess.run(
-            ["git", "rebase", "--abort"],
+        merge_res = subprocess.run(
+            ["git", "merge", "--ff-only", "origin/main"],
             cwd=str(repo_root),
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if merge_res.returncode == 0:
+            logger.info("git fetch + ff-only merge completed")
+            return
+
+        # ff-only fails when local has diverged from origin/main (e.g. we have
+        # local commits ahead). Not an error — operator will reconcile manually.
+        logger.info(
+            "git ff-only merge skipped (local has diverged from origin/main); "
+            "proceeding with local state. stderr=%s",
+            merge_res.stderr.strip()[:200],
         )
     except Exception as exc:
         logger.warning("git sync skipped: %s", exc)

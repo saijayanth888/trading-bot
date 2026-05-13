@@ -167,7 +167,27 @@ class UnifiedNotifier:
             return False
 
     def daily_summary(self, **kwargs) -> bool:
+        # Translate shark's daily_summary call shape (date / equity /
+        # day_pnl_dollars / day_pnl_pct / open_positions / weekly_trades /
+        # circuit_breaker) into SlackAlerter.notify_daily_summary's signature
+        # (date_utc / starting_equity / ending_equity / total_pnl / num_trades /
+        # wins / losses / sharpe_30d / max_drawdown). The freqtrade-era caller
+        # in monitoring_mixin.py already uses the SlackAlerter signature
+        # natively, so we only translate when shark-shape keys are present.
         try:
+            if "date" in kwargs or "day_pnl_dollars" in kwargs:
+                equity = float(kwargs.get("equity") or 0.0)
+                day_pnl = float(kwargs.get("day_pnl_dollars") or 0.0)
+                weekly_trades = int(kwargs.get("weekly_trades") or 0)
+                kwargs = {
+                    "date_utc": str(kwargs.get("date") or kwargs.get("date_utc") or ""),
+                    "starting_equity": max(equity - day_pnl, 0.0),
+                    "ending_equity": equity,
+                    "total_pnl": day_pnl,
+                    "num_trades": weekly_trades,
+                    "wins": 0,  # shark tracks weekly trades, not W/L split here
+                    "losses": 0,
+                }
             return self.slack.notify_daily_summary(**kwargs)
         except Exception as exc:
             logger.warning("notifier.daily_summary failed: %s", exc)
