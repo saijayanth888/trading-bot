@@ -3204,6 +3204,27 @@ async def flash_status():
         try:
             loop = asyncio.get_running_loop()
 
+            # Also include the wheel-runner stocks positions so the
+            # operator's at-a-glance summary covers ALL open trades, not
+            # just V4 paper. The wheel state lives in stocks/wheel/state/
+            # positions.json (read by the existing /api/ops/live_trades).
+            wheel_open_count = 0
+            wheel_open_symbols: list[str] = []
+            try:
+                pos_file = STOCKS_ROOT / "wheel" / "state" / "positions.json"
+                wheel_positions = _read_json(pos_file) or []
+                if isinstance(wheel_positions, list):
+                    seen: set[str] = set()
+                    for p in wheel_positions:
+                        sym = (p.get("underlying") or "").upper()
+                        if not sym or sym in seen:
+                            continue
+                        seen.add(sym)
+                        wheel_open_symbols.append(sym)
+                    wheel_open_count = len(wheel_open_symbols)
+            except Exception as exc:
+                logger.debug("flash_status wheel read failed: %s", exc)
+
             def _pull() -> dict[str, Any]:
                 from . import ops_db
                 if not ops_db._HAVE_PG:
@@ -3281,8 +3302,13 @@ async def flash_status():
 
             res = await asyncio.wait_for(loop.run_in_executor(None, _pull),
                                           timeout=ENDPOINT_TIMEOUT_S)
-            out["open_positions"] = len(res.get("positions") or [])
-            out["open_symbols"] = res.get("positions") or []
+            # Aggregate V4 crypto + wheel stocks for the flash row
+            v4_syms = res.get("positions") or []
+            all_syms = list(v4_syms) + wheel_open_symbols
+            out["open_positions"] = len(all_syms)
+            out["open_symbols"] = all_syms
+            out["open_v4"] = len(v4_syms)
+            out["open_wheel"] = wheel_open_count
             out["open_notional_usd"] = res.get("notional") or 0.0
             out["closed_today"] = res.get("closed_count") or 0
             out["closed_today_pnl_usd"] = round(res.get("closed_pnl") or 0.0, 4)

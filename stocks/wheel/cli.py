@@ -35,22 +35,49 @@ _STATE_DIR = Path(__file__).resolve().parent / "state"
 _ACCOUNT_SNAPSHOT_FILE = _STATE_DIR / "account_snapshot.json"
 
 
+def _wheel_exit_code(summary: dict) -> int:
+    """Decide cron exit code for a wheel phase.
+
+    2026-05-13 fix: previously any entry in summary["errors"] forced exit=1,
+    which made Hermes alert on routine "insufficient options buying power"
+    rejects. Those rejects ARE expected when buying_power runs out partway
+    through the candidate list — the runner intentionally keeps trying so
+    the operator can see the full picture in the summary. Exit 0 when ANY
+    action succeeded with only BP-rejects; exit 1 only on genuine fatal
+    errors (auth, network, unknown).
+    """
+    errors = summary.get("errors") or []
+    actions = summary.get("actions") or []
+    if not errors:
+        return 0
+    fatal_errors = [
+        e for e in errors
+        if "insufficient" not in str(e).lower()
+        and "buying power" not in str(e).lower()
+    ]
+    if actions and not fatal_errors:
+        return 0  # partial success with only BP-rejects — expected behaviour
+    if fatal_errors:
+        return 1
+    return 0  # only BP-rejects and no successful actions = empty cycle, not a failure
+
+
 def cmd_sell_csps(args: argparse.Namespace) -> int:
     summary = runner.sell_csps()
     print(json.dumps(summary, indent=2, default=str))
-    return 0 if not summary.get("errors") else 1
+    return _wheel_exit_code(summary)
 
 
 def cmd_profit_take(args: argparse.Namespace) -> int:
     summary = runner.profit_take_check()
     print(json.dumps(summary, indent=2, default=str))
-    return 0 if not summary.get("errors") else 1
+    return _wheel_exit_code(summary)
 
 
 def cmd_sell_covered_calls(args: argparse.Namespace) -> int:
     summary = runner.sell_covered_calls()
     print(json.dumps(summary, indent=2, default=str))
-    return 0 if not summary.get("errors") else 1
+    return _wheel_exit_code(summary)
 
 
 def cmd_status(args: argparse.Namespace) -> int:

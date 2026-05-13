@@ -191,6 +191,17 @@ def sell_csps(symbols_override: Optional[List[str]] = None) -> dict:
             # Refresh after each (potential) entry so subsequent symbols see
             # the updated collateral total.
             open_collateral = _open_csp_collateral_total(load_positions())
+            # 2026-05-13 fix: also refresh `acct` so buying_power isn't
+            # stale. Previously `acct` was fetched once at cycle start;
+            # after 4 successful fills draining BP, subsequent candidates
+            # would pass the local buying_power gate but get a 403
+            # "insufficient options buying power" from Alpaca on submit.
+            # Re-fetching keeps the gate honest at the cost of one HTTP
+            # call per loop iteration — cheap.
+            try:
+                acct = broker.get_account()
+            except Exception as exc:
+                logger.warning("acct refresh failed (continuing with stale acct): %s", exc)
         except Exception as exc:
             logger.exception("sell_csp(%s) crashed", sym)
             summary["errors"].append(f"{sym}: {exc!s}")

@@ -434,10 +434,22 @@
     const venuePairs = venue === "crypto" ? cryptoPairs : stockSymbols;
     useEffect(() => {
       // When venue switches and current pair is not in that venue, jump to first.
-      // Also re-runs when cryptoPairs lands so the default selection lines up
-      // with the server's first whitelisted pair.
+      //
+      // BUG FIX 2026-05-13: previously the deps were [venue, cryptoPairs] which
+      // missed stockSymbols. When the user landed via ?pair=NVDA&venue=stocks,
+      // stockSymbols was still the FALLBACK ["SPY"] at the time this effect
+      // fired (because cryptoPairs landed first → triggered re-run before
+      // /api/universe responded). The guard saw venuePairs=["SPY"], pair=NVDA,
+      // !includes → setPair("SPY"). Result: NVDA click always redirected to SPY.
+      //
+      // Fix: depend on stockSymbols too, AND skip the reset while the universe
+      // is obviously still in fallback (single-symbol list when we expect a
+      // basket of 14). The reset only fires when we genuinely have venue data.
+      const isFallback = venue === "stocks" && venuePairs.length <= 1
+                         && !venuePairs.includes(pair);
+      if (isFallback) return;
       if (venuePairs.length && !venuePairs.includes(pair)) setPair(venuePairs[0]);
-    }, [venue, cryptoPairs]);  // eslint-disable-line react-hooks/exhaustive-deps
+    }, [venue, cryptoPairs, stockSymbols]);  // eslint-disable-line react-hooks/exhaustive-deps
 
     // Build dataset for hero strip
     const pairState = (state && state.pair_state) || (meta && meta.pair_state) || (state || {});
