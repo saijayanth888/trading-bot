@@ -91,7 +91,18 @@ async def _ensure_jwt(client: httpx.AsyncClient, force_refresh: bool = False) ->
     used by ``ft_authed_get`` to recover from server-side 401s (freqtrade
     rotates its signing key on restart, invalidating our cached JWT before
     the 9-minute TTL expires).
+
+    Post-cutover (LIVE_ENGINE_MODE=live|shadow), freqtrade is stopped —
+    short-circuit early so the dashboard doesn't spam "name resolution
+    failure" warnings 20×/second on every legacy endpoint that still
+    calls ft_authed_get under the hood.
     """
+    # V4 short-circuit — avoid 20+ "Temporary failure in name resolution"
+    # warnings per request when freqtrade is dead.
+    import os as _os
+    if (_os.environ.get("LIVE_ENGINE_MODE") or "").lower() in ("live", "shadow"):
+        return None
+
     global _jwt_token, _jwt_expires_at
     async with _jwt_lock:
         if force_refresh:
