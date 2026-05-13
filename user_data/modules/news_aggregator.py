@@ -258,6 +258,8 @@ class NewsAggregator:
                 ("rss",               self._fetch_rss_feeds),
                 ("fear_greed",        self._fetch_fear_greed),
                 ("coingecko_trending", self._fetch_coingecko_trending),
+                ("hackernews",        self._fetch_hackernews),
+                ("stocktwits",        self._fetch_stocktwits),
             ]
             _src_cfg = (_load_config().get("sentiment_sources") or {})
             _alias = {"rss": "rss_feeds"}
@@ -476,6 +478,101 @@ class NewsAggregator:
                     source=source_name, url=str(getattr(entry, "link", "") or ""),
                     timestamp=ts_dt,
                     pair_mentions=_detect_pairs(title, summary),
+                ))
+        return out
+
+    # ---- Hacker News -------------------------------------------------------
+
+    async def _fetch_hackernews(self, session: aiohttp.ClientSession) -> list[NewsItem]:
+        """HN top stories — title-only signal (no body in the firehose).
+
+        Filters out items where pair_mentions is empty AND the title scores
+        low on crypto/finance keywords; otherwise the sentiment scorer gets
+        flooded with unrelated tech headlines. We keep stories that mention
+        a watched pair OR have a strong finance keyword in the title.
+        """
+        try:
+            from user_data.modules.hackernews import fetch_hn_top
+        except Exception:
+            return []
+
+        try:
+            items = await fetch_hn_top(limit=40)
+        except Exception as exc:
+            raise RuntimeError(f"hackernews: {exc}") from exc
+
+        finance_kw = re.compile(
+            r"\b(bitcoin|btc|ethereum|eth|crypto|sec |fed |inflation|"
+            r"stock|nasdaq|s&p|fomc|interest rate|treasury|earnings|"
+            r"options|defi|rally|crash|bull|bear|liquidity)\b",
+            re.IGNORECASE,
+        )
+        out: list[NewsItem] = []
+        for it in items:
+            pairs = _detect_pairs(it.title)
+            if not pairs and not finance_kw.search(it.title):
+                continue
+            out.append(NewsItem(
+                title=it.title,
+                summary="",  # HN top-list doesn't include body
+                source="hackernews",
+                url=it.url or f"https://news.ycombinator.com/item?id={it.id}",
+                timestamp=it.ts,
+                pair_mentions=pairs,
+            ))
+        return out
+
+    # ---- StockTwits --------------------------------------------------------
+
+    async def _fetch_stocktwits(self, session: aiohttp.ClientSession) -> list[NewsItem]:
+        """StockTwits per-symbol streams for the dashboard universe.
+
+        Iterates a small set of high-volume tickers (capped to keep the
+        per-refresh fan-out under the ~200 req/hr free-tier limit) and
+        converts messages into NewsItem rows with source=f"stocktwits:{symbol}".
+        Carries StockTwits' explicit Bull/Bear sentiment tag in
+        community_sentiment when present.
+        """
+        try:
+            from user_data.modules.stocktwits import fetch_stocktwits_symbol_stream
+        except Exception:
+            return []
+
+        # Universe: high-attention names from the dashboard config.
+        symbols = _config_or_fallback(
+            _load_config(), "stocktwits_symbols",
+            ["NVDA", "TSLA", "AAPL", "MSFT", "PLTR", "SOFI", "HOOD",
+             "BTC.X", "ETH.X", "SOL.X"],
+        )
+
+        out: list[NewsItem] = []
+        for sym in symbols[:10]:  # cap fan-out — 10 calls per refresh
+            try:
+                items = await fetch_stocktwits_symbol_stream(sym, limit=15)
+            except Exception as exc:
+                logger.debug("[news] stocktwits %s failed: %s", sym, exc)
+                continue
+            for it in items:
+                # Map Bull/Bear tag → [-1, +1]
+                community_sentiment: float | None = None
+                if it.sentiment == "Bullish":
+                    community_sentiment = 1.0
+                elif it.sentiment == "Bearish":
+                    community_sentiment = -1.0
+
+                # Synthesize a pair_mentions list — StockTwits crypto symbols
+                # use the BTC.X / ETH.X convention; map to our watched pairs.
+                bare_sym = sym.replace(".X", "")
+                pairs = _detect_pairs(it.body, f"${bare_sym}", bare_sym)
+
+                out.append(NewsItem(
+                    title=it.body[:160],
+                    summary=it.body,
+                    source=f"stocktwits:{sym}",
+                    url=f"https://stocktwits.com/symbol/{sym}",
+                    timestamp=it.ts,
+                    pair_mentions=pairs,
+                    community_sentiment=community_sentiment,
                 ))
         return out
 
