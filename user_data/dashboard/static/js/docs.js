@@ -249,10 +249,6 @@
       h(Def, { term: "Hermes gateway · hermes-gateway.service" },
         "User-systemd unit that runs the cron scheduler + Telegram/Slack adapters. Fires 9 LLM-driven cron jobs (risk_monitor, market_research, post_mortem, wheel_snapshot, etc.). See ",
         h(K, null, "docs/HERMES_GATEWAY_RUNBOOK.md"), " for lifecycle details."),
-      h(Def, { term: "Grafana · 127.0.0.1:3000" },
-        "Optional metrics dashboard for time-series visualization. Reads from postgres + influxdb."),
-      h(Def, { term: "InfluxDB · 127.0.0.1:8086" },
-        "Time-series database for high-cardinality metrics (per-second equity, per-tick prediction scores).")
     );
   }
 

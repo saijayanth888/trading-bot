@@ -102,7 +102,7 @@ async def test_services_envelope_when_all_down(monkeypatch):
     async def fake_summary():
         return {k: {"up": False, "via": "tcp", "endpoint": "x", "error": "refused"}
                 for k in ("ollama", "hermes_mcp", "hermes_gateway", "hermes_dashboard",
-                          "freqtrade", "postgres", "influxdb", "grafana")}
+                          "freqtrade", "postgres")}
     monkeypatch.setattr(ops_probes, "services_summary", fake_summary)
     env = await ops_routes.services()
     _assert_envelope(env)

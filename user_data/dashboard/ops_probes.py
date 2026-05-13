@@ -6,8 +6,8 @@ endpoint layer can drop it straight into the typed envelope. No I/O outside
 of network + filesystem reads. 2-second hard timeout per probe.
 
 The dashboard container reaches:
-  - postgres / freqtrade / dashboard / influxdb / grafana via docker-compose
-    service names (compose default network)
+  - postgres / freqtrade / dashboard via docker-compose service names
+    (compose default network). Grafana + InfluxDB were retired 2026-05-12.
   - ollama / hermes-mcp / hermes-gateway / hermes-dashboard on the docker host
     via ``host.docker.internal`` (requires extra_hosts in docker-compose.yml)
   - hermes-gateway has no port — its liveness is read from a heartbeat file
@@ -125,8 +125,6 @@ async def services_summary() -> dict[str, Any]:
         "ollama":     tcp_probe(HOST, 11434),
         "freqtrade":  http_probe("http://freqtrade:8080/api/v1/ping"),
         "postgres":   tcp_probe("postgres", 5432),
-        "influxdb":   http_probe("http://influxdb:8086/health"),
-        "grafana":    http_probe("http://grafana:3000/api/health"),
     }
     # Heartbeat-based (sync, fast)
     results: dict[str, Any] = {

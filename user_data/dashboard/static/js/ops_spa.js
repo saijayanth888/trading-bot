@@ -3660,8 +3660,9 @@
               key: item[0],
               x: x,
               y: y,
-              fill: "var(--fg-3)",
-              fontSize: "9",
+              fill: "var(--fg-2)",
+              fontSize: "10",
+              fontWeight: 500,
               fontFamily: "var(--mono)",
               textAnchor: "middle",
               dominantBaseline: "middle",
@@ -3675,22 +3676,27 @@
         )
       ),
       h("div", { className: "v3-sent-headlines mono", title: chip },
-        h("span", { className: "dim", style: { marginRight: 8 } }, "HEADLINE"),
+        h("span", { className: "dim2", style: { marginRight: 8 } }, "HEADLINE"),
         h("span", { className: "v3-num", style: { color: "var(--fg-1)" } }, chip),
         env.age_s != null
-          ? h("span", { className: "dim v3-num", style: { marginLeft: 12, fontSize: "var(--t-2xs)" } },
+          ? h("span", { className: "dim2 v3-num", style: { marginLeft: 12, fontSize: "var(--t-2xs)" } },
             " · age " + Math.floor(env.age_s / 60) + "m")
           : null
       ),
       h("div", {
-        className: "dim mono v3-num",
-        style: { fontSize: "var(--t-2xs)", marginTop: "var(--s-2)", display: "flex", flexWrap: "wrap", gap: "var(--s-3)" },
+        className: "dim2 mono v3-num",
+        style: { fontSize: "var(--t-xs)", marginTop: "var(--s-2)", display: "flex", flexWrap: "wrap", gap: "var(--s-3)" },
       },
-        h("span", null, "deep ", env.deep_score != null ? env.deep_score.toFixed(2) : "—"),
-        h("span", null, "fast ", env.fast_score != null ? env.fast_score.toFixed(2) : "—"),
-        h("span", null, "F&G ", env.fear_greed != null ? env.fear_greed : "—"),
-        h("span", null, "agree ", env.community_score != null ? env.community_score.toFixed(2) : (env.agreement ? "1" : "0")),
-        h("span", null, "n=", env.n_headlines != null ? env.n_headlines : "—")
+        h("span", null, "deep ", h("span", { style: { color: "var(--fg-1)" } },
+          env.deep_score != null ? env.deep_score.toFixed(2) : "—")),
+        h("span", null, "fast ", h("span", { style: { color: "var(--fg-1)" } },
+          env.fast_score != null ? env.fast_score.toFixed(2) : "—")),
+        h("span", null, "F&G ", h("span", { style: { color: "var(--fg-1)" } },
+          env.fear_greed != null ? env.fear_greed : "—")),
+        h("span", null, "agree ", h("span", { style: { color: "var(--fg-1)" } },
+          env.community_score != null ? env.community_score.toFixed(2) : (env.agreement ? "1" : "0"))),
+        h("span", null, "n=", h("span", { style: { color: "var(--fg-1)" } },
+          env.n_headlines != null ? env.n_headlines : "—"))
       )
     );
   }
@@ -4675,6 +4681,29 @@
       return () => clearInterval(iv);
     }, []);
 
+    // Regime-change banner — when /api/ops/regime label flips, show a
+    // "REGIME → X" pulse on the Agent Flow card for 30s so the operator
+    // can SEE that a regime trigger just hit the debate pipeline.
+    const regimeEnv = envelopeData(data.regime) || {};
+    const regimeNow = regimeEnv.current && regimeEnv.current.label
+      || regimeEnv.label
+      || regimeEnv.regime
+      || null;
+    const lastRegimeRef = useRef(regimeNow);
+    const [regimeFlash, setRegimeFlash] = useState(null);
+    useEffect(() => {
+      if (regimeNow && lastRegimeRef.current && regimeNow !== lastRegimeRef.current) {
+        const from = lastRegimeRef.current;
+        setRegimeFlash({ from, to: regimeNow, at: Date.now() });
+        const t = setTimeout(() => setRegimeFlash(null), 30_000);
+        lastRegimeRef.current = regimeNow;
+        return () => clearTimeout(t);
+      }
+      if (regimeNow && !lastRegimeRef.current) {
+        lastRegimeRef.current = regimeNow;
+      }
+    }, [regimeNow]);
+
     const click = useCallback((role, detail, originEl) => {
       // Tier E: prefer the AgentLogsDrawer. If the operator opted out
       // via ``localStorage["quanta.agent_logs_drawer"] === "0"``, fall
@@ -4735,8 +4764,41 @@
       num: "21a",
       title: "Agent flow",
       sub: subText,
-      right: cardRight(slot.fetchedAt),
+      right: h("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
+        regimeNow ? h("span", {
+          className: "pill " + (regimeFlash ? "warn" : "info"),
+          style: { fontSize: "var(--t-2xs)" },
+          title: "current macro regime · debate fires on transition",
+        }, "REGIME · " + String(regimeNow).toUpperCase()) : null,
+        cardRight(slot.fetchedAt),
+      ),
     },
+      regimeFlash && h("div", {
+        className: "v3-regime-flash",
+        role: "status",
+        "aria-live": "polite",
+        style: {
+          padding: "var(--s-2) var(--s-3)",
+          marginBottom: "var(--s-2)",
+          borderRadius: 6,
+          background: "color-mix(in srgb, var(--warn) 18%, transparent)",
+          border: "1px solid color-mix(in srgb, var(--warn) 60%, transparent)",
+          fontFamily: "var(--mono)",
+          fontSize: "var(--t-xs)",
+          color: "var(--fg-1)",
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+        },
+      },
+        h("span", { className: "dot", style: { background: "var(--warn)", width: 8, height: 8, borderRadius: 4 } }),
+        h("span", null, "REGIME CHANGED · "),
+        h("span", { className: "dim2" }, regimeFlash.from),
+        h("span", null, " → "),
+        h("span", { style: { fontWeight: 600 } }, regimeFlash.to),
+        h("span", { className: "dim2", style: { marginLeft: "auto", fontSize: "var(--t-2xs)" } },
+          "debate triggered · watching " + Object.keys(detailByRole).length + " roles for activity"),
+      ),
       h("div", { className: "v3-debate-floor", id: "agent-flow-strip" },
         h(DebateFloorConnectors, { live: debateLive }),
         debateLive && h("div", { className: "v3-debate-live-anchor" },
