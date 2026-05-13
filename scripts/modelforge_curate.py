@@ -396,6 +396,104 @@ def _to_hf_row(role: str, example: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_PNL_PCT_RE = re.compile(r'"pnl_pct"\s*:\s*([+\-]?\d+(?:\.\d+)?)')
+_EXIT_REASON_RE = re.compile(r'"exit_reason"\s*:\s*"([^"]+)"')
+_EXIT_PRICE_RE = re.compile(r'"exit_price"\s*:\s*([+\-]?\d+(?:\.\d+)?|null)')
+_SYMBOL_RE = re.compile(r'"symbol"\s*:\s*"([^"]+)"')
+
+
+def _build_eval_test_set_row(role: str, example: dict[str, Any]) -> dict[str, Any] | None:
+    """Project a raw ingest example onto ModelForge's eval test-set JSONL row.
+
+    The trading evals at ``apps/api/src/agents/evals/eval_*.py`` consume one
+    JSONL record per held-out example. Required across the family:
+
+      * ``prompt`` -- the same prompt the role saw at runtime
+      * role-specific gold-truth fields (e.g. ``realized_pnl`` for reflector)
+
+    For ``trading-reflector`` we extract realized P&L from the embedded
+    Shark ``trade_reviewer`` payload (pnl_pct + exit_reason). ``realized_pnl``
+    in the test set is the percent value -- the eval scorer's
+    ``faithfulness_regex`` checks dollar citations, but until Alpaca-side
+    fills carry through with realized $ amounts the percent is the best
+    gold-truth we have, and ``judge_score`` doesn't need it at all.
+
+    Returns ``None`` when the example carries no usable prompt (drop it).
+    """
+    user_msg = example.get("user_message") or ""
+    system_msg = example.get("system_message") or ""
+    if system_msg:
+        prompt = f"[SYSTEM]\n{system_msg}\n[USER]\n{user_msg}"
+    else:
+        prompt = user_msg
+    if not prompt.strip():
+        return None
+
+    row: dict[str, Any] = {
+        "prompt":     prompt,
+        "track_id":   role,
+        # Carry response so eval LLM-as-judge fallback can compare against
+        # the curator's ground-truth answer when no live runner is wired.
+        "gold_response": example.get("response") or "",
+    }
+    # Reflector-specific enrichment from the trade_reviewer trade JSON.
+    if role == "trading-reflector":
+        m_pnl = _PNL_PCT_RE.search(user_msg)
+        if m_pnl:
+            try:
+                row["realized_pnl_pct"] = float(m_pnl.group(1))
+                # `realized_pnl` is the scorer's documented field. Without
+                # dollar amounts we re-use pct so values_match_to_decimal
+                # at least has a number to compare against.
+                row["realized_pnl"] = float(m_pnl.group(1))
+            except ValueError:
+                pass
+        m_reason = _EXIT_REASON_RE.search(user_msg)
+        if m_reason:
+            row["exit_reason"] = m_reason.group(1)
+        m_sym = _SYMBOL_RE.search(user_msg)
+        if m_sym:
+            row["symbol"] = m_sym.group(1)
+        m_xp = _EXIT_PRICE_RE.search(user_msg)
+        if m_xp and m_xp.group(1) != "null":
+            try:
+                row["exit_price"] = float(m_xp.group(1))
+            except ValueError:
+                pass
+    return row
+
+
+def _write_eval_test_set(
+    *,
+    role: str,
+    target_dir: Path,
+    raw_examples: list[dict[str, Any]],
+) -> Path | None:
+    """Write a JSONL test set sibling to the HF Arrow ``curated/`` dir.
+
+    The mf-api workflow's ``eval_set_path`` config originally pointed at the
+    curated dir, but the trading eval modules' ``load_test_set`` opens the
+    path as a JSONL file -- pointing at a directory throws ``IsADirectoryError``
+    which is silently swallowed into an empty record list, which then
+    short-circuits the eval to all-zero scores. This file is the JSONL the
+    workflow's ``eval_set_path`` should point at:
+    ``/app/data/dgx-train/datasets/<role>/test_set.jsonl`` (host: same under
+    ``~/.dgx-train/...``).
+    """
+    rows = [r for r in (_build_eval_test_set_row(role, ex) for ex in raw_examples) if r]
+    if not rows:
+        return None
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    out_path = target_dir / "test_set.jsonl"
+    tmp = out_path.with_suffix(".jsonl.partial")
+    with tmp.open("w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r, sort_keys=True) + "\n")
+    os.replace(tmp, out_path)
+    return out_path
+
+
 def _write_hf_dataset(
     *,
     role: str,
@@ -474,6 +572,7 @@ def curate_role(
 
     result = RoleCurationResult(role=role, source_files=[str(p) for p in raw_files])
     kept_rows: list[dict[str, Any]] = []
+    kept_raw: list[dict[str, Any]] = []
 
     for path in raw_files:
         for example in _iter_jsonl(path):
@@ -481,6 +580,7 @@ def curate_role(
             if ok:
                 result.accept_count += 1
                 kept_rows.append(_to_hf_row(role, example))
+                kept_raw.append(example)
             else:
                 result.reject_count += 1
                 key = code or "unknown"
@@ -491,7 +591,8 @@ def curate_role(
         # on a zero-row dataset. Keep the stats row, exit early.
         return result
 
-    out_dir = out_root / "datasets" / role / "curated"
+    role_dir = out_root / "datasets" / role
+    out_dir = role_dir / "curated"
     try:
         _write_hf_dataset(
             role=role,
@@ -502,6 +603,18 @@ def curate_role(
             max_samples=len(kept_rows),
         )
         result.out_path = str(out_dir)
+        # Sibling test-set JSONL the eval scorers load via load_test_set().
+        # Best-effort — failure here does not invalidate the training shard.
+        try:
+            test_path = _write_eval_test_set(
+                role=role,
+                target_dir=role_dir,
+                raw_examples=kept_raw,
+            )
+            if test_path is not None:
+                logger.info("[curate] wrote eval test set %s (%d rows)", test_path, len(kept_raw))
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("[curate] eval test set write failed for role=%s: %s", role, exc)
     except ImportError as exc:
         result.reject_reasons["datasets_import_failed"] = result.accept_count
         result.reject_count += result.accept_count
