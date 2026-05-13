@@ -2037,6 +2037,14 @@
     "up_prob_threshold", "tft_confidence", "high_vol_confidence",
     "meta_signal_up", "meta_confidence", "account_capacity",
   ];
+  // V4 crypto gate columns — used when engine === "quanta_core". Replaces
+  // the FreqAI/TFT/DRL columns with the conditions MeanRevBB + TrendFollow
+  // actually check on every bar. The order matches the data flow:
+  // can the trade fire (cap+regime) → would each strategy enter
+  // (mr_dip / tf_break / tf_aligned) → does the account allow it (open).
+  const V4_CRYPTO_GATES_ORDER = [
+    "capital_allocation", "regime", "mr_dip", "tf_break", "tf_aligned", "account_capacity",
+  ];
   const V3_STOCKS_GATES_ORDER = [
     "kill_switch", "ticker_kill_flag", "spy_regime", "no_existing_csp",
     "no_assignment", "buying_power", "snapshot_fresh", "schedule",
@@ -2053,6 +2061,10 @@
     meta_signal_up: "m_up",
     meta_confidence: "m_c",
     account_capacity: "open",
+    // V4-specific gate column headers
+    mr_dip: "mr·dip",
+    tf_break: "tf·brk",
+    tf_aligned: "tf·ma",
     kill_switch: "kill",
     ticker_kill_flag: "tkf",
     spy_regime: "spy",
@@ -2082,8 +2094,12 @@
   }
 
   function v3WhyText(row) {
+    // V4-mode override: the backend supplied an operator-readable WHY
+    // string (e.g. "mr: close $79,732 ≥ lower_bb $79,383 · tf: short_ma
+    // 79,724 ≤ long_ma 79,881"). Always prefer it when present.
+    if (row && row.why_override) return row.why_override;
     const n = row.n_blocking || 0;
-    if (n === 0) return "EXIT_OK";
+    if (n === 0) return "ENTRY READY";
     const fb = row.first_blocker;
     return fb || "—";
   }
@@ -2113,14 +2129,29 @@
     const cryptoRaw = env.crypto || [];
     const stocksRaw = env.stocks || [];
 
-    const mapRow = (r, kind) => ({
-      kind,
-      sym: r.pair,
-      regime: r.regime,
-      n_blocking: r.n_blocking || 0,
-      first_blocker: r.first_blocker,
-      gates: r.gates || [],
-    });
+    // Engine-aware: post-cutover (engine === "quanta_core") read v4_gates
+    // from each crypto row; pre-cutover keep the legacy gates field.
+    const modeEnv = envelopeData(data.mode) || {};
+    const v4Active = String(modeEnv.engine || "").toLowerCase() === "quanta_core";
+    const cryptoGatesOrder = v4Active ? V4_CRYPTO_GATES_ORDER : V3_CRYPTO_GATES_ORDER;
+
+    const mapRow = (r, kind) => {
+      // V4 gates live in r.v4_gates (separate envelope on the row) when
+      // backend ran in V4 mode. Fall back to the legacy r.gates path so
+      // a partial backend rollout doesn't blank the card.
+      const useV4 = v4Active && kind === "crypto" && r.v4_gates;
+      const src = useV4 ? r.v4_gates : r;
+      return {
+        kind,
+        sym: r.pair,
+        regime: r.regime,
+        n_blocking: src.n_blocking || 0,
+        first_blocker: src.first_blocker,
+        gates: src.gates || r.gates || [],
+        // Operator-readable WHY supplied by the backend in V4 mode
+        why_override: useV4 ? src.why : null,
+      };
+    };
 
     const sortRows = (rows) => {
       const copy = rows.slice();
@@ -2232,11 +2263,12 @@
             "no gate data — endpoint returned empty")
         : h("div", { className: "v3-gates-matrix-wrap" },
             h("div", { className: "v3-gates-matrix" },
-              h("div", { className: "v3-gates-group-label" }, "crypto"),
-              renderGateHeader(V3_CRYPTO_GATES_ORDER, "crypto"),
+              h("div", { className: "v3-gates-group-label" },
+                "crypto" + (v4Active ? " · V4" : "")),
+              renderGateHeader(cryptoGatesOrder, "crypto"),
               cryptoRows.length === 0
                 ? h("div", { className: "dim", style: { padding: "var(--s-2)" } }, "no crypto rows")
-                : cryptoRows.map((row) => renderGateRow(row, V3_CRYPTO_GATES_ORDER, "crypto")),
+                : cryptoRows.map((row) => renderGateRow(row, cryptoGatesOrder, "crypto")),
               h("div", { className: "v3-gates-group-label" }, "stocks"),
               renderGateHeader(V3_STOCKS_GATES_ORDER, "stocks"),
               stockRows.length === 0

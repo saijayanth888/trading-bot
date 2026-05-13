@@ -2467,6 +2467,19 @@ async def gates():
     except Exception:
         pass
 
+    # Post-cutover: surface V4 strategy entry conditions instead of the dead
+    # FreqAI gate set. When LIVE_ENGINE_MODE is live/shadow we'll emit a
+    # parallel `v4_gates` array per pair (cap, regime, mr_dip, tf_break,
+    # tf_aligned, open) with concrete prices in the WHY string so the
+    # operator can see literally what each strategy is waiting for.
+    _v4_active = _v4_is_active_engine()
+    _v4_open_count = 0
+    if _v4_active:
+        try:
+            _v4_open_count = len(_v4_crypto_open_positions())
+        except Exception:
+            _v4_open_count = 0
+
     rows = []
     for pair in pairs:
         try:
@@ -2634,7 +2647,7 @@ async def gates():
 
         # Summary
         blocking = [g for g in gate_results if g["pass"] is False]
-        rows.append({
+        row = {
             "pair": pair,
             "regime": regime,
             "n_gates": len(gate_results),
@@ -2651,7 +2664,24 @@ async def gates():
                 "model_age_h": _age_h,
                 "model_expiration_h": _expiration_h,
             },
-        })
+        }
+
+        # Post-cutover: ALSO emit V4 strategy gates ─ what MeanRevBB +
+        # TrendFollow are actually waiting for. The frontend will choose
+        # which gate set to render based on /api/mode.engine. Computes
+        # BB lower + short/long MA from Coinbase REST candles (30 bars).
+        if _v4_active:
+            try:
+                row["v4_gates"] = await _eval_v4_gates(
+                    pair=pair,
+                    regime=regime,
+                    open_count=_v4_open_count,
+                    max_open=max_open,
+                )
+            except Exception as exc:
+                logger.debug("v4 gates eval failed for %s: %s", pair, exc)
+
+        rows.append(row)
 
     # ── Stocks gates (wheel CSP rules per ticker) ──────────────────────
     stock_rows = []
@@ -2903,6 +2933,184 @@ async def market_hours():
 
 def _v4_is_active_engine() -> bool:
     return (os.environ.get("LIVE_ENGINE_MODE") or "").lower() in ("live", "shadow")
+
+
+# Permissive regime sets — keep in sync with the strategies in
+# src/quanta_core/strategy/{mean_rev_bb,trend_follow}.py. Centralised here
+# so the gates endpoint surfaces the EXACT condition each strategy checks.
+_MR_PERMISSIVE_REGIMES = frozenset({"trending_up", "mean_reverting"})
+_TF_PERMISSIVE_REGIMES = frozenset({"trending_up"})
+_MR_BB_WINDOW = 20
+_MR_BB_STD = 2.0
+_TF_SHORT_WINDOW = 8
+_TF_LONG_WINDOW = 21
+
+
+async def _eval_v4_gates(
+    *,
+    pair: str,
+    regime: str,
+    open_count: int,
+    max_open: int,
+) -> dict[str, Any]:
+    """Compute V4 strategy entry gates for one crypto pair.
+
+    Returns a payload the frontend can render in place of the FreqAI gate
+    set:
+
+        {
+          "gates": [
+              {gate: "capital_allocation", pass: True,  detail: "..."},
+              {gate: "regime",             pass: True,  detail: "..."},
+              {gate: "mr_dip",             pass: False, detail: "close $80.2k > lower_bb $79.8k"},
+              {gate: "tf_break",           pass: False, detail: "close $80.2k > short_ma $80.4k"},
+              {gate: "tf_aligned",         pass: False, detail: "short_ma 80.4 < long_ma 80.7"},
+              {gate: "account_capacity",   pass: True,  detail: "0/6 open"},
+          ],
+          "n_blocking": 3,
+          "first_blocker": "mr_dip",
+          "snapshot": {close, lower_bb, middle_bb, short_ma, long_ma},
+          "why": "no entry: mr waiting for close < $79.8k · tf waiting for close > $80.4k AND ma aligned"
+        }
+    """
+    gates: list[dict[str, Any]] = []
+    snap: dict[str, Any] = {}
+
+    # 1. capital allocation — same assumption as the legacy gate
+    gates.append({
+        "gate": "capital_allocation",
+        "pass": True,
+        "detail": "weight > 0 (assumed)",
+    })
+
+    # 2. regime — passes if at least ONE strategy's permissive set allows it
+    regime_ok = (regime in _MR_PERMISSIVE_REGIMES) or (regime in _TF_PERMISSIVE_REGIMES)
+    regime_strats: list[str] = []
+    if regime in _MR_PERMISSIVE_REGIMES:
+        regime_strats.append("mr")
+    if regime in _TF_PERMISSIVE_REGIMES:
+        regime_strats.append("tf")
+    gates.append({
+        "gate": "regime",
+        "pass": regime_ok,
+        "detail": f"{regime} → " + (", ".join(regime_strats) if regime_ok else "neither strategy"),
+    })
+
+    # 3-5. MeanRevBB + TrendFollow signal conditions — need closes to compute.
+    # Use Coinbase REST fallback (30 bars covers BB window 20 + long_ma 21).
+    closes: list[float] = []
+    try:
+        from .data_sources import fetch_coinbase_candles
+        df = await fetch_coinbase_candles(pair, timeframe="5m", limit=30)
+        if df is not None and not df.empty and "close" in df.columns:
+            closes = [float(x) for x in df["close"].tolist()]
+    except Exception as exc:
+        logger.debug("v4 gates: coinbase fetch %s failed: %s", pair, exc)
+
+    if len(closes) < _TF_LONG_WINDOW:
+        # warm-up — surface the wait condition explicitly
+        for g in ("mr_dip", "tf_break", "tf_aligned"):
+            gates.append({
+                "gate": g,
+                "pass": False,
+                "detail": f"warm-up: {len(closes)}/{_TF_LONG_WINDOW} bars",
+            })
+        snap = {"close": None, "lower_bb": None, "short_ma": None, "long_ma": None}
+    else:
+        close = closes[-1]
+        # Bollinger lower band (population std, talib convention)
+        bb_closes = closes[-_MR_BB_WINDOW:]
+        bb_mean = sum(bb_closes) / _MR_BB_WINDOW
+        bb_var = sum((c - bb_mean) ** 2 for c in bb_closes) / _MR_BB_WINDOW
+        bb_std = bb_var ** 0.5
+        lower_bb = bb_mean - _MR_BB_STD * bb_std
+        middle_bb = bb_mean
+        # Short & long simple MAs
+        short_ma = sum(closes[-_TF_SHORT_WINDOW:]) / _TF_SHORT_WINDOW
+        long_ma = sum(closes[-_TF_LONG_WINDOW:]) / _TF_LONG_WINDOW
+
+        snap = {
+            "close": round(close, 6),
+            "lower_bb": round(lower_bb, 6),
+            "middle_bb": round(middle_bb, 6),
+            "short_ma": round(short_ma, 6),
+            "long_ma": round(long_ma, 6),
+        }
+
+        mr_dip = close < lower_bb
+        gates.append({
+            "gate": "mr_dip",
+            "pass": mr_dip,
+            "detail": (
+                f"close {_fmt_px(close)} {'<' if mr_dip else '≥'} lower_bb {_fmt_px(lower_bb)}"
+            ),
+        })
+
+        tf_break = close > short_ma
+        gates.append({
+            "gate": "tf_break",
+            "pass": tf_break,
+            "detail": (
+                f"close {_fmt_px(close)} {'>' if tf_break else '≤'} short_ma {_fmt_px(short_ma)}"
+            ),
+        })
+
+        tf_aligned = short_ma > long_ma
+        gates.append({
+            "gate": "tf_aligned",
+            "pass": tf_aligned,
+            "detail": (
+                f"short_ma {_fmt_px(short_ma)} {'>' if tf_aligned else '≤'} long_ma {_fmt_px(long_ma)}"
+            ),
+        })
+
+    # 6. account capacity — V4 paper open count vs max
+    cap_ok = open_count < max_open
+    gates.append({
+        "gate": "account_capacity",
+        "pass": cap_ok,
+        "detail": f"{open_count}/{max_open} V4 paper open",
+    })
+
+    blocking = [g for g in gates if g["pass"] is False]
+    # Build operator-readable WHY string
+    mr_block = next((g for g in gates if g["gate"] == "mr_dip" and not g["pass"]), None)
+    tf_break_block = next((g for g in gates if g["gate"] == "tf_break" and not g["pass"]), None)
+    tf_aligned_block = next((g for g in gates if g["gate"] == "tf_aligned" and not g["pass"]), None)
+    why_parts: list[str] = []
+    if mr_block:
+        why_parts.append(f"mr: {mr_block['detail']}")
+    if tf_break_block or tf_aligned_block:
+        if tf_break_block:
+            why_parts.append(f"tf: {tf_break_block['detail']}")
+        elif tf_aligned_block:
+            why_parts.append(f"tf: {tf_aligned_block['detail']}")
+    if not why_parts and not blocking:
+        why = "all gates clear · entry pending strategy decision"
+    elif not why_parts:
+        why = blocking[0]["detail"]
+    else:
+        why = " · ".join(why_parts)
+
+    return {
+        "gates": gates,
+        "n_gates": len(gates),
+        "n_blocking": len(blocking),
+        "first_blocker": blocking[0]["gate"] if blocking else None,
+        "snapshot": snap,
+        "why": why,
+    }
+
+
+def _fmt_px(p: float) -> str:
+    """Compact USD-aware price format for V4 gate WHY strings."""
+    if p is None:
+        return "—"
+    if p >= 1000:
+        return f"${p:,.0f}"
+    if p >= 1:
+        return f"${p:.2f}"
+    return f"${p:.4f}"
 
 
 # --------------------------------------------------------------------------
