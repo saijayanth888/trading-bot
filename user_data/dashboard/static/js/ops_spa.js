@@ -498,8 +498,67 @@
           stat("Closed today", h("span", { className: "v3-num mono", style: { fontSize: "var(--t-md)", fontWeight: 500 } }, String(closedToday)))
         ),
         h("div", { className: "v3-regime-edge", style: { background: regimeTint }, title: "BTC regime" }),
-        h("div", { className: "mono dim", style: { fontSize: "var(--t-2xs)", marginTop: 4 } }, "REGIME · ", h("span", { className: "v3-num" }, regimeLabel))
+        h("div", { className: "mono dim", style: { fontSize: "var(--t-2xs)", marginTop: 4 } }, "REGIME · ", h("span", { className: "v3-num" }, regimeLabel)),
+        // V4 flash-status strip — operator-requested 2026-05-13: pin the
+        // "what is V4 doing right now" info INSIDE this scoreboard card
+        // (not as a separate strip above). Shows engine + open symbols +
+        // last fill — answers "are we trading? what?" in one glance.
+        h(_ScoreboardFlashRow, { data })
       )
+    );
+  }
+
+  // Flash-status footer inside TodayScoreboard. Reads /api/ops/flash_status
+  // and renders engine pill + open-symbols list + last fill in a thin row.
+  function _ScoreboardFlashRow({ data }) {
+    const env = envelopeData(data.flash_status) || {};
+    const engine = String(env.engine || "—").toUpperCase();
+    const mode = String(env.mode || "").toUpperCase();
+    const openN = Number(env.open_positions || 0);
+    const openSyms = (env.open_symbols || []).slice(0, 8);
+    const openNotional = Number(env.open_notional_usd || 0);
+    const closedPnl = Number(env.closed_today_pnl_usd || 0);
+    const lastFillTs = env.last_fill_ts;
+    const lastSym = env.last_fill_symbol;
+    const lastSide = env.last_fill_side;
+    const engineCls = engine === "QUANTA_CORE" ? "up" : "info";
+    const pnlCls = closedPnl > 0 ? "up" : closedPnl < 0 ? "down" : "dim";
+
+    const sep = h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)", margin: "0 8px" } }, "·");
+
+    return h("div", {
+      style: {
+        marginTop: 10, paddingTop: 8,
+        borderTop: "1px solid var(--bd-1)",
+        display: "flex", flexDirection: "row", flexWrap: "wrap",
+        alignItems: "center", gap: 4,
+        fontSize: "var(--t-2xs)",
+      },
+    },
+      h("span", {
+        className: "pill " + engineCls,
+        style: { padding: "2px 8px", flexShrink: 0 },
+      },
+        h("span", { className: "dot " + engineCls + " pulse" }),
+        " ", engine, " · ", mode || "—"),
+      sep,
+      h("span", { className: "dim mono" }, "open"),
+      h("span", { className: "num " + (openN > 0 ? "up" : "dim") + " mono", style: { marginLeft: 4 } },
+        openN > 0 ? (openN + " · " + openSyms.join(" ")) : "0"),
+      openN > 0 ? sep : null,
+      openN > 0 ? h("span", { className: "dim mono" }, "notional") : null,
+      openN > 0 ? h("span", { className: "num accent mono", style: { marginLeft: 4 } },
+        "$" + openNotional.toLocaleString("en-US", { maximumFractionDigits: 0 })) : null,
+      sep,
+      h("span", { className: "dim mono" }, "v4 realized"),
+      h("span", { className: "num " + pnlCls + " mono", style: { marginLeft: 4 } },
+        (closedPnl >= 0 ? "+$" : "-$") + Math.abs(closedPnl).toFixed(2)),
+      lastFillTs ? sep : null,
+      lastFillTs ? h("span", { className: "dim mono" }, "last fill") : null,
+      lastFillTs ? h("span", { className: "num mono", style: { marginLeft: 4 } },
+        (lastSym || "—") + " " + (lastSide || "")) : null,
+      lastFillTs ? h(TimeSince, { ts: lastFillTs, className: "dim mono",
+        style: { marginLeft: 6 } }) : null
     );
   }
 
@@ -6195,13 +6254,10 @@
           // summary. Only renders when blockers exist; zero footprint at rest.
           // Reads from the existing data.gates slot — no new endpoint.
           h(BlockerBanner, { data }),
-          // FLASH-NEWS STRIP — single-row "what's V4 trading RIGHT NOW"
-          // ticker, mounted ABOVE the scoreboard so it's the first surface
-          // the operator sees on every refresh. NOT a column in the
-          // scoreboard — its own thin card (operator-requested 2026-05-13).
-          h(FlashNewsStripLive, { data }),
           // TODAY SCOREBOARD — operator's at-a-glance: capital, day P&L,
-          // trades done, open positions, drawdown.
+          // trades done, open positions, drawdown. NOW includes the
+          // V4 flash-status strip in its footer (operator-requested
+          // 2026-05-13: "make that addition inside scoreboard").
           h(TodayScoreboard, { data }),
           // SHARK OVERRIDE HEALTH — verifier card for the BEAR_VOLATILE
           // paper-mode override. Sits directly under the scoreboard so a
