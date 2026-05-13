@@ -4596,12 +4596,26 @@
     );
   }
 
+  // Returns ms since the role's last_ts, or null if no recent activity.
+  function _afAgeMs(detail) {
+    if (!detail || !detail.last_ts) return null;
+    const t = new Date(detail.last_ts).getTime();
+    if (!isFinite(t)) return null;
+    return Date.now() - t;
+  }
+
   function DebateRoleCard({ role, headline, subline, variant, detail, onClick }) {
     const empty = !detail || !detail.count;
+    const ageMs = _afAgeMs(detail);
+    // Pulse animation re-keys the DOM each time the role fires so the
+    // CSS @keyframes restarts. Key changes when last_ts moves into the
+    // "just fired" window (< 8 s).
+    const justFired = ageMs != null && ageMs < 8000;
     const cardCls = cls(
       "v3-debate-card",
       "v3-debate-card--" + variant,
-      empty ? "is-empty" : _afFreshnessClass(detail)
+      empty ? "is-empty" : _afFreshnessClass(detail),
+      justFired ? "just-fired" : ""
     );
     const boxRef = useRef(null);
     const lastGist = detail && (detail.last_response_gist || detail.last_gist);
@@ -4610,8 +4624,12 @@
       ? role + " — idle (no calls in 24h)"
       : role + " — " + detail.count + " calls, last " + _afAgeLabel(detail.last_ts);
     const dotCls = _afDotClass(detail);
+    // Force a remount whenever last_ts changes so the .just-fired
+    // animation restarts cleanly on each new call.
+    const remountKey = detail && detail.last_ts ? String(detail.last_ts) : "idle";
     return h("div", {
       ref: boxRef,
+      key: remountKey,
       className: cardCls,
       role: "button",
       tabIndex: 0,
@@ -4760,6 +4778,25 @@
     const arb = detailByRole.arbiter || null;
     const refl = detailByRole.reflector || null;
 
+    // Build a Phase Strip showing where in the canonical debate cycle
+    // we are. "fired" = role has any call in the last 5 min;
+    // "firing" = role's last call was within 8 s (currently animating).
+    const _PHASES = [
+      { key: "regime",  label: "REGIME",   detail: regime },
+      { key: "bull",    label: "BULL",     detail: bull },
+      { key: "bear",    label: "BEAR",     detail: bear },
+      { key: "arbiter", label: "ARBITER",  detail: arb },
+      { key: "reflect", label: "REFLECT",  detail: refl },
+    ];
+    const phaseSteps = _PHASES.map((p) => {
+      const ms = _afAgeMs(p.detail);
+      return {
+        label: p.label,
+        firing: ms != null && ms < 8000,
+        fired:  ms != null && ms < 300_000,
+      };
+    });
+
     return h(Card, {
       num: "21a",
       title: "Agent flow",
@@ -4773,6 +4810,28 @@
         cardRight(slot.fetchedAt),
       ),
     },
+      h("div", {
+        className: "v3-debate-phase-strip",
+        role: "group",
+        "aria-label": "Debate phase indicator — regime → bull → bear → arbiter → reflector",
+      },
+        phaseSteps.flatMap((step, i) => {
+          const items = [];
+          if (i > 0) {
+            items.push(h("span", {
+              key: "arr-" + i,
+              className: cls("v3-debate-phase-arrow", step.firing || phaseSteps[i - 1].firing ? "lit" : ""),
+            }, "→"));
+          }
+          items.push(h("span", {
+            key: step.label,
+            className: cls("v3-debate-phase-step",
+              step.firing ? "firing" : (step.fired ? "fired" : "")),
+            title: step.firing ? "firing now" : (step.fired ? "fired in last 5 min" : "idle"),
+          }, step.label));
+          return items;
+        })
+      ),
       regimeFlash && h("div", {
         className: "v3-regime-flash",
         role: "status",

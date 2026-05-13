@@ -1691,6 +1691,97 @@ table.t tbody tr.flash-sell { animation: flash-sell 200ms cubic-bezier(0.2, 0, 0
   padding: var(--s-2) 0;
 }
 
+/* ── Card 21a · Agent Flow LIVE ANIMATION ─────────────────────────────────
+ * When a role fires (any new LLM call in last 5s), the role card pulses
+ * with its theme color + a halo flare; the connector path that feeds it
+ * dashes faster + brightens. Phase strip below shows 1..5 progression so
+ * the operator sees "regime → bull → bear → arbiter → reflector" cycle.
+ */
+.v3-debate-card.just-fired {
+  animation: v3-card-just-fired 2.6s ease-out 1;
+}
+.v3-debate-card--bull.just-fired   { animation-name: v3-card-just-fired-bull; }
+.v3-debate-card--bear.just-fired   { animation-name: v3-card-just-fired-bear; }
+.v3-debate-card--arbiter.just-fired { animation-name: v3-card-just-fired-arb; }
+.v3-debate-card--reflector.just-fired { animation-name: v3-card-just-fired-refl; }
+.v3-debate-card--cold.just-fired   { animation-name: v3-card-just-fired-cold; }
+
+@keyframes v3-card-just-fired {
+  0%   { transform: translateY(-1px) scale(1.015); box-shadow: 0 0 32px color-mix(in srgb, var(--fg-1) 35%, transparent); }
+  100% { transform: translateY(0)    scale(1);     box-shadow: var(--v3-z-card); }
+}
+@keyframes v3-card-just-fired-bull {
+  0%   { transform: translateY(-2px) scale(1.02); box-shadow: 0 0 38px color-mix(in srgb, var(--up) 60%, transparent); border-color: var(--up); }
+  60%  { transform: translateY(-1px) scale(1.01); box-shadow: 0 0 22px color-mix(in srgb, var(--up) 45%, transparent); }
+  100% { transform: translateY(0)    scale(1);    box-shadow: var(--v3-z-flare-up); border-color: var(--up-line); }
+}
+@keyframes v3-card-just-fired-bear {
+  0%   { transform: translateY(-2px) scale(1.02); box-shadow: 0 0 38px color-mix(in srgb, var(--down) 60%, transparent); border-color: var(--down); }
+  60%  { transform: translateY(-1px) scale(1.01); box-shadow: 0 0 22px color-mix(in srgb, var(--down) 45%, transparent); }
+  100% { transform: translateY(0)    scale(1);    box-shadow: var(--v3-z-flare-danger); border-color: var(--down-line); }
+}
+@keyframes v3-card-just-fired-arb {
+  0%   { transform: translateY(-2px) scale(1.02); box-shadow: 0 0 38px color-mix(in srgb, var(--accent) 60%, transparent); border-color: var(--accent); }
+  60%  { transform: translateY(-1px) scale(1.01); box-shadow: 0 0 22px color-mix(in srgb, var(--accent) 45%, transparent); }
+  100% { transform: translateY(0)    scale(1);    box-shadow: var(--v3-z-flare-accent); border-color: var(--accent-line); }
+}
+@keyframes v3-card-just-fired-refl {
+  0%   { transform: translateY(-2px) scale(1.02); box-shadow: 0 0 38px color-mix(in srgb, var(--warn) 60%, transparent); border-color: var(--warn); }
+  60%  { transform: translateY(-1px) scale(1.01); box-shadow: 0 0 22px color-mix(in srgb, var(--warn) 45%, transparent); }
+  100% { transform: translateY(0)    scale(1);    box-shadow: var(--v3-z-flare-warn); border-color: var(--warn-line); }
+}
+@keyframes v3-card-just-fired-cold {
+  0%   { transform: translateY(-2px) scale(1.02); box-shadow: 0 0 38px color-mix(in srgb, var(--v3-cold-blue) 60%, transparent); }
+  100% { transform: translateY(0)    scale(1);    box-shadow: 0 0 18px color-mix(in srgb, var(--v3-cold-blue) 28%, transparent); }
+}
+
+/* Phase strip — five tick boxes in order of the canonical debate cycle. */
+.v3-debate-phase-strip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 0 var(--s-3);
+  padding: 6px 8px;
+  background: var(--bg-inset);
+  border: var(--v3-hairline);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: var(--t-2xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.v3-debate-phase-step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  color: var(--fg-3);
+  border: 1px solid transparent;
+  transition: color 200ms var(--ease-out), border-color 200ms var(--ease-out), background 200ms var(--ease-out);
+}
+.v3-debate-phase-step.fired {
+  color: var(--fg-1);
+  background: color-mix(in srgb, var(--fg-1) 6%, transparent);
+  border-color: color-mix(in srgb, var(--fg-1) 18%, transparent);
+}
+.v3-debate-phase-step.firing {
+  color: var(--bg-page);
+  background: var(--v3-electric-yellow);
+  border-color: var(--v3-electric-yellow);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--v3-electric-yellow) 50%, transparent);
+  animation: v3-debate-live-pulse 0.833s ease-in-out infinite;
+}
+.v3-debate-phase-arrow {
+  color: var(--fg-4);
+  font-size: 11px;
+  line-height: 1;
+}
+.v3-debate-phase-arrow.lit {
+  color: var(--v3-electric-yellow);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--v3-electric-yellow) 55%, transparent);
+}
+
 /* --- Card 21 · LLM activity --- */
 .v3-llm-tier-pills {
   display: flex;
