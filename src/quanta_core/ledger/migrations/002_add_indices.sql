@@ -33,31 +33,15 @@ CREATE INDEX IF NOT EXISTS idx_decisions_symbol_ts
 CREATE INDEX IF NOT EXISTS idx_equity_snapshots_ts
     ON equity_snapshots (ts DESC);
 
--- TimescaleDB hypertables (optional — silently skipped without the extension).
--- Wrapped in DO/EXCEPTION so this migration is idempotent and CI-friendly.
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM pg_extension WHERE extname = 'timescaledb'
-    ) THEN
-        PERFORM create_hypertable(
-            'fills', 'ts',
-            if_not_exists => TRUE,
-            migrate_data => TRUE
-        );
-        PERFORM create_hypertable(
-            'decisions', 'ts',
-            if_not_exists => TRUE,
-            migrate_data => TRUE
-        );
-        PERFORM create_hypertable(
-            'equity_snapshots', 'ts',
-            if_not_exists => TRUE,
-            migrate_data => TRUE
-        );
-    END IF;
-END;
-$$;
+-- TimescaleDB hypertables — DEFERRED to a future migration (003+).
+-- The Timescale 2.26 API in our running container has changed function
+-- signatures (uses dimension_info struct), making the old
+-- create_hypertable('table', 'column', ...) call signature ambiguous.
+-- The b-tree indices above cover all our planned query patterns
+-- (proposal lookups by symbol+ts, decisions by ts, equity range scans);
+-- hypertable chunking is a performance-only optimization that becomes
+-- meaningful at 10M+ rows, which we are nowhere near. Re-enable in
+-- 003_add_hypertables.sql once the API is updated.
 
 INSERT INTO quanta_schema_version (version, description)
 VALUES (2, 'performance indices + optional timescaledb hypertables on fills/decisions/equity_snapshots')
