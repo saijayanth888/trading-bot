@@ -1,0 +1,14 @@
+{
+  "symbol": "PLTR260522P00130000",
+  "exit_price": null,
+  "pnl_pct": -28.505000000000003,
+  "exit_reason": "stop-out",
+  "ticker": "PLTR260522P00130000",
+  "exit_date": "2026-05-12",
+  "regime": "BEAR_VOLATILE",
+  "side": "long",
+  "phase": "midday",
+  "setup_tag": "momentum",
+  "pead_event_date": null,
+  "entry_date": null
+}

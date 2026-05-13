@@ -1,0 +1,14 @@
+{
+  "symbol": "SOFI260522P00015500",
+  "exit_price": null,
+  "pnl_pct": -45.714,
+  "exit_reason": "stop-out",
+  "ticker": "SOFI260522P00015500",
+  "exit_date": "2026-05-12",
+  "regime": "BEAR_VOLATILE",
+  "side": "long",
+  "phase": "midday",
+  "setup_tag": "momentum",
+  "pead_event_date": null,
+  "entry_date": null
+}
