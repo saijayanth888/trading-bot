@@ -317,6 +317,16 @@ services:
       # Read-only mount of the stocks subsystem so /api/ops/stocks can
       # surface shark equity + wheel positions in the unified dashboard.
       - ./stocks:/freqtrade/stocks:ro
+      # Data-out-of-repo migration (2026-05-13): shark memory + wheel state
+      # live at /home/saijayanthai/Documents/.dgx-train/shark/, NOT in the
+      # repo tree. On the host these locations are symlinks back, so any
+      # code that uses Path(__file__).parents[N] / "memory" still works.
+      # Inside the container we OVERLAY the new home onto the legacy paths
+      # so the same path-construction code reads the migrated data without
+      # any code changes. Read-only because the dashboard never writes
+      # these files — shark, wheel, and the Hermes crons (on the host) do.
+      - /home/saijayanthai/Documents/.dgx-train/shark/memory:/freqtrade/stocks/memory:ro
+      - /home/saijayanthai/Documents/.dgx-train/shark/wheel-state:/freqtrade/stocks/wheel/state:ro
       # Read-only view of host /tmp so the dashboard can see the LLM
       # circuit-breaker state files (/tmp/shark-cb-*.json) and the
       # Ollama health probe output (/tmp/ollama-health.json) that the

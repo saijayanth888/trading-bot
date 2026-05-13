@@ -89,9 +89,6 @@ user_data/state/
 # Stocks subsystem (shark) — runtime / cache that should be regenerated, not committed
 stocks/venv/
 stocks/kb/historical_bars/*.json
-stocks/memory/CONTEXT-BRIEFING.md
-stocks/memory/error.log
-stocks/memory/.*.lock
 # Freqtrade private config — telegram token, slack webhook URL, etc.
 # config.json is committed (strategy + non-secret settings); secrets live here.
 user_data/config-private.json
@@ -133,16 +130,7 @@ private/
 user_data/data/unified_risk_peak.json
 user_data/data/unified_risk_peak.json.tmp
 # Wheel module — runtime state regenerates, but trade log stays
-stocks/wheel/state/positions.json
-stocks/wheel/state/cash_log.jsonl
-stocks/wheel/state/account_snapshot.json
-stocks/wheel/state/kill_flags.json
-stocks/wheel/state/trades.jsonl
-stocks/wheel/state/candles_*.json
-stocks/wheel/state/.lock
-stocks/wheel/state/owned_symbols.json
 stocks/wheel/__pycache__/
-stocks/wheel/state/__pycache__/
 # Shark subsystem ownership — runtime state, rebuilt by bootstrap script
 stocks/shark/state/owned_symbols.json
 stocks/shark/state/.*.owned_symbols.json.*.tmp
@@ -170,3 +158,11 @@ _zoom-*.html
 .claude/
 # Wheel state backups created during reconciliation (rare)
 stocks/wheel/state/*.backup-*
+
+# Data-out-of-repo (2026-05-13): shark memory + wheel state live
+# at ~/Documents/.dgx-train/shark/, NOT in this repo. The host symlinks
+# stocks/memory and stocks/wheel/state point there; both must be ignored.
+stocks/memory
+stocks/memory/
+stocks/wheel/state
+stocks/wheel/state/

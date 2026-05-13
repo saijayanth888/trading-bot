@@ -1,5 +1,0 @@
-[09:31:46 ET] stocks_day_runner started · now=09:31 ET · day=1
-[09:31:46 ET] skip 09:00 shark_pre_market.sh (already past)
-[09:31:46 ET] skip 09:05 wheel_candles.sh (already past)
-[09:31:46 ET] skip 09:30 wheel_snapshot.sh (already past)
-[09:31:46 ET] wait 194s until 09:35 for shark_market_open.sh
