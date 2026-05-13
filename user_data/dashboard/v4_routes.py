@@ -108,18 +108,75 @@ def _mock_debate_history() -> list[dict[str, Any]]:
     return sessions
 
 
+def _read_decisions_from_db(limit: int = 12) -> list[dict[str, Any]]:
+    """Pull recent V4 decisions from quanta_schema.decisions.
+
+    Source-of-truth for V4 shadow-mode output. Empty list on connection
+    failure (the handler then falls back to the in-memory buffer / mock).
+    """
+    try:
+        import psycopg
+    except Exception:
+        return []
+    user = os.environ.get("POSTGRES_USER", "tradebot")
+    pw = os.environ.get("POSTGRES_PASSWORD", "")
+    host = os.environ.get("POSTGRES_HOST", "postgres")
+    port = os.environ.get("POSTGRES_PORT", "5432")
+    db = os.environ.get("POSTGRES_DB", "tradebot")
+    if not pw:
+        return []
+    dsn = f"host={host} port={port} user={user} password={pw} dbname={db}"
+    try:
+        with psycopg.connect(dsn, connect_timeout=2) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT ts, symbol, strategy, outcome, rationale, debate
+                    FROM quanta_schema.decisions
+                    ORDER BY ts DESC
+                    LIMIT %s
+                    """,
+                    (limit,),
+                )
+                rows = cur.fetchall()
+    except Exception:
+        return []
+    sessions: list[dict[str, Any]] = []
+    for ts, symbol, strategy, outcome, rationale, debate in rows:
+        sessions.append({
+            "session_id": uuid.uuid5(
+                uuid.NAMESPACE_DNS, f"{symbol}-{ts.isoformat()}"
+            ).hex[:16],
+            "pair": symbol,
+            "setup_ts": ts.isoformat(),
+            "decision": outcome,
+            "strategy": strategy,
+            "rationale": rationale,
+            "regime": (debate or {}).get("regime"),
+            "close": (debate or {}).get("close"),
+            # latency is N/A for the simple shadow runner; surface 0
+            "total_latency_ms": 0,
+        })
+    return sessions
+
+
 @router.get("/debate/history")
 async def debate_history() -> dict[str, Any]:
-    """Recent debate sessions.
+    """Recent V4 decisions.
 
-    Reads from `_DEBATE_BUFFER` (in-memory ring + JSONL at
-    `data/v4_runtime/debates.jsonl`) when populated; falls back to a
-    deterministic mock so the SPA always has content to render.
-    Real writers will land via the debate orchestrator — see
-    `docs/V4_SHADOW_MODE_DESIGN.md`.
+    Reads, in order of preference:
+      1. `quanta_schema.decisions` postgres table (V4 shadow runner output)
+      2. `_DEBATE_BUFFER` in-memory ring (future debate orchestrator)
+      3. Deterministic mock (early bring-up only)
+
+    Real-data branch wins as soon as the shadow runner writes a row.
     """
+    db_sessions = _read_decisions_from_db(limit=12)
+    if db_sessions:
+        return {"sessions": db_sessions, "source": "quanta_schema.decisions"}
+
     sessions = _live_or_mock(_DEBATE_BUFFER, _mock_debate_history, limit=8)
-    return {"sessions": sessions}
+    return {"sessions": sessions, "source": "buffer_or_mock"}
 
 
 def _vote_payload(role: str, pair: str, idx: int) -> dict[str, Any]:
