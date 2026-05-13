@@ -1307,8 +1307,14 @@
     const sharpeRaw = metrics.sharpe_ratio != null ? metrics.sharpe_ratio : metrics.sharpe;
     const sharpe = sharpeRaw != null ? Number(sharpeRaw).toFixed(2) : "—";
     const services = envelopeData(data.services) || {};
-    const ftStatus = (services.freqtrade && services.freqtrade.up) ? "freqtrade · ok"
-                   : (services.freqtrade ? "freqtrade · down" : "—");
+    // Engine display: prefer /api/mode's engine field (post-cutover V4), then
+    // freqtrade probe (legacy), else dash.
+    const engineName = (mode.engine || "").toLowerCase();
+    const engineLabel = engineName === "quanta_core"
+      ? "quanta_core · " + ((mode.state === "running") ? "ok" : (mode.state || "—"))
+      : (services.freqtrade && services.freqtrade.up) ? "freqtrade · ok"
+      : (services.freqtrade ? "freqtrade · down" : "—");
+    const strategyLabel = engineName === "quanta_core" ? "MeanRevBB + TrendFollow" : "EPT";
     return h("div", { className: "card mountin", style: { padding: "var(--s-3) var(--s-4)" } },
       h("div", { style: { display: "flex", alignItems: "center", gap: "var(--s-2)" } },
         h("span", { className: "metric-label" }, "BOT STATE"),
@@ -1316,10 +1322,10 @@
         h("span", { className: "pill " + klass }, h("span", { className: "dot " + klass + " pulse" }), " ", lbl)
       ),
       h("div", { style: { marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, fontSize: "var(--t-xs)" } },
-        h("div", { className: "dim mono" }, "ENGINE"),    h("div", { className: "num" }, ftStatus),
+        h("div", { className: "dim mono" }, "ENGINE"),    h("div", { className: "num" }, engineLabel),
         h("div", { className: "dim mono" }, "MODE"),      h("div", { className: "num" }, (mode.mode || "—") + (mode.dry_run ? " · dry" : "")),
         h("div", { className: "dim mono" }, "CHAMPION"),  h("div", { className: "num accent" }, champion + " · sh " + sharpe),
-        h("div", { className: "dim mono" }, "STRATEGY"),  h("div", { className: "num" }, "EPT")
+        h("div", { className: "dim mono" }, "STRATEGY"),  h("div", { className: "num" }, strategyLabel)
       )
     );
   }

@@ -337,6 +337,9 @@ services:
       # Animation gate — operator can set DASHBOARD_EFFECTS=0 to drop the
       # decorative effects.js layer for a data-first display.
       - DASHBOARD_EFFECTS=${DASHBOARD_EFFECTS:-1}
+      # Post-cutover: tells /api/mode which engine is active. Defaults to
+      # legacy freqtrade probe when unset.
+      - LIVE_ENGINE_MODE=${LIVE_ENGINE_MODE:-}
       - DASHBOARD_PAIRS=${DASHBOARD_PAIRS:-BTC/USD,ETH/USD,SOL/USD}
       # Cross-network bridge to mf-api (model-forge_default network).
       # mf-api binds 0.0.0.0:8000 on the host so host.docker.internal:8000

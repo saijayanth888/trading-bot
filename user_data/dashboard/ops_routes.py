@@ -2849,35 +2849,93 @@ async def market_hours():
     })
 
 
+def _v4_is_active_engine() -> bool:
+    return (os.environ.get("LIVE_ENGINE_MODE") or "").lower() in ("live", "shadow")
+
+
+def _v4_crypto_open_positions() -> list[dict]:
+    """Read open V4 paper positions from quanta_schema (post-cutover path).
+
+    Returns crypto-kind trade rows in the same shape live_trades expects,
+    so the hero ticker renders identically whether the active engine is
+    freqtrade or V4.
+    """
+    rows: list[dict] = []
+    try:
+        from .ops_db import _connect, _HAVE_PG
+    except Exception:
+        return rows
+    if not _HAVE_PG:
+        return rows
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT p.symbol,
+                       SUM(CASE WHEN f.side='BUY'  THEN f.qty ELSE 0 END) -
+                       SUM(CASE WHEN f.side='SELL' THEN f.qty ELSE 0 END)            AS net_qty,
+                       SUM(CASE WHEN f.side='BUY' THEN f.qty * f.price ELSE 0 END) /
+                       NULLIF(SUM(CASE WHEN f.side='BUY' THEN f.qty ELSE 0 END), 0)  AS avg_buy_px,
+                       MAX(f.ts)                                                     AS last_fill_ts,
+                       MAX(p.strategy)                                               AS strategy
+                FROM quanta_schema.fills f
+                JOIN quanta_schema.proposals p USING (client_order_id)
+                GROUP BY p.symbol
+                HAVING SUM(CASE WHEN f.side='BUY' THEN f.qty ELSE 0 END) -
+                       SUM(CASE WHEN f.side='SELL' THEN f.qty ELSE 0 END) > 0
+                """
+            )
+            for sym, net_qty, avg_px, last_fill_ts, strategy in cur.fetchall():
+                rows.append({
+                    "kind": "crypto",
+                    "subkind": "long",
+                    "label": sym,
+                    "entry": float(avg_px) if avg_px is not None else None,
+                    "current": None,  # filled by client from /api/candles
+                    "qty": float(net_qty),
+                    "pnl_pct": None,
+                    "pnl_usd": None,
+                    "duration_s": None,
+                    "opened_at": last_fill_ts.isoformat() if last_fill_ts else None,
+                    "extra": f"v4·strategy={strategy}",
+                })
+    except Exception as exc:
+        logger.warning("v4 positions read failed: %s", exc)
+    return rows
+
+
 @router.get("/live_trades")
 async def live_trades():
     """Aggregate every active position across crypto + wheel + shark for
-    the top hero strip. One source of truth so the operator sees ALL
-    trading activity at a glance, not split across two pages.
+    the top hero strip. Post-cutover (LIVE_ENGINE_MODE set) reads crypto
+    from quanta_schema; otherwise legacy freqtrade probe.
     """
     out: list[dict] = []
 
-    # ── Crypto open trades from freqtrade ────────────────────────────
-    try:
-        async with httpx.AsyncClient(timeout=ENDPOINT_TIMEOUT_S) as client:
-            r = await ft_authed_get(client, "/api/v1/status", timeout=ENDPOINT_TIMEOUT_S)
-            if r is not None and r.status_code == 200:
-                for t in (r.json() or []):
-                    out.append({
-                        "kind": "crypto",
-                        "subkind": "long" if not t.get("is_short") else "short",
-                        "label": t.get("pair") or "?",
-                        "entry": t.get("open_rate"),
-                        "current": t.get("current_rate"),
-                        "qty": t.get("amount"),
-                        "pnl_pct": (t.get("profit_ratio") or 0) * 100,
-                        "pnl_usd": t.get("profit_abs"),
-                        "duration_s": t.get("trade_duration_s"),
-                        "opened_at": t.get("open_date"),
-                        "extra": f"regime@entry={t.get('regime', '—')}",
-                    })
-    except Exception as exc:
-        logger.warning("live_trades: freqtrade fetch failed: %s", exc)
+    # ── Crypto open trades ────────────────────────────
+    if _v4_is_active_engine():
+        out.extend(_v4_crypto_open_positions())
+    else:
+        try:
+            async with httpx.AsyncClient(timeout=ENDPOINT_TIMEOUT_S) as client:
+                r = await ft_authed_get(client, "/api/v1/status", timeout=ENDPOINT_TIMEOUT_S)
+                if r is not None and r.status_code == 200:
+                    for t in (r.json() or []):
+                        out.append({
+                            "kind": "crypto",
+                            "subkind": "long" if not t.get("is_short") else "short",
+                            "label": t.get("pair") or "?",
+                            "entry": t.get("open_rate"),
+                            "current": t.get("current_rate"),
+                            "qty": t.get("amount"),
+                            "pnl_pct": (t.get("profit_ratio") or 0) * 100,
+                            "pnl_usd": t.get("profit_abs"),
+                            "duration_s": t.get("trade_duration_s"),
+                            "opened_at": t.get("open_date"),
+                            "extra": f"regime@entry={t.get('regime', '—')}",
+                        })
+        except Exception as exc:
+            logger.warning("live_trades: freqtrade fetch failed: %s", exc)
 
     # ── Wheel positions (puts/calls/shares) ─────────────────────────
     pos_file = STOCKS_ROOT / "wheel" / "state" / "positions.json"

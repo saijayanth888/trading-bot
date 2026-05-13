@@ -153,8 +153,51 @@ async def api_universe() -> dict[str, Any]:
 
 @app.get("/api/mode")
 async def api_mode() -> dict[str, Any]:
-    """Return the freqtrade run mode (paper / live / paused) for the topbar badge."""
-    out = {"mode": "unknown", "state": "unknown", "dry_run": None}
+    """Active trading engine + mode for the topbar badge.
+
+    Resolution order (post-cutover):
+      1. If LIVE_ENGINE_MODE env is "live" or "shadow" → V4 (quanta_core)
+         is the active engine. Mode is "paper" (paper-fill simulator) or
+         "shadow" (no orders). State is "running" when the quanta-core
+         container is reachable on the compose network.
+      2. Otherwise, fall back to the legacy freqtrade probe.
+      3. If neither responds, mode=unknown.
+    """
+    out: dict[str, Any] = {
+        "mode": "unknown", "state": "unknown", "dry_run": None,
+        "engine": None,
+    }
+
+    # ---- V4 branch (post-cutover) ----
+    v4_mode = (os.environ.get("LIVE_ENGINE_MODE") or "").lower()
+    if v4_mode in ("live", "shadow"):
+        out["engine"] = "quanta_core"
+        out["state"] = "running"
+        out["dry_run"] = True  # V4 paper-fill simulator (no real exchange)
+        out["mode"] = "paper" if v4_mode == "live" else "shadow"
+        # Try to confirm quanta-core is alive — best-effort, don't block.
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                # quanta-core has no HTTP surface yet; we infer liveness from
+                # the most recent decision row instead. That query is cheap.
+                from .ops_db import _connect, _HAVE_PG  # local import
+                if _HAVE_PG:
+                    with _connect() as conn, conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT EXTRACT(EPOCH FROM (NOW() - MAX(ts)))::int "
+                            "FROM quanta_schema.decisions"
+                        )
+                        row = cur.fetchone()
+                        age = row[0] if row else None
+                        if age is not None and age < 600:  # decision in last 10 min
+                            out["state"] = "running"
+                        else:
+                            out["state"] = "stale"
+        except Exception as exc:
+            logger.debug("v4 liveness probe failed: %s", exc)
+        return out
+
+    # ---- Legacy freqtrade branch ----
     async with httpx.AsyncClient() as client:
         from .data_sources import ft_authed_get
         try:
@@ -163,6 +206,7 @@ async def api_mode() -> dict[str, Any]:
                 cfg = r.json()
                 state = str(cfg.get("state", "unknown")).lower()
                 dry = bool(cfg.get("dry_run", True))
+                out["engine"] = "freqtrade"
                 out["state"] = state
                 out["dry_run"] = dry
                 if state in ("paused", "stopped"):
