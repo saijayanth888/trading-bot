@@ -1472,14 +1472,33 @@
       }
       return modeLocal;
     })();
-    const ftUp = (() => {
+    // Engine label + up/down probe — V4 (quanta_core) post-cutover,
+    // freqtrade pre-cutover. Reads /api/mode.engine to pick the path.
+    const engineMeta = (() => {
       if (servicesProp != null) {
-        const ftSvc = (servicesProp && servicesProp.data && servicesProp.data.freqtrade) ||
-                       (servicesProp && servicesProp.freqtrade) || {};
-        return typeof ftSvc.up === "boolean" ? ftSvc.up : null;
+        const svc = (servicesProp && servicesProp.data) || servicesProp || {};
+        // mode.engine arrives via modeProp; fall back to inferring from
+        // which probe row exists in the services payload.
+        const modeJ = (modeProp && modeProp.data) || modeProp || {};
+        const engine = String(modeJ.engine || "").toLowerCase();
+        if (engine === "quanta_core" || svc.quanta_core) {
+          const qc = svc.quanta_core || {};
+          return {
+            name: "QUANTA",
+            up: typeof qc.up === "boolean" ? qc.up : null,
+          };
+        }
+        if (engine === "freqtrade" || svc.freqtrade) {
+          const ft = svc.freqtrade || {};
+          return {
+            name: "FREQTRADE",
+            up: typeof ft.up === "boolean" ? ft.up : null,
+          };
+        }
       }
-      return ftUpLocal;
+      return { name: "ENGINE", up: ftUpLocal };
     })();
+    const ftUp = engineMeta.up;
     const hb = heartbeatStatus === "warn" || heartbeatStatus === "bad" ? heartbeatStatus : "ok";
     return h(
       "header",
@@ -1515,13 +1534,16 @@
           h("span", { className: "dot " + (mode.dry ? "warn" : "down") + " pulse" }),
           " " + mode.label
         ),
-        // freqtrade up/down — from /api/ops/services. null = unknown (don't
-        // claim health while we still haven't heard back).
+        // Engine up/down — from /api/ops/services. null = unknown (don't
+        // claim health while we still haven't heard back). Label flips
+        // based on which engine is active (QUANTA post-cutover, FREQTRADE
+        // pre-cutover); the probe key in /api/ops/services switches in
+        // lockstep, so this pill is always referring to the right service.
         h(
           "span",
           { className: "pill " + (ftUp === true ? "up" : ftUp === false ? "down" : "") },
           h("span", { className: "dot " + (ftUp === true ? "up pulse" : ftUp === false ? "down" : "dim") }),
-          " FREQTRADE " + (ftUp === true ? "OK" : ftUp === false ? "DOWN" : "—")
+          " " + engineMeta.name + " " + (ftUp === true ? "OK" : ftUp === false ? "DOWN" : "—")
         ),
         // Bonus #4 · Tier-B · latency dot with backpressure pulse.
         // 6px dot tints + pulses based on freqtrade /api/mode round-trip.
