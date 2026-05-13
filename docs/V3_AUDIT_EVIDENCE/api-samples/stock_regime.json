@@ -1,0 +1,1 @@
+{"status":"ok","data":{"current":"trending_up","probability":0.6762,"spot":736.39,"ma_50":686.31,"ma_200":674.43,"return_5d_pct":1.75,"realized_vol_21d_pct":10.06,"structure":"golden_cross","above_200d":true,"data_age_seconds":182,"bars":400,"model":"spy_simple_v1"},"error":null,"checked_at":"2026-05-12T18:59:53.727292+00:00"}

@@ -15,9 +15,11 @@
   const F = React.Fragment;
 
   const {
-    NumberRoll, Sparkline, CandleChart, GateBadge, KillSwitch,
+    NumberRoll, Sparkline, CandleChart, GateBadge,
     Sidebar, Card, ProgressBar, TimeSince,
+    HeartbeatDot, KillBar, deriveHeartbeatStatus,
   } = window;
+  const CommandPalette = (window.QC && window.QC.CommandPalette) || function () { return null; };
 
   // ─────────────── helpers ───────────────
   function envelopeData(env) {
@@ -144,10 +146,17 @@
     const modeCls = modeD.mode === "live" ? "up" : modeD.mode === "paused" ? "warn" : "info";
     const ft = svc.freqtrade || {};
     const ftOk = !!ft.up;
+    const hbStatus = deriveHeartbeatStatus({
+      services: services,
+      mode: mode,
+      killState: killState,
+    });
     return h(
       "header", { className: "topbar" },
       h("div", { className: "brand" },
-        h("div", { className: "brand-mark" }, "Q"),
+        h("div", { className: "v3-brand-stack" },
+          h(HeartbeatDot, { status: hbStatus, title: "System health (services + mode)" }),
+          h("div", { className: "brand-mark" }, "Q")),
         h("span", { className: "brand-text" }, "QUANTA ",
           h("span", { className: "brand-version" }, "v2.6"))
       ),
@@ -173,40 +182,46 @@
       h("div", { className: "tb-group" },
         h(TimeSince, { ts: fetchedAt, className: "mono dim", style: { fontSize: "var(--t-xs)" } }),
         h("span", { className: "mono dim", style: { fontSize: "var(--t-xs)" } }, clock)
-      ),
-      h("div", { className: "tb-divider" }),
-      h(KillSwitch, {
-        state: killState,
-        onArm: () => setKillState && setKillState("armed"),
-        onKill: () => {
-          if (setKillState) setKillState("killed");
-          fetch("/api/ops/pause", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ reason: "operator kill switch via pair dashboard" }),
-          }).catch(() => {});
-        },
-        onResume: () => {
-          if (setKillState) setKillState("normal");
-          // /api/ops/resume requires confirm: true (see ops_routes.py:810).
-          // Without it the resume returns 400 and the bot stays paused —
-          // operator sees the chip flip back to "normal" but trading
-          // doesn't actually re-enable.
-          fetch("/api/ops/resume", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              reason: "operator kill switch resume via pair dashboard",
-              confirm: true,
-            }),
-          }).catch(() => {});
-        },
-      })
+      )
     );
   }
 
   function DashApp() {
-    const [killState, setKillState] = useState("normal");
+    const [killState, setKillStateRaw] = useState("normal");
+    const killStateRef = useRef("normal");
+    const setKillState = useCallback((next) => {
+      const prev = killStateRef.current;
+      killStateRef.current = next;
+      setKillStateRaw(next);
+      if (next === "killed" && prev !== "killed") {
+        fetch("/api/ops/pause", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason: "operator kill bar via pair dashboard" }),
+        }).catch(() => {});
+      } else if (next === "normal" && prev === "killed") {
+        fetch("/api/ops/resume", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            reason: "operator kill bar resume via pair dashboard",
+            confirm: true,
+          }),
+        }).catch(() => {});
+      }
+    }, []);
+
+    const kbPause = useCallback(() => fetch("/api/ops/pause", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "operator kill bar pause via dashboard spa" }),
+    }).then(r => (r.ok ? "PAUSED" : "PAUSE HTTP " + r.status)), []);
+
+    const kbFlatten = useCallback(() => fetch("/api/ops/pause", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "operator kill bar flatten+halt via dashboard spa" }),
+    }).then(r => (r.ok ? "HALT issued" : "HTTP " + r.status)), []);
     const [venue, setVenue] = useState("crypto");
     const [pair, setPair] = useState("BTC/USD");
     const [tf, setTf] = useState("5m");
@@ -447,6 +462,10 @@
       : "PASS";
 
     return h(F, null,
+      h(CommandPalette, {
+        variant: "dash",
+        dash: { cryptoPairs, stockSymbols, pair, venue, setPair, setVenue },
+      }),
       h("div", { className: "app" },
         h(TopbarLive, {
           killState, setKillState,
@@ -605,7 +624,20 @@
           h("div", { style: { padding: "var(--s-4) 0", textAlign: "center", color: "var(--fg-4)", fontSize: "var(--t-xs)", fontFamily: "var(--mono)" } },
             "QUANTA v2.6 · build " + new Date().toISOString().slice(0, 10))
         )
-      )
+      ),
+      h(KillBar, {
+        killState: killState,
+        setKillState: setKillState,
+        forceOpen: false,
+        onPause: kbPause,
+        onFlatten: kbFlatten,
+        onKill: () => { setKillState("killed"); },
+        onResume: () => {
+          setKillState("normal");
+          return Promise.resolve("RESUME sent");
+        },
+        resumeDisabled: killState !== "killed",
+      })
     );
   }
 
