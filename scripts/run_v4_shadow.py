@@ -65,6 +65,14 @@ except Exception as _strat_exc:  # pragma: no cover — bootstrapping path
     _STRATEGY_AVAILABLE = False
     _STRATEGY_IMPORT_ERROR = repr(_strat_exc)
 
+# Second strategy — added in parallel; tolerate absence (import-on-demand).
+try:
+    from quanta_core.strategy.trend_follow import TrendFollow
+    _TRENDFOLLOW_AVAILABLE = True
+except Exception:  # pragma: no cover — bootstrapping path
+    TrendFollow = None  # type: ignore[assignment]
+    _TRENDFOLLOW_AVAILABLE = False
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -256,60 +264,70 @@ async def run_cycle(cfg: Cfg, session: aiohttp.ClientSession, conn: psycopg.Asyn
         ctx.set_history(symbol, bars[:-1])  # history excludes the bar we'll feed
         latest_bar = bars[-1]
 
-        strat = MeanRevBB(
+        # Build the strategy roster — each strategy gets its own clean
+        # instance per cycle (cheap; they're tiny).
+        roster: list[tuple[str, Any]] = []
+        roster.append(("mean_rev_bb", MeanRevBB(
             ctx=ctx,
             config={"symbol": symbol, "timeframe": "5m", "state": {"regime": regime_label}},
-        )
+        )))
+        if _TRENDFOLLOW_AVAILABLE:
+            roster.append(("trend_follow", TrendFollow(
+                ctx=ctx,
+                config={"symbol": symbol, "timeframe": "5m", "state": {"regime": regime_label}},
+            )))
 
-        try:
-            proposals = strat.on_candle(latest_bar)
-        except Exception as exc:
-            log.exception("on_candle(%s) raised: %s", symbol, exc)
-            await write_decision(
-                conn, symbol=symbol, strategy="mean_rev_bb",
-                debate={"error": repr(exc), "regime": regime_label},
-                outcome="ERROR", rationale=f"strategy raised: {exc!r}",
-            )
-            continue
+        for strat_name, strat in roster:
+            try:
+                proposals = strat.on_candle(latest_bar)
+            except Exception as exc:
+                log.exception("on_candle(%s/%s) raised: %s", symbol, strat_name, exc)
+                await write_decision(
+                    conn, symbol=symbol, strategy=strat_name,
+                    debate={"error": repr(exc), "regime": regime_label},
+                    outcome="ERROR", rationale=f"strategy raised: {exc!r}",
+                )
+                continue
 
-        if not proposals:
-            await write_decision(
-                conn, symbol=symbol, strategy="mean_rev_bb",
-                debate={
-                    "regime": regime_label,
-                    "close": float(latest_bar.close),
-                    "ts": latest_bar.timestamp_utc.isoformat(),
-                    "verdict": "no_signal",
-                },
-                outcome="FLAT", rationale=f"no signal; regime={regime_label}",
-            )
-            log.info("%s @ %s: FLAT", symbol, latest_bar.close)
-            continue
+            if not proposals:
+                await write_decision(
+                    conn, symbol=symbol, strategy=strat_name,
+                    debate={
+                        "regime": regime_label,
+                        "close": float(latest_bar.close),
+                        "ts": latest_bar.timestamp_utc.isoformat(),
+                        "verdict": "no_signal",
+                    },
+                    outcome="FLAT",
+                    rationale=f"no signal; regime={regime_label}",
+                )
+                log.info("%s @ %s [%s]: FLAT", symbol, latest_bar.close, strat_name)
+                continue
 
-        for prop in proposals:
-            await write_decision(
-                conn, symbol=symbol, strategy="mean_rev_bb",
-                debate={
-                    "regime": regime_label,
-                    "close": float(latest_bar.close),
-                    "ts": latest_bar.timestamp_utc.isoformat(),
-                    "side": str(prop.side),
-                    "qty": str(prop.qty),
-                    "rationale": prop.rationale,
-                    "conviction": getattr(strat, "last_conviction", 0.0),
-                },
-                outcome=str(prop.side),
-                rationale=prop.rationale,
-            )
-            log.info(
-                "%s @ %s: %s qty=%s (conviction=%.2f)",
-                symbol, latest_bar.close, prop.side, prop.qty,
-                getattr(strat, "last_conviction", 0.0),
-            )
+            for prop in proposals:
+                await write_decision(
+                    conn, symbol=symbol, strategy=strat_name,
+                    debate={
+                        "regime": regime_label,
+                        "close": float(latest_bar.close),
+                        "ts": latest_bar.timestamp_utc.isoformat(),
+                        "side": str(prop.side),
+                        "qty": str(prop.qty),
+                        "rationale": prop.rationale,
+                        "conviction": getattr(strat, "last_conviction", 0.0),
+                    },
+                    outcome=str(prop.side),
+                    rationale=prop.rationale,
+                )
+                log.info(
+                    "%s @ %s [%s]: %s qty=%s (conviction=%.2f)",
+                    symbol, latest_bar.close, strat_name, prop.side, prop.qty,
+                    getattr(strat, "last_conviction", 0.0),
+                )
 
-        if cfg.mode == "live":
-            log.warning("LIVE MODE requested but order placement is not wired in this "
-                        "runner yet (Phase 3 of the cutover plan). Treating as SHADOW.")
+    if cfg.mode == "live":
+        log.warning("LIVE MODE requested but order placement is not wired in this "
+                    "runner yet (Phase 3 of the cutover plan). Treating as SHADOW.")
 
 
 async def main() -> None:
