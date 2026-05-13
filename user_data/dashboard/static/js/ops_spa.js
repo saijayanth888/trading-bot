@@ -2470,12 +2470,24 @@
       const px = (p.current == null) ? null : Number(p.current);
       const g = gateBySym[String(sym).toUpperCase()];
       const nBlocking = g ? (g.n_blocking || 0) : 0;
-      const blocked = nBlocking > 0;
+      const firstBlocker = g && g.first_blocker ? String(g.first_blocker) : "";
       const regime = g && g.regime ? String(g.regime) : "—";
       const hasPos = openLabels.has(String(sym).toUpperCase());
-      const chip = blocked
-        ? ("blocked · " + (g && g.first_blocker ? String(g.first_blocker) : "gates"))
-        : (hasPos ? "position open" : ("regime · " + regime));
+      // 2026-05-13 fix: when the operator already holds a position, the
+      // ENTRY gates (no_existing_csp, no_assignment, etc) correctly say
+      // "blocked" — but the more useful info for the operator is
+      // "position open". Only show "blocked" when there's NO position
+      // AND a real entry-blocker is firing. Position-aware blockers
+      // (no_existing_csp / no_assignment) are downgraded to informational
+      // even with no position elsewhere.
+      const positionAwareBlockers = new Set(["no_existing_csp", "no_assignment"]);
+      const isPositionAwareBlock = nBlocking > 0 && positionAwareBlockers.has(firstBlocker);
+      const blocked = nBlocking > 0 && !hasPos && !isPositionAwareBlock;
+      const chip = hasPos
+        ? "position open"
+        : (blocked
+           ? ("blocked · " + (firstBlocker || "gates"))
+           : ("regime · " + regime));
       return { sym, p, closes, pct, px, blocked, regime, hasPos, chip, err: p.error };
     });
 
