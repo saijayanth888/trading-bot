@@ -2169,13 +2169,19 @@
       const px = Number(p.current || 0);
       const g = gateByPair[sym];
       const nBlocking = g ? (g.n_blocking || 0) : 0;
-      const blocked = nBlocking > 0;
+      // "blocked" was triggering strike-through styling on EVERY pair in
+      // any non-bull regime — operator perceived the whole strip as broken.
+      // Distinguish hard blocks (account/risk/breaker/kill) from soft regime
+      // blocks (the strategy correctly waiting for the market to flip).
+      const firstBlocker = g && g.first_blocker ? String(g.first_blocker) : "";
+      const isRegimeBlock = nBlocking > 0 && (firstBlocker === "regime" || firstBlocker === "");
+      const hardBlocked = nBlocking > 0 && !isRegimeBlock;
       const regime = g && g.regime ? String(g.regime) : "—";
       const hasPos = openLabels.has(String(sym).toUpperCase());
-      const chip = blocked
-        ? ("blocked · " + (g && g.first_blocker ? String(g.first_blocker) : "gates"))
+      const chip = hardBlocked
+        ? ("blocked · " + firstBlocker)
         : (hasPos ? "position open" : ("regime · " + regime));
-      return { sym, p, closes, pct, px, g, blocked, regime, hasPos, chip };
+      return { sym, p, closes, pct, px, g, blocked: hardBlocked, regime, hasPos, chip };
     });
 
     const sorted = rows.slice().sort((a, b) => {
