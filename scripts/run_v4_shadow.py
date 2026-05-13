@@ -557,10 +557,79 @@ async def fill_pending_proposals(
                 """,
                 (coid,),
             )
+            # Mirror the fill into public.trade_journal so the dashboard's
+            # legacy endpoints (/api/ops/readiness, /rebalance, /slack_preview,
+            # /explainability, /trades_risk live-tape, /api/state.recent_trades)
+            # see V4 paper activity without code changes.
+            try:
+                await _write_trade_journal_row(
+                    cur, coid=coid, symbol=symbol, side=side,
+                    qty=qty, price=price,
+                )
+            except Exception as exc:
+                log.warning("trade_journal write failed for %s/%s: %s",
+                            symbol, side, exc)
             filled += 1
     if filled:
         await conn.commit()
     return filled
+
+
+async def _write_trade_journal_row(
+    cur: psycopg.AsyncCursor,
+    *,
+    coid: str,
+    symbol: str,
+    side: str,
+    qty: Any,
+    price: Any,
+) -> None:
+    """Translate a V4 paper fill into a public.trade_journal entry.
+
+    BUY  → INSERT a new open row (closed_at=NULL).
+    SELL → UPDATE the most-recent matching open row with closed_at,
+           exit_price, derived pnl + pnl_pct + duration_min.
+
+    Schema lives in user_data/modules/trade_journal.py — we hit only the
+    columns the dashboard reads. The `external_id` mirrors the V4
+    client_order_id so V4-ledger ↔ trade_journal can be cross-referenced.
+    """
+    qty_f = float(qty)
+    price_f = float(price)
+    stake = qty_f * price_f
+
+    if side == "BUY":
+        await cur.execute(
+            """
+            INSERT INTO public.trade_journal
+                (external_id, pair, direction, opened_at, entry_price, stake,
+                 confidence, regime, reasoning)
+            VALUES (%s, %s, 'long', NOW(), %s, %s, NULL, NULL,
+                    'V4 paper fill from quanta-core (' || %s || ')')
+            """,
+            (coid, symbol, price_f, stake, coid),
+        )
+    elif side == "SELL":
+        # Close the most-recent open long row on this pair.
+        await cur.execute(
+            """
+            UPDATE public.trade_journal
+               SET closed_at    = NOW(),
+                   exit_price   = %s,
+                   pnl          = (%s - entry_price) * (stake / NULLIF(entry_price, 0)),
+                   pnl_pct      = ((%s - entry_price) / NULLIF(entry_price, 0)) * 100.0,
+                   duration_min = EXTRACT(EPOCH FROM (NOW() - opened_at)) / 60.0,
+                   exit_reason  = 'V4 SELL signal (' || %s || ')'
+             WHERE trade_id = (
+                SELECT trade_id
+                  FROM public.trade_journal
+                 WHERE pair = %s AND direction = 'long' AND closed_at IS NULL
+                 ORDER BY opened_at DESC
+                 LIMIT 1
+             )
+            """,
+            (price_f, price_f, price_f, coid, symbol),
+        )
 
 
 async def fetch_positions(conn: psycopg.AsyncConnection) -> dict[str, dict[str, Any]]:
