@@ -296,6 +296,49 @@ def _try_sell_csp(
         return
 
     order = broker.sell_to_open(best.symbol, qty=1, limit_price=limit_price)
+
+    # 2026-05-13 fix: poll for fill before committing the position to
+    # positions.json. The pre-fix path called add_position() unconditionally
+    # right after submit — when limit orders sat unfilled at Alpaca for hours
+    # (the limit price never reached), positions.json showed phantom CSPs +
+    # phantom entry_credit, and the next sell_csps cycle's no_existing_csp
+    # gate refused to re-try those tickers. Now: wait up to 30s for the order
+    # to fill (or partial-fill); only record the position when Alpaca confirms.
+    # If the order is still 'new' at the 30s mark, leave it open at Alpaca
+    # (the operator can see it in the orders UI) but skip positions.json —
+    # the next snapshot reconciler will pick it up if/when it fills.
+    filled = False
+    fill_price = None
+    try:
+        from alpaca.trading.requests import GetOrdersRequest as _GO  # type: ignore
+        import time as _time
+        order_id = getattr(order, "id", None) or getattr(order, "order_id", None)
+        deadline = _time.time() + 30
+        while _time.time() < deadline:
+            try:
+                o = broker.trading.get_order_by_id(order_id) if order_id else None
+                status_v = o.status.value if (o and hasattr(o.status, "value")) else (str(o.status) if o else "")
+                if str(status_v).lower() in ("filled", "partially_filled"):
+                    filled = True
+                    fill_price = float(o.filled_avg_price) if getattr(o, "filled_avg_price", None) else limit_price
+                    break
+                if str(status_v).lower() in ("canceled", "cancelled", "rejected", "expired"):
+                    break
+            except Exception as exc:
+                logger.debug("fill poll for %s: %s", best.symbol, exc)
+            _time.sleep(2)
+    except Exception as exc:
+        logger.warning("fill polling unavailable: %s", exc)
+        filled = True  # fallback to legacy behaviour if poll path breaks
+        fill_price = limit_price
+
+    if not filled:
+        summary["skipped"].append(
+            f"{sym}: order submitted but not filled within 30s "
+            f"({best.symbol} limit ${limit_price:.2f}); will reconcile on next snapshot"
+        )
+        return
+
     add_position(Position(
         underlying=sym,
         contract_symbol=best.symbol,
@@ -303,7 +346,7 @@ def _try_sell_csp(
         qty=1,
         strike=best.strike,
         expiry=best.expiry.isoformat() if best.expiry else None,
-        entry_credit=limit_price * 100,  # USD
+        entry_credit=(fill_price or limit_price) * 100,  # USD (actual fill if known)
         opened_at=now_iso(),
     ))
     # Claim ownership (Shark/Wheel isolation, Fix 3). Both the OCC ticker
