@@ -178,18 +178,112 @@ def _crypto_starting_equity() -> float:
     return float(wallet)
 
 
+def _v4_is_active() -> bool:
+    """V4 (quanta_core) is the active engine when LIVE_ENGINE_MODE is set."""
+    return (os.environ.get("LIVE_ENGINE_MODE") or "").lower() in ("live", "shadow")
+
+
+def _v4_realised_pnl_usd() -> float:
+    """Sum closed-trade PnL from public.trade_journal for V4 paper fills.
+
+    V4 rows are tagged by UUID-shaped external_id (the client_order_id).
+    Only closed rows (closed_at IS NOT NULL) carry a populated pnl.
+    """
+    try:
+        import psycopg
+    except ImportError:
+        return 0.0
+    dsn = (
+        f"host={os.environ.get('POSTGRES_HOST', 'postgres')} "
+        f"port={os.environ.get('POSTGRES_PORT', '5432')} "
+        f"user={os.environ.get('POSTGRES_USER', 'tradebot')} "
+        f"password={os.environ.get('POSTGRES_PASSWORD', '')} "
+        f"dbname={os.environ.get('POSTGRES_DB', 'tradebot')}"
+    )
+    try:
+        with psycopg.connect(dsn, connect_timeout=2) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COALESCE(SUM(pnl), 0)
+                    FROM public.trade_journal
+                    WHERE external_id LIKE '%-%-%-%-%'
+                      AND closed_at IS NOT NULL
+                    """
+                )
+                row = cur.fetchone()
+        return float((row or [0])[0] or 0)
+    except Exception as exc:
+        logger.debug("unified_risk: v4 realised pnl probe failed: %s", exc)
+        return 0.0
+
+
+def _v4_unrealised_pnl_usd() -> float:
+    """Mark V4 open paper positions to current Coinbase REST mid.
+
+    For each pair with net BUY qty > 0 in quanta_schema.fills:
+      unrealised = qty * (current_close - avg_buy_px)
+    """
+    try:
+        import psycopg
+        import urllib.request, json as _json
+    except ImportError:
+        return 0.0
+    dsn = (
+        f"host={os.environ.get('POSTGRES_HOST', 'postgres')} "
+        f"port={os.environ.get('POSTGRES_PORT', '5432')} "
+        f"user={os.environ.get('POSTGRES_USER', 'tradebot')} "
+        f"password={os.environ.get('POSTGRES_PASSWORD', '')} "
+        f"dbname={os.environ.get('POSTGRES_DB', 'tradebot')}"
+    )
+    try:
+        with psycopg.connect(dsn, connect_timeout=2) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT p.symbol,
+                           SUM(CASE WHEN f.side='BUY'  THEN f.qty ELSE 0 END) -
+                           SUM(CASE WHEN f.side='SELL' THEN f.qty ELSE 0 END)            AS net_qty,
+                           SUM(CASE WHEN f.side='BUY' THEN f.qty * f.price ELSE 0 END) /
+                           NULLIF(SUM(CASE WHEN f.side='BUY' THEN f.qty ELSE 0 END), 0)  AS avg_buy_px
+                    FROM quanta_schema.fills f
+                    JOIN quanta_schema.proposals p USING (client_order_id)
+                    GROUP BY p.symbol
+                    HAVING SUM(CASE WHEN f.side='BUY' THEN f.qty ELSE 0 END) -
+                           SUM(CASE WHEN f.side='SELL' THEN f.qty ELSE 0 END) > 0
+                    """
+                )
+                rows = cur.fetchall()
+        if not rows:
+            return 0.0
+        total = 0.0
+        for sym, net_qty, avg_buy in rows:
+            try:
+                product = str(sym).replace("/", "-")
+                url = f"https://api.exchange.coinbase.com/products/{product}/ticker"
+                with urllib.request.urlopen(url, timeout=2) as r:
+                    ticker = _json.loads(r.read())
+                px = float(ticker.get("price") or 0)
+                if px > 0:
+                    total += float(net_qty) * (px - float(avg_buy or 0))
+            except Exception as exc:
+                logger.debug("unified_risk: ticker fetch %s failed: %s", sym, exc)
+                continue
+        return total
+    except Exception as exc:
+        logger.debug("unified_risk: v4 unrealised pnl probe failed: %s", exc)
+        return 0.0
+
+
 def _crypto_realised_pnl_usd() -> float:
     """Sum of closed-trade PnL in USD.
 
-    Source of truth: freqtrade's own `/api/v1/profit` endpoint — the same
-    endpoint the freqtrade UI uses. We previously read from our local
-    `trade_journal` Postgres table, but the strategy's close-side hook
-    that's supposed to write `closed_at`+`pnl` to that row isn't firing
-    (open rows accumulate, close updates never happen). Until that hook
-    is fixed (see README §14 — tomorrow's bug list), the freqtrade API
-    is the only correct source. This is symmetric with how
-    `_crypto_unrealised_pnl_usd()` already reads from `/api/v1/status`.
+    Source of truth depends on engine:
+      • V4 active  → public.trade_journal (rows tagged by UUID external_id)
+      • freqtrade  → /api/v1/profit (legacy, kept for rollback)
     """
+    if _v4_is_active():
+        return _v4_realised_pnl_usd()
     try:
         import httpx
     except ImportError:
@@ -209,7 +303,13 @@ def _crypto_realised_pnl_usd() -> float:
 
 
 def _crypto_unrealised_pnl_usd() -> float:
-    """Sum profit_abs across open freqtrade trades (synchronous probe)."""
+    """Sum mark-to-market PnL across open paper positions.
+
+    V4 active  → quanta_schema.fills + Coinbase ticker for current price.
+    freqtrade  → /api/v1/status profit_abs (legacy, kept for rollback).
+    """
+    if _v4_is_active():
+        return _v4_unrealised_pnl_usd()
     try:
         import httpx  # type: ignore
     except ImportError:
@@ -229,6 +329,42 @@ def _crypto_unrealised_pnl_usd() -> float:
 
 
 def _crypto_open_count() -> int:
+    """Count of open crypto paper positions.
+
+    V4 active  → quanta_schema.fills aggregation (net BUY > 0).
+    freqtrade  → /api/v1/status length (legacy).
+    """
+    if _v4_is_active():
+        try:
+            import psycopg
+        except ImportError:
+            return 0
+        dsn = (
+            f"host={os.environ.get('POSTGRES_HOST', 'postgres')} "
+            f"port={os.environ.get('POSTGRES_PORT', '5432')} "
+            f"user={os.environ.get('POSTGRES_USER', 'tradebot')} "
+            f"password={os.environ.get('POSTGRES_PASSWORD', '')} "
+            f"dbname={os.environ.get('POSTGRES_DB', 'tradebot')}"
+        )
+        try:
+            with psycopg.connect(dsn, connect_timeout=2) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT count(*) FROM (
+                            SELECT p.symbol
+                            FROM quanta_schema.fills f
+                            JOIN quanta_schema.proposals p USING (client_order_id)
+                            GROUP BY p.symbol
+                            HAVING SUM(CASE WHEN f.side='BUY' THEN f.qty ELSE 0 END) -
+                                   SUM(CASE WHEN f.side='SELL' THEN f.qty ELSE 0 END) > 0
+                        ) t
+                        """
+                    )
+                    row = cur.fetchone()
+            return int((row or [0])[0] or 0)
+        except Exception:
+            return 0
     try:
         import httpx
     except ImportError:
