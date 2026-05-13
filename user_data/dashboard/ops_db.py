@@ -155,12 +155,19 @@ def trades_risk_summary() -> dict[str, Any]:
         return out
 
     with _connect() as conn, conn.cursor() as cur:
-        # Daily P&L (closed trades today, UTC). Schema: pnl=USD, pnl_pct=%, closed_at=ts.
+        # Daily P&L (closed trades today, UTC). Schema: pnl=USD, pnl_pct=
+        # per-trade fractional return on the trade's own stake (NOT
+        # portfolio-wide). `daily_pnl_pct` is intentionally NOT computed
+        # here — see below — because SUM(pnl_pct) is meaningless: on a
+        # 50-fill paper-engine day each row contributes a few percent of
+        # its own stake, summed = 277% nonsense. The caller MUST compute
+        # day_pnl_pct = daily_pnl_usd / day_start_equity itself, since
+        # only the caller knows the right denominator (combined equity
+        # vs crypto-only vs stocks-only).
         cur.execute(
             """
             SELECT
                 COALESCE(SUM(pnl), 0)        AS pnl_usd,
-                COALESCE(SUM(pnl_pct), 0)    AS pnl_pct,
                 COUNT(*)                     AS n
             FROM trade_journal
             WHERE closed_at IS NOT NULL
@@ -169,7 +176,7 @@ def trades_risk_summary() -> dict[str, Any]:
         )
         row = cur.fetchone() or {}
         out["daily_pnl_usd"] = float(row.get("pnl_usd") or 0)
-        out["daily_pnl_pct"] = float(row.get("pnl_pct") or 0)
+        out["daily_pnl_pct"] = None  # caller computes from USD + equity
         out["closed_today"] = int(row.get("n") or 0)
 
         # Live tape — last 5 closed trades, newest first

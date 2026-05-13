@@ -28,7 +28,8 @@ from wheel import runner
 from wheel.broker import from_env
 from wheel.config import load_config
 from wheel.state import (
-    cumulative_pnl, kill_ticker, load_positions,
+    Position, add_position, cumulative_pnl, kill_ticker,
+    load_positions, now_iso, remove_position,
 )
 
 _STATE_DIR = Path(__file__).resolve().parent / "state"
@@ -152,15 +153,139 @@ def cmd_candles(args: argparse.Namespace) -> int:
     return 0
 
 
+def _reconcile_positions_with_broker(broker) -> dict:
+    """Sync positions.json with Alpaca's actual open option positions.
+
+    Why: sell_csps polls the order for 30s after submitting; if Alpaca
+    fills the order LATER than that (slow exchange acks, illiquid strikes)
+    runner.py:_try_sell_csp() bails without calling add_position(). The
+    contract is then live at broker but invisible to the local reconciler,
+    profit_take, and the dashboard's open_wheel count. This was first hit
+    on 2026-05-13 when SOFI + PLTR CSPs filled at ~15:00:25 UTC but the
+    30s poll started at 15:00:20 — they slipped through.
+
+    This function pulls every open option position from Alpaca, matches by
+    contract_symbol against load_positions(), and:
+
+      * ADDS broker positions that aren't locally known (estimating
+        entry_credit from -cost_basis, since short option positions in
+        Alpaca have negative cost_basis = credit received)
+      * REMOVES local positions that are no longer at the broker
+        (closed, exercised, expired) — the trade ledger keeps the
+        historical record so positions.json can shed them safely
+
+    Idempotent. Returns a summary dict for logging.
+    """
+    summary = {"added": [], "removed": [], "matched": 0, "errors": []}
+
+    try:
+        broker_positions = list(broker.trading.get_all_positions() or [])
+    except Exception as exc:
+        summary["errors"].append(f"broker.get_all_positions failed: {exc}")
+        return summary
+
+    # Filter to option positions only — Alpaca tags these with asset_class
+    # "us_option". OCC contract symbols look like NVDA260522P00220000.
+    broker_options = []
+    for bp in broker_positions:
+        ac = getattr(bp, "asset_class", "")
+        ac_str = ac.value if hasattr(ac, "value") else str(ac)
+        if ac_str.lower() in ("us_option", "option"):
+            broker_options.append(bp)
+
+    local = {p.contract_symbol: p for p in load_positions() if p.contract_symbol}
+    broker_syms = set()
+
+    # ── Stage 1: ADD broker positions missing locally ───────────────────
+    for bp in broker_options:
+        sym = str(getattr(bp, "symbol", "") or "")
+        if not sym:
+            continue
+        broker_syms.add(sym)
+        if sym in local:
+            summary["matched"] += 1
+            continue
+        # New to us. Build a Position from the broker payload.
+        try:
+            qty_raw = float(getattr(bp, "qty", 0) or 0)
+            cost_basis = float(getattr(bp, "cost_basis", 0) or 0)
+            # Short positions have negative qty AND negative cost_basis at Alpaca.
+            # entry_credit is the USD we received, i.e. abs(cost_basis).
+            is_short = qty_raw < 0
+            kind = (
+                "short_put" if (is_short and sym[-9] == "P") else
+                "short_call" if (is_short and sym[-9] == "C") else
+                "long_shares" if not is_short else
+                "short_put"  # fallback
+            )
+            # OCC: <ROOT><YYMMDD><P|C><STRIKE×1000 zero-padded to 8>
+            # Last 15 chars: YYMMDD + P/C + 8-digit strike
+            try:
+                expiry_yymmdd = sym[-15:-9]
+                expiry = f"20{expiry_yymmdd[:2]}-{expiry_yymmdd[2:4]}-{expiry_yymmdd[4:6]}"
+                strike = float(sym[-8:]) / 1000.0
+            except Exception:
+                expiry, strike = None, 0.0
+            # Underlying root is the prefix; trim by stripping the 15-char tail.
+            underlying = sym[:-15] if len(sym) > 15 else sym
+            add_position(Position(
+                underlying=underlying,
+                contract_symbol=sym,
+                kind=kind,
+                qty=abs(int(qty_raw)) or 1,
+                strike=strike,
+                expiry=expiry,
+                entry_credit=abs(cost_basis),
+                opened_at=now_iso(),
+                source="reconciler",
+            ))
+            summary["added"].append({
+                "symbol": sym, "underlying": underlying,
+                "kind": kind, "strike": strike, "expiry": expiry,
+                "entry_credit": round(abs(cost_basis), 2),
+            })
+        except Exception as exc:
+            summary["errors"].append(f"add {sym}: {exc}")
+
+    # ── Stage 2: REMOVE local positions that broker no longer carries ───
+    # We keep `status='assigned'` rows even when the option is gone — those
+    # represent the underlying shares from a CSP that exercised, the wheel
+    # cycle isn't done with them yet. Only drop status='' or 'closed'.
+    for sym, lp in local.items():
+        if sym in broker_syms:
+            continue
+        if (lp.status or "").lower() in ("assigned",):
+            continue
+        # Ghost — option not at broker, not assigned locally. Drop it.
+        try:
+            remove_position(sym)
+            summary["removed"].append({
+                "symbol": sym, "underlying": lp.underlying,
+                "kind": lp.kind, "status": lp.status or "",
+            })
+        except Exception as exc:
+            summary["errors"].append(f"remove {sym}: {exc}")
+
+    return summary
+
+
 def cmd_snapshot(args: argparse.Namespace) -> int:
     """Write account_snapshot.json for the trading-bot dashboard to read.
 
     Hits Alpaca once for cash/BP/portfolio_value, then writes an atomic JSON
     file. The dashboard reads this file (no Alpaca call) and uses the `ts`
     field to display "Xm ago" so a stale snapshot is visually obvious.
+
+    Also reconciles stocks/wheel/state/positions.json against Alpaca's
+    actual open option positions on every snapshot (every 1 minute during
+    market hours). This catches the case where sell_csps's 30s fill-poll
+    times out but the order fills shortly after — the next snapshot picks
+    up the broker truth and patches positions.json so profit_take +
+    dashboard see the position.
     """
     broker = from_env()
     acct = broker.get_account()
+    reconcile_summary = _reconcile_positions_with_broker(broker)
     pnl = cumulative_pnl()
     payload = {
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -170,6 +295,7 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
         "paper": acct.paper,
         "wheel_cumulative_pnl": round(pnl, 2),
         "wheel_open_positions": len(load_positions()),
+        "reconcile": reconcile_summary,
     }
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
     tmp = _ACCOUNT_SNAPSHOT_FILE.with_suffix(".tmp")
@@ -177,6 +303,18 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
     tmp.replace(_ACCOUNT_SNAPSHOT_FILE)
     print(json.dumps(payload, indent=2))
     return 0
+
+
+def cmd_reconcile(args: argparse.Namespace) -> int:
+    """Manually trigger broker→local positions reconciliation.
+
+    Exits with the count of changes (added + removed) so a cron alerter
+    can detect when drift actually happens.
+    """
+    broker = from_env()
+    summary = _reconcile_positions_with_broker(broker)
+    print(json.dumps(summary, indent=2, default=str))
+    return 0  # always 0 — drift is informational, not a failure
 
 
 def cmd_cancel_stale(args: argparse.Namespace) -> int:
@@ -208,7 +346,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("profit-take", help="Buy-to-close at profit-take threshold")
     sub.add_parser("sell-covered-calls", help="Sell CCs on assigned shares")
     sub.add_parser("status", help="Show config, account, positions, P&L")
-    sub.add_parser("snapshot", help="Write account_snapshot.json for dashboard")
+    sub.add_parser("snapshot", help="Write account_snapshot.json for dashboard + reconcile positions")
+    sub.add_parser("reconcile", help="Sync positions.json with Alpaca's actual open positions")
 
     p_candles = sub.add_parser("candles", help="Write Alpaca bars JSON for the dashboard chart")
     p_candles.add_argument("symbol", help="ticker like SOFI, AAPL")
@@ -233,6 +372,7 @@ def main(argv: list[str] | None = None) -> int:
         "sell-covered-calls": cmd_sell_covered_calls,
         "status": cmd_status,
         "snapshot": cmd_snapshot,
+        "reconcile": cmd_reconcile,
         "candles": cmd_candles,
         "cancel-stale": cmd_cancel_stale,
         "kill-ticker": cmd_kill_ticker,

@@ -76,7 +76,40 @@ PERPLEXITY_MODEL = os.getenv("PERPLEXITY_MODEL", "sonar")
 PERPLEXITY_RECENCY = os.getenv("PERPLEXITY_RECENCY", "hour")  # hour|day|week|month
 PERPLEXITY_MAX_TOKENS = int(os.getenv("PERPLEXITY_MAX_TOKENS", "1500"))
 
-OLLAMA_BASE = os.getenv("OLLAMA_HOST", "http://host.docker.internal:11434").rstrip("/")
+def _resolve_ollama_base() -> str:
+    """Pick an Ollama endpoint that resolves in our actual runtime.
+
+    Honors (in order):
+
+      1. ``OLLAMA_HOST`` / ``OLLAMA_BASE_URL`` env vars — explicit override
+         wins, full stop. Both spellings exist in different parts of the
+         codebase + Hermes cron wrappers.
+      2. ``http://host.docker.internal:11434`` if the hostname resolves
+         (true inside Docker containers with ``--add-host=host.docker.internal:host-gateway``).
+      3. ``http://localhost:11434`` otherwise (true when running on the
+         bare host directly, e.g. from Hermes cron's bash wrapper).
+
+    Previous behaviour was to hard-default to ``host.docker.internal``,
+    which silently failed when sentiment_refresh.sh started running on
+    the host post-V4-cutover: every Hermes 3 call returned None,
+    _trust_the_majority yielded sentiment_score=0/confidence=0, and the
+    DB row's claude_score + llama_score stayed NULL even with 60 valid
+    headlines per cycle.
+    """
+    import socket as _socket
+    explicit = os.environ.get("OLLAMA_HOST") or os.environ.get("OLLAMA_BASE_URL")
+    if explicit:
+        return explicit.rstrip("/")
+    try:
+        _socket.gethostbyname("host.docker.internal")
+        return "http://host.docker.internal:11434"
+    except _socket.gaierror:
+        return "http://localhost:11434"
+
+
+OLLAMA_BASE = _resolve_ollama_base()
+# `logger` isn't defined yet at module-load time (declared at line ~126).
+# Surface the resolved endpoint via _poll_once instead — see below.
 # OLLAMA_MODEL is kept as a backwards-compatible alias for OLLAMA_MODEL_FAST.
 OLLAMA_MODEL_FAST = os.getenv("OLLAMA_MODEL_FAST",
                               os.getenv("OLLAMA_MODEL", "hermes3:8b"))
@@ -382,6 +415,15 @@ async def _analyze_ollama(
             timeout=aiohttp.ClientTimeout(total=timeout_total),
         )
     if resp is None:
+        # _request_with_backoff returns None on connection refused / DNS
+        # failures after retries. Without this WARN line, the caller sees
+        # None and assumes "model not pulled" and the operator sees
+        # sentiment_score=0 with no signal about WHY. Be loud here.
+        logger.warning(
+            "ollama[%s] no response after retries at %s — check OLLAMA_HOST env var "
+            "(host runs need localhost:11434, container runs need host.docker.internal:11434)",
+            target, OLLAMA_BASE,
+        )
         return None
     try:
         body = await resp.json(content_type=None)

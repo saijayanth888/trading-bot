@@ -3650,17 +3650,32 @@ async def combined_portfolio():
 
     # Enrich with day-P&L (closed trades today, UTC) so the hero card has a
     # real day number instead of "combined_peak − today" (which is drawdown).
-    # daily_pnl_usd / daily_pnl_pct come from trade_journal via ops_db; pct
-    # is fractional (e.g. -0.0123 = -1.23%).
+    # daily_pnl_usd comes from trade_journal via ops_db. We IGNORE the
+    # daily_pnl_pct that ops_db returns — that field used to be SUM(pnl_pct)
+    # across all closed rows in trade_journal, which inflates ~50× on days
+    # with many intra-cycle round-trips (V4 paper engine logs 50+ fills/day).
+    # Result: dashboard showed `day_pnl_pct=277.37%` for a real $14.55 loss
+    # because 48 fills × ~5.8% each = 277%.
+    #
+    # The correct denominator is the day's STARTING equity. We don't store
+    # a day_start_equity column, but algebraically:
+    #     day_start_equity = current_total_equity - daily_pnl_usd
+    # so the day pct is:
+    #     daily_pnl_pct = daily_pnl_usd / day_start_equity * 100
+    # which is robust to N-fill inflation.
     try:
         risk = await asyncio.wait_for(
             loop.run_in_executor(None, ops_db.trades_risk_summary),
             timeout=ENDPOINT_TIMEOUT_S,
         )
-        day_pnl_usd = risk.get("daily_pnl_usd")
-        day_pnl_pct_frac = risk.get("daily_pnl_pct")  # fractional
-        status["day_pnl_usd"] = float(day_pnl_usd) if day_pnl_usd is not None else 0.0
-        status["day_pnl_pct"] = float(day_pnl_pct_frac) * 100 if day_pnl_pct_frac is not None else 0.0
+        day_pnl_usd = float(risk.get("daily_pnl_usd") or 0)
+        status["day_pnl_usd"] = day_pnl_usd
+        total_equity = float(status.get("total_equity") or 0)
+        day_start_equity = total_equity - day_pnl_usd
+        if day_start_equity > 0:
+            status["day_pnl_pct"] = (day_pnl_usd / day_start_equity) * 100.0
+        else:
+            status["day_pnl_pct"] = 0.0
     except Exception as exc:  # noqa: BLE001
         logger.warning("combined_portfolio: day P&L enrichment failed: %s", exc)
         status.setdefault("day_pnl_usd", 0.0)

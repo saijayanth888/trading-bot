@@ -250,9 +250,56 @@ def _collect_candidate_data(
             logger.info("%s skipped — earnings in %d day(s)", symbol, earnings_days)
             return None
 
-        if not perplexity_intel.get("catalyst_specific", True):
-            logger.info("%s skipped — no specific catalyst", symbol)
-            return None
+        # Catalyst gate. Strict in live mode: only trade with a concrete
+        # dated catalyst (earnings beat, product launch, regulatory news).
+        # In paper-mode-with-BEAR-override the gate is softened — without
+        # this softening the override's "1 trade/day @ 0.5×" allowance was
+        # effectively unreachable, because Perplexity returns
+        # catalyst_specific=False on most days (general momentum, not a
+        # headline event). Two consecutive days (2026-05-12 NVDA,
+        # 2026-05-13 GOOGL) cleared pre-market scoring + pre-execute
+        # confirmation, then died on this gate, never reaching the
+        # bull/bear/arbiter LLM debate — defeating the whole point of
+        # paper-mode override.
+        #
+        # Softer paper-mode gate: accept the candidate when EVERY one of
+        # these holds (not OR — AND), which is still a real quality bar:
+        #   - catalyst is NOT priced in (no >3% move on this news yet)
+        #   - perplexity returned at least one headline (i.e. there is
+        #     SOMETHING moving, not just chart momentum on silence)
+        #   - sentiment_score from perplexity >= +0.30 (mildly bullish at
+        #     minimum — rejects neutral/negative coverage)
+        #   - analyst_rating is not "sell"
+        # The candidate carries `catalyst_specific=False` through the
+        # pipeline so the bull/bear LLM debate can see this is a softer
+        # signal and weight accordingly.
+        try:
+            from shark.config import get_settings as _get_settings
+            _cfg_local = _get_settings()
+            _paper_override = bool(_cfg_local.is_paper and _cfg_local.paper_bear_override)
+        except Exception:
+            _paper_override = False
+
+        has_specific_catalyst = bool(perplexity_intel.get("catalyst_specific", True))
+        if not has_specific_catalyst:
+            soft_ok = (
+                _paper_override
+                and not perplexity_intel.get("catalyst_priced_in", False)
+                and bool(perplexity_intel.get("headlines"))
+                and float(perplexity_intel.get("sentiment_score") or 0.0) >= 0.30
+                and str(perplexity_intel.get("analyst_rating") or "hold").lower() != "sell"
+            )
+            if not soft_ok:
+                logger.info("%s skipped — no specific catalyst", symbol)
+                return None
+            logger.info(
+                "%s — no specific catalyst, but paper-mode soft gate passed "
+                "(sentiment=%.2f, headlines=%d, rating=%s)",
+                symbol,
+                float(perplexity_intel.get("sentiment_score") or 0.0),
+                len(perplexity_intel.get("headlines") or []),
+                perplexity_intel.get("analyst_rating") or "hold",
+            )
 
         if perplexity_intel.get("catalyst_priced_in", False):
             logger.info("%s skipped — catalyst already priced in", symbol)
