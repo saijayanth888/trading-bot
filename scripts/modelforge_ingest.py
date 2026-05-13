@@ -88,6 +88,17 @@ AGENT_TO_ROLE: dict[str, str] = {
     "risk_manager":       "trading-arbiter",
     "regime_tagger":      "trading-regime-tagger",
     "indicator_selector": "trading-indicator-selector",
+    # 2026-05-13: also pick up Shark's actually-running risk-debate roles
+    # (these are the agents the operator's stack invokes via Hermes 3 on
+    # Ollama; the legacy `bull_analyst`/`bear_analyst` names map to V4's
+    # DebateOrchestrator which is currently dead-code, so without this
+    # extension the ingest finds 0 rows per role per day).
+    "risk_debate.aggressive":  "trading-bull",      # bullish view = aggressive risk
+    "risk_debate.conservative": "trading-bear",     # bearish view = conservative risk
+    "risk_debate.neutral":     "trading-arbiter",   # neutral = arbiter
+    "trade_reviewer":          "trading-reflector", # post-trade review
+    "debate_orchestrator":     "trading-arbiter",
+    "combined_analyst":        "trading-arbiter",
 }
 
 #: Roles whose Stage-2 curator should treat the call as a JSON/structured
@@ -552,24 +563,22 @@ def ingest(
     """
     stats = IngestStats(target_date=target_date)
 
-    # --- trading-reflector ---------------------------------------------------
+    # All six roles share one per_role bucket. trading-reflector is special —
+    # it draws from BOTH decisions.md (deliberation log) and the JSONL log
+    # (Shark's trade_reviewer post-mortems). Without merging, the JSONL
+    # branch would KeyError on trade_reviewer rows and swallow as errors=1.
+    per_role: dict[str, list[dict[str, Any]]] = {r: [] for r in ALL_ROLES}
+
+    # --- Source 1: decisions.md → trading-reflector --------------------------
     try:
-        examples = []
         for entry in iter_reflector_entries(decisions_md):
             ex = reflector_example(entry, target_date=target_date)
             if ex is not None:
-                examples.append(ex)
-        count, skipped = write_raw_jsonl(
-            "trading-reflector", target_date, examples, raw_root=raw_root,
-        )
-        stats.accepted["trading-reflector"] = count
-        if skipped:
-            stats.skipped_existing.append("trading-reflector")
+                per_role["trading-reflector"].append(ex)
     except Exception as exc:  # pragma: no cover - defensive
-        stats.errors.append(f"trading-reflector: {exc}")
+        stats.errors.append(f"trading-reflector decisions.md: {exc}")
 
-    # --- 5 LLM-tracker-backed roles -----------------------------------------
-    per_role: dict[str, list[dict[str, Any]]] = {r: [] for r in ALL_ROLES if r != "trading-reflector"}
+    # --- Source 2: llm-calls.jsonl → all six roles ---------------------------
     try:
         for record in iter_llm_calls(llm_calls_jsonl):
             if _record_date(record) != target_date:

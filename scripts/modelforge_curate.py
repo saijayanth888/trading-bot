@@ -154,7 +154,11 @@ def filter_reflector(example: dict[str, Any]) -> tuple[bool, str | None]:
       * ledger's ``exit_reason`` (if present) is in :data:`KNOWN_EXIT_REASONS`
         -- when absent we don't gate on it, the reflector log doesn't always
         carry it
-      * response length is in [80, 600] characters (the 2-4-sentence cap)
+      * response length is in [80, 1200] characters. The original cap of 600
+        targeted a "2-4 sentence" reflection, but real-world Shark
+        trade_reviewer outputs from hermes3:8b/70b run 600-1000 chars when
+        the trade has multiple lessons to call out -- 1200 captures those
+        without admitting model-rambling.
     """
     if example.get("pending_outcome", False):
         return False, Reject.PENDING
@@ -162,7 +166,7 @@ def filter_reflector(example: dict[str, Any]) -> tuple[bool, str | None]:
     response = example.get("response") or ""
     if not response.strip():
         return False, Reject.EMPTY_RESPONSE
-    if not (80 <= len(response) <= 600):
+    if not (80 <= len(response) <= 1200):
         return False, Reject.LENGTH_OUT_OF_BAND
 
     ledger = example.get("ledger") or {}
