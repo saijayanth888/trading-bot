@@ -372,6 +372,37 @@ services:
 
   # Grafana removed 2026-05-12 — unused; dashboard is the SSOT UI.
 
+  quanta-core:
+    # V4 shadow / live runner. Tonight: SHADOW only — writes decisions
+    # to quanta_schema.decisions without placing orders. Phase 3 of the
+    # cutover plan wires order placement when LIVE_ENGINE_MODE=live.
+    build:
+      context: .
+      dockerfile: Dockerfile.quanta_core
+    container_name: quanta-core
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    extra_hosts:
+      # Reach the dashboard container's regime endpoint from inside this
+      # one — same network bridge the dashboard uses for /tmp + ollama.
+      - "host.docker.internal:host-gateway"
+    environment:
+      - LIVE_ENGINE_MODE=${LIVE_ENGINE_MODE:-shadow}
+      - SHADOW_CYCLE_SEC=${SHADOW_CYCLE_SEC:-300}
+      # Per-component env (keyword DSN) — password may contain '@', which
+      # breaks the postgres:// URL parser. Runner composes a key=val DSN.
+      - POSTGRES_USER=${POSTGRES_USER:-tradebot}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
+      - POSTGRES_DB=${POSTGRES_DB:-tradebot}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      # Reach the dashboard on the compose network (same docker network);
+      # the host.docker.internal route from extra_hosts is unreliable.
+      - REGIME_FEED_URL=http://dashboard:8081/api/ops/regime
+      - COINBASE_REST_BASE=https://api.exchange.coinbase.com
+
 volumes:
   postgres_data:
   # Persists the HF model cache for vLLM — first pull is ~30 GB, we

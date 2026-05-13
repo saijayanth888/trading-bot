@@ -1,0 +1,34 @@
+# Quanta Core V4 — shadow / live runner.
+#
+# Phase 2 of the cutover (docs/V4_SHADOW_MODE_DESIGN.md + the EOD cutover
+# plan): run V4 strategies against live Coinbase data, write decisions to
+# quanta_schema. Order placement comes online in Phase 3 of the plan
+# (LIVE_ENGINE_MODE=live wires the V4 ExecutionEngine).
+
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+# Minimal stdlib + 3 third-party packages — no fancy deps.
+RUN pip install \
+        "aiohttp>=3.9,<4" \
+        "psycopg[binary]>=3.1,<4" \
+        "pydantic>=2.6,<3" \
+        "anyio>=4,<5"
+
+# Copy the V4 core package + the strategy. `src` is the import root.
+COPY src /app/src
+COPY scripts/run_v4_shadow.py /app/run_v4_shadow.py
+COPY user_data/universe.json /app/universe.json
+
+ENV PYTHONPATH=/app/src
+
+# Defaults — every variable can be overridden via docker-compose env block.
+ENV LIVE_ENGINE_MODE=shadow
+ENV SHADOW_CYCLE_SEC=300
+
+CMD ["python", "-u", "/app/run_v4_shadow.py"]
