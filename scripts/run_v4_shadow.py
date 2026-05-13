@@ -130,28 +130,46 @@ class Cfg:
 
 
 class _InProcessContext:
-    """Minimum Context that satisfies MeanRevBB's protocol.
+    """Minimum Context that satisfies MeanRevBB / TrendFollow's protocol.
 
-    The strategy only calls `get_history` and `get_position`. We seed
-    `get_history` from a rolling deque kept by the runner; `get_position`
-    always returns None in shadow mode (no positions = strategy stays in
-    entry-evaluation mode).
+    The strategy calls `get_history` and `get_position`. We seed
+    `get_history` from a rolling deque the runner fills each cycle.
+
+    Position behavior:
+      - SHADOW mode: get_position always returns None (no inventory).
+      - LIVE mode: get_position returns the paper-position from the fills
+        ledger (seeded by `set_positions` once per cycle). The strategy
+        sees its inventory and will emit SELL exits when appropriate.
     """
 
     def __init__(self) -> None:
         self._history: dict[str, list[Any]] = {}
+        self._positions: dict[str, Any] = {}
 
     def now(self) -> datetime:
         return datetime.now(timezone.utc)
 
-    def get_position(self, symbol: str) -> None:  # type: ignore[override]
-        return None  # always flat in shadow mode
+    def get_position(self, symbol: str) -> Any | None:  # type: ignore[override]
+        pos = self._positions.get(str(symbol))
+        if pos is None:
+            return None
+        # Lightweight duck-typed Position — strategies only read .side / .qty.
+        class _P:
+            pass
+        p = _P()
+        p.side = pos["side"]
+        p.qty = pos["qty"]
+        p.avg_price = pos.get("avg_px")
+        return p
 
     def get_history(self, symbol: str, timeframe: str, window: int) -> list[Any]:  # type: ignore[override]
         return self._history.get(str(symbol), [])[-window:]
 
     def set_history(self, symbol: str, bars: list[Any]) -> None:
         self._history[symbol] = bars
+
+    def set_positions(self, positions: dict[str, dict[str, Any]]) -> None:
+        self._positions = positions or {}
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +253,142 @@ async def write_decision(
 
 
 # ---------------------------------------------------------------------------
+# Order placement — LIVE mode only (paper-fill simulator)
+# ---------------------------------------------------------------------------
+#
+# When LIVE_ENGINE_MODE=live, the runner translates strategy proposals into:
+#   1. A row in quanta_schema.proposals (the canonical ledger record).
+#   2. A row in quanta_schema.orders with status='PROPOSED'.
+#   3. On the NEXT cycle (~5 min later), if the proposal is still PROPOSED,
+#      we write a Fill row at the current bar's close price (paper fill),
+#      flip the order to FILLED, and the strategy sees the new position
+#      via get_position() on subsequent cycles.
+#
+# Coinbase Spot has no shorting; SELL proposals only fire when the strategy
+# has an open LONG position. The simulator handles the inventory math.
+
+
+async def write_proposal_and_order(
+    conn: psycopg.AsyncConnection,
+    *,
+    client_order_id: str,
+    venue: str,
+    symbol: str,
+    side: str,
+    qty: Any,
+    limit_price: Any | None,
+    strategy: str,
+    intent: dict[str, Any],
+) -> None:
+    """Write a proposal + order row (PROPOSED). Idempotent on client_order_id."""
+    async with conn.cursor() as cur:
+        await cur.execute(
+            """
+            INSERT INTO quanta_schema.proposals
+                (client_order_id, venue, symbol, side, qty, limit_price, strategy, intent)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (client_order_id) DO NOTHING
+            """,
+            (client_order_id, venue, symbol, side, str(qty),
+             str(limit_price) if limit_price is not None else None,
+             strategy, json.dumps(intent)),
+        )
+        await cur.execute(
+            """
+            INSERT INTO quanta_schema.orders
+                (client_order_id, status, last_update)
+            VALUES (%s, 'PROPOSED', NOW())
+            ON CONFLICT (client_order_id) DO NOTHING
+            """,
+            (client_order_id,),
+        )
+    await conn.commit()
+
+
+async def fill_pending_proposals(
+    conn: psycopg.AsyncConnection,
+    *,
+    close_by_symbol: dict[str, float],
+) -> int:
+    """Paper-fill any PROPOSED orders at the latest close price for their symbol.
+
+    Returns the count of newly-filled orders. Symbols missing from
+    close_by_symbol are skipped (will be retried next cycle).
+    """
+    filled = 0
+    async with conn.cursor() as cur:
+        await cur.execute(
+            """
+            SELECT p.client_order_id, p.symbol, p.side, p.qty
+            FROM quanta_schema.proposals p
+            JOIN quanta_schema.orders o ON o.client_order_id = p.client_order_id
+            WHERE o.status = 'PROPOSED'
+            """
+        )
+        rows = await cur.fetchall()
+
+        for coid, symbol, side, qty in rows:
+            price = close_by_symbol.get(symbol)
+            if price is None:
+                continue
+            # write the fill at the simulated price
+            await cur.execute(
+                """
+                INSERT INTO quanta_schema.fills
+                    (client_order_id, venue_fill_id, qty, price, fee, fee_currency, side, ts)
+                VALUES (%s, %s, %s, %s, 0, 'USD', %s, NOW())
+                """,
+                (coid, f"paper-{coid[:8]}", str(qty), str(price), side),
+            )
+            await cur.execute(
+                """
+                UPDATE quanta_schema.orders
+                   SET status = 'FILLED', last_update = NOW()
+                 WHERE client_order_id = %s
+                """,
+                (coid,),
+            )
+            filled += 1
+    if filled:
+        await conn.commit()
+    return filled
+
+
+async def fetch_positions(conn: psycopg.AsyncConnection) -> dict[str, dict[str, Any]]:
+    """Aggregate net positions per symbol from the fills ledger.
+
+    Returns {symbol: {"side": "BUY"|"SELL", "qty": Decimal, "avg_px": float}}.
+    Used to seed the in-process Context so strategies see their open inventory.
+    Pure paper accounting; no exchange round-trip.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    async with conn.cursor() as cur:
+        await cur.execute(
+            """
+            SELECT
+                p.symbol,
+                SUM(CASE WHEN f.side = 'BUY'  THEN f.qty ELSE 0 END) -
+                SUM(CASE WHEN f.side = 'SELL' THEN f.qty ELSE 0 END)            AS net_qty,
+                SUM(CASE WHEN f.side = 'BUY' THEN f.qty * f.price ELSE 0 END) /
+                NULLIF(SUM(CASE WHEN f.side = 'BUY' THEN f.qty ELSE 0 END), 0)  AS avg_buy_px
+            FROM quanta_schema.fills f
+            JOIN quanta_schema.proposals p USING (client_order_id)
+            GROUP BY p.symbol
+            HAVING SUM(CASE WHEN f.side='BUY' THEN f.qty ELSE 0 END) -
+                   SUM(CASE WHEN f.side='SELL' THEN f.qty ELSE 0 END) > 0
+            """
+        )
+        rows = await cur.fetchall()
+    for sym, net_qty, avg_px in rows:
+        out[sym] = {
+            "side": "BUY",
+            "qty": net_qty,
+            "avg_px": float(avg_px) if avg_px is not None else None,
+        }
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 
@@ -249,6 +403,18 @@ async def run_cycle(cfg: Cfg, session: aiohttp.ClientSession, conn: psycopg.Asyn
              regime_label, len(cfg.symbols), cfg.mode)
 
     ctx = _InProcessContext()
+    if cfg.mode == "live":
+        # 1) Fill any pending proposals from last cycle (paper simulator).
+        # 2) Seed positions from the fills ledger so strategies see inventory.
+        await fill_pending_then_collect_closes(cfg, session, conn)
+        try:
+            positions = await fetch_positions(conn)
+            ctx.set_positions(positions)
+            if positions:
+                log.info("loaded %d open positions: %s", len(positions),
+                         ", ".join(f"{s}={p['qty']}" for s, p in positions.items()))
+        except Exception as exc:
+            log.warning("position load failed: %s", exc)
 
     for symbol in cfg.symbols:
         try:
@@ -325,9 +491,62 @@ async def run_cycle(cfg: Cfg, session: aiohttp.ClientSession, conn: psycopg.Asyn
                     getattr(strat, "last_conviction", 0.0),
                 )
 
-    if cfg.mode == "live":
-        log.warning("LIVE MODE requested but order placement is not wired in this "
-                    "runner yet (Phase 3 of the cutover plan). Treating as SHADOW.")
+                if cfg.mode == "live":
+                    # Paper order: writes to proposals + orders (PROPOSED).
+                    # The NEXT cycle simulates the fill at that bar's close.
+                    try:
+                        await write_proposal_and_order(
+                            conn,
+                            client_order_id=str(prop.client_order_id),
+                            venue="coinbase-paper",
+                            symbol=symbol,
+                            side=str(prop.side),
+                            qty=prop.qty,
+                            limit_price=getattr(prop, "limit_px", None),
+                            strategy=strat_name,
+                            intent={
+                                "regime": regime_label,
+                                "close": float(latest_bar.close),
+                                "ts": latest_bar.timestamp_utc.isoformat(),
+                                "rationale": prop.rationale,
+                                "conviction": getattr(strat, "last_conviction", 0.0),
+                            },
+                        )
+                        log.info(
+                            "  → paper proposal queued (coid=%s)",
+                            str(prop.client_order_id)[:16],
+                        )
+                    except Exception as exc:
+                        log.exception("proposal write failed: %s", exc)
+
+
+async def fill_pending_then_collect_closes(
+    cfg: Cfg, session: aiohttp.ClientSession, conn: psycopg.AsyncConnection,
+) -> dict[str, float]:
+    """Fetch latest close for each symbol and paper-fill any pending orders.
+
+    Runs at the TOP of each LIVE-mode cycle so that proposals placed last
+    cycle get filled at this cycle's close before strategies see their
+    inventory. Returns the close prices dict for downstream use.
+    """
+    close_by_symbol: dict[str, float] = {}
+    for symbol in cfg.symbols:
+        try:
+            bars = await fetch_coinbase_candles(session, cfg.coinbase_base, symbol)
+            if bars:
+                close_by_symbol[symbol] = float(bars[-1].close)
+        except Exception as exc:
+            log.debug("close fetch %s failed: %s", symbol, exc)
+            continue
+
+    if cfg.mode == "live" and close_by_symbol:
+        try:
+            n_filled = await fill_pending_proposals(conn, close_by_symbol=close_by_symbol)
+            if n_filled:
+                log.info("paper-filled %d pending proposal(s)", n_filled)
+        except Exception as exc:
+            log.exception("fill simulator failed: %s", exc)
+    return close_by_symbol
 
 
 async def main() -> None:
