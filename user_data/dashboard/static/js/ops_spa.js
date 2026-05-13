@@ -6138,22 +6138,19 @@
           // Degrade-soft: still renders with local-only metrics when
           // model-forge is offline.
           h(WeeklyTrainingLive, { data }),
-          // TFT MODEL HEALTH — per-pair model.zip validation card. Surfaces
-          // the same quarantine state the strategy and freqai backend use
-          // at runtime: rows go red when a pair's model.zip is a stub or
-          // missing (trained_timestamp == 0 in pair_dictionary.json), amber
-          // when stale (> 72h since the last successful save). Powered by
-          // /api/ops/training_health on the existing 10s fast-poll tick.
-          h(TrainingHealthLive, { data }),
+          // 2026-05-13 post-V4-cutover: TrainingHealthLive (per-pair FreqAI
+          // model.zip validation) and TrainingCardLive ("Training · FreqAI /
+          // TFT retrain status") are dead surfaces. V4 has no FreqAI/TFT
+          // retrain loop; both cards rendered "12/12 HEALTHY" + "IDLE"
+          // perpetually, confusing the operator. Removed from layout (the
+          // component definitions remain in this file as dead code pending
+          // a separate cleanup pass).
           // HERO
           h(HeroLive, { data, killState }),
-          // TRAINING ROW — crypto FreqAI + stocks Shark TFT side-by-side.
-          // Operator wants both pipelines visible in one glance near the top
-          // of the page (not buried at row 17). Wired data-num 17 (crypto)
-          // and 13 (stocks) cards to a single training band.
+          // STOCKS-ONLY TRAINING ROW — crypto-side FreqAI training is dead
+          // post-cutover; only the stocks Shark TFT card remains useful.
           h("div", { id: "training", className: "grid g-12 anchor", style: { gap: "var(--gap-grid)" } },
-            h("div", { style: { gridColumn: "span 6" } }, h(TrainingCardLive, { data })),
-            h("div", { style: { gridColumn: "span 6" } }, h(StocksMLLive, { data }))
+            h("div", { style: { gridColumn: "span 12" } }, h(StocksMLLive, { data }))
           ),
           // LLM ACTIVITY — live feed of stocks/memory/llm-calls.jsonl with
           // drill-down modal. Mounted below the training row per spec so
