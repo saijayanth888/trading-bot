@@ -119,3 +119,12 @@ Sections: date, watchlist scanned, top candidates, rejected with reasons.
 |--------|--------|-------|
 | NVDA | RESEARCH_CANDIDATE | 6 |
 
+## 2026-05-13 — GOOGL
+**Sentiment:** 0.5
+**Thesis:** 
+**Entry:** 0.0 | **Stop:** 0.0 | **Target:** 0.0
+
+| Symbol | Status | Score |
+|--------|--------|-------|
+| GOOGL | RESEARCH_CANDIDATE | 9 |
+
