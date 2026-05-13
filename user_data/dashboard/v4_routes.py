@@ -160,6 +160,110 @@ def _read_decisions_from_db(limit: int = 12) -> list[dict[str, Any]]:
     return sessions
 
 
+def _connect_pg():
+    """Open a sync psycopg connection from POSTGRES_* env. Returns None on miss."""
+    try:
+        import psycopg
+    except Exception:
+        return None
+    pw = os.environ.get("POSTGRES_PASSWORD")
+    if not pw:
+        return None
+    dsn = (
+        f"host={os.environ.get('POSTGRES_HOST', 'postgres')} "
+        f"port={os.environ.get('POSTGRES_PORT', '5432')} "
+        f"user={os.environ.get('POSTGRES_USER', 'tradebot')} "
+        f"password={pw} "
+        f"dbname={os.environ.get('POSTGRES_DB', 'tradebot')}"
+    )
+    try:
+        return psycopg.connect(dsn, connect_timeout=2)
+    except Exception:
+        return None
+
+
+@router.get("/positions")
+async def v4_positions() -> dict[str, Any]:
+    """Net positions per symbol from the V4 paper ledger.
+
+    Aggregates fills: net_qty = SUM(BUY qty) - SUM(SELL qty), avg buy price
+    weighted by qty. Empty list when no fills exist (which is the
+    expected state until regime flips and V4 places its first BUYs).
+    """
+    conn = _connect_pg()
+    if conn is None:
+        return {"positions": [], "source": "no_db"}
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT p.symbol,
+                       SUM(CASE WHEN f.side = 'BUY'  THEN f.qty ELSE 0 END) -
+                       SUM(CASE WHEN f.side = 'SELL' THEN f.qty ELSE 0 END)            AS net_qty,
+                       SUM(CASE WHEN f.side = 'BUY' THEN f.qty * f.price ELSE 0 END) /
+                       NULLIF(SUM(CASE WHEN f.side = 'BUY' THEN f.qty ELSE 0 END), 0)  AS avg_buy_px,
+                       MAX(f.ts) AS last_fill_ts
+                FROM quanta_schema.fills f
+                JOIN quanta_schema.proposals p USING (client_order_id)
+                GROUP BY p.symbol
+                HAVING SUM(CASE WHEN f.side='BUY' THEN f.qty ELSE 0 END) -
+                       SUM(CASE WHEN f.side='SELL' THEN f.qty ELSE 0 END) > 0
+                ORDER BY 1
+                """
+            )
+            rows = cur.fetchall()
+    except Exception as exc:
+        return {"positions": [], "error": str(exc)[:200]}
+    positions = [
+        {
+            "symbol": sym,
+            "qty": float(qty),
+            "avg_buy_px": float(avg_px) if avg_px is not None else None,
+            "last_fill_ts": ts.isoformat() if ts else None,
+        }
+        for sym, qty, avg_px, ts in rows
+    ]
+    return {"positions": positions, "source": "quanta_schema.fills"}
+
+
+@router.get("/trades")
+async def v4_trades(limit: int = 30) -> dict[str, Any]:
+    """Recent paper fills joined with their proposals (V4 trade tape)."""
+    conn = _connect_pg()
+    if conn is None:
+        return {"trades": [], "source": "no_db"}
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT f.ts, p.symbol, p.strategy, f.side, f.qty, f.price,
+                       p.client_order_id, p.intent
+                FROM quanta_schema.fills f
+                JOIN quanta_schema.proposals p USING (client_order_id)
+                ORDER BY f.ts DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+    except Exception as exc:
+        return {"trades": [], "error": str(exc)[:200]}
+    trades = [
+        {
+            "ts": ts.isoformat() if ts else None,
+            "symbol": sym,
+            "strategy": strat,
+            "side": side,
+            "qty": float(qty),
+            "price": float(price),
+            "client_order_id": coid,
+            "rationale": (intent or {}).get("rationale"),
+        }
+        for ts, sym, strat, side, qty, price, coid, intent in rows
+    ]
+    return {"trades": trades, "source": "quanta_schema.fills"}
+
+
 @router.get("/debate/history")
 async def debate_history() -> dict[str, Any]:
     """Recent V4 decisions.
