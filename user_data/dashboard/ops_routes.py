@@ -2455,6 +2455,16 @@ async def gates():
         logger.warning("gates: account-level fetch failed: %s", exc)
 
     # Per-pair gate evaluation
+    # Pre-fetch the V4-era canonical regime once (single postgres roundtrip);
+    # we reuse it as the fallback when freqtrade's per-pair df is empty.
+    _v4_regime: str | None = None
+    try:
+        _v4_row = ops_db.regime_latest()
+        if _v4_row and _v4_row.get("regime"):
+            _v4_regime = _v4_row["regime"]
+    except Exception:
+        pass
+
     rows = []
     for pair in pairs:
         try:
@@ -2464,7 +2474,9 @@ async def gates():
             logger.warning("gates: pair_candles failed for %s: %s", pair, exc)
             state = {"_error": str(exc)}
 
-        regime = state.get("regime") or "unknown"
+        # Post-cutover: freqtrade df empty → state.regime is None → fall back
+        # to the V4 hourly regime write (single source of truth post-cutover).
+        regime = state.get("regime") or _v4_regime or "unknown"
         delta = REGIME_DELTA.get(regime, 0.0)
         threshold = (BASE_ENTRY + delta) if delta is not None else None
         up = state.get("tft_up")
@@ -2668,6 +2680,19 @@ async def gates():
     wheel_symbols = [
         s.strip().upper() for s in os.environ.get("WHEEL_SYMBOLS", "SOFI").split(",") if s.strip()
     ]
+    # Dashboard watchlist — non-wheel symbols get a passive gate row that
+    # surfaces the global stocks regime so the pair telemetry strip can
+    # show "regime · trending_up" instead of "regime · —" for every row.
+    watchlist_symbols: list[str] = []
+    try:
+        _uni = _read_json(USER_DATA_ROOT_FOR_BACKUPS / "universe.json") or {}
+        watchlist_symbols = [
+            s.strip().upper()
+            for s in ((_uni.get("stocks") or {}).get("dashboard_basket") or [])
+            if s and str(s).strip().upper() not in wheel_symbols
+        ]
+    except Exception:
+        pass
     cash = snap.get("cash") or 0
     bp = snap.get("buying_power") or 0
     paper = snap.get("paper", True)
@@ -2747,11 +2772,27 @@ async def gates():
             "n_blocking": len(blocking),
             "first_blocker": blocking[0]["gate"] if blocking else None,
             "gates": gate_results,
+            "venue_type": "wheel",
             "snapshot": {
                 "cash": cash,
                 "buying_power": bp,
                 "paper": paper,
             },
+        })
+
+    # Watchlist symbols (non-wheel): emit a minimal passive row so the
+    # dashboard's pair telemetry strip can render "regime · X" instead of
+    # the bare "regime · —" placeholder for every chart-only ticker.
+    for sym in watchlist_symbols:
+        stock_rows.append({
+            "pair": sym,
+            "regime": stock_regime or "—",
+            "n_gates": 0,
+            "n_blocking": 0,
+            "first_blocker": None,
+            "gates": [],
+            "venue_type": "watchlist",
+            "snapshot": None,
         })
 
     return _envelope("ok", data={
