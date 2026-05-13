@@ -1534,6 +1534,7 @@
           "span",
           {
             className: "tb-latency",
+            style: { display: "inline-flex", alignItems: "center", gap: 4 },
             title: latencyMs == null
               ? "freqtrade latency: measuring…"
               : latencyMs < 0
@@ -1549,7 +1550,27 @@
               : latencyMs >= 100  ? "lat-ok"
               :                     "lat-fast"
             ),
-          })
+          }),
+          // Visible numeric affordance — operator shouldn't need to hover
+          // to know what the dot represents. Shows latency in ms when
+          // measured, "—" when waiting, "dead" when the feed threw.
+          h("span", {
+            className: "mono",
+            style: {
+              fontSize: "var(--t-2xs)",
+              letterSpacing: ".04em",
+              color: latencyMs == null ? "var(--fg-3)"
+                : latencyMs < 0       ? "var(--down)"
+                : latencyMs > 1000    ? "var(--down)"
+                : latencyMs >= 250    ? "var(--warn)"
+                : "var(--fg-2)",
+            },
+          },
+            latencyMs == null ? "—" :
+            latencyMs < 0     ? "dead" :
+            latencyMs >= 1000 ? Math.floor(latencyMs / 1000) + "s" :
+                                latencyMs + "ms"
+          )
         )
       ),
       h("div", { className: "tb-divider" }),
@@ -1565,7 +1586,15 @@
         },
         h(
           "span",
-          { className: "dim2 mono", style: { fontSize: "var(--t-xs)", letterSpacing: ".08em" } },
+          {
+            className: "mono",
+            style: {
+              fontSize: "var(--t-xs)",
+              letterSpacing: ".08em",
+              color: "var(--fg-2)",
+              fontWeight: 500,
+            },
+          },
           "BOT UP"
         ),
         // P1-8: when ftDown, render the explicit down pill. Previously
@@ -1573,7 +1602,7 @@
         ftDown
           ? h("span", { className: "pill down", style: { fontFamily: "var(--mono)" } },
               h("span", { className: "dot down pulse" }), " FT down")
-          : h("span", { className: "num" }, uptime)
+          : h("span", { className: "num", style: { color: "var(--fg-1)" } }, uptime)
       ),
       h("div", { className: "tb-divider" }),
       h(

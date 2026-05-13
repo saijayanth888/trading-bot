@@ -3634,15 +3634,23 @@
           "svg",
           {
             className: "v3-sent-radar-svg",
-            width: 132,
-            height: 132,
-            viewBox: "0 0 120 120",
+            // viewBox heavily padded on left + right so the longest labels
+            // ("Deep" extending left of x=0, "F&G" extending right of x=120)
+            // never clip. Original v3 design used a 120 box that cut both —
+            // operator screenshot 2026-05-12 confirmed.
+            //
+            //   viewBox: -36 -22 192 164 means visible coord space:
+            //     x: -36 → 156   (36px pad left, 36px pad right of 0-120)
+            //     y: -22 → 142   (22px pad top, 22px pad bottom)
+            width: 196,
+            height: 168,
+            viewBox: "-36 -22 192 164",
             "aria-label": "Sentiment four-channel radar",
           },
           h("polygon", {
-            fill: "rgba(124,92,255,.12)",
-            stroke: "var(--accent-line)",
-            strokeWidth: "1",
+            fill: "rgba(124,92,255,.18)",
+            stroke: "var(--accent)",
+            strokeWidth: "1.25",
             points: radar.points,
           }),
           h("polygon", {
@@ -3652,22 +3660,28 @@
             strokeDasharray: "3 3",
             points: "60,16 104,60 60,104 16,60",
           }),
-          [["Deep", -90], ["Fast", 0], ["F&G", 90], ["Agree", 180]].map((item, i) => {
-            const ang = (item[1] - 90) * Math.PI / 180;
-            const x = 60 + 52 * Math.cos(ang);
-            const y = 60 + 52 * Math.sin(ang);
-            return h("text", {
-              key: item[0],
-              x: x,
-              y: y,
-              fill: "var(--fg-2)",
-              fontSize: "10",
-              fontWeight: 500,
+          // Labels positioned with per-side anchoring so they always sit
+          // CLEARLY outside the radar polygon and never collide with the
+          // diamond grid. fontSize 11, fontWeight 600, --fg-1 white.
+          [
+            { key: "Fast",  x: 60,  y: -6,  anchor: "middle", baseline: "auto" },
+            { key: "F&G",   x: 128, y: 60,  anchor: "start",  baseline: "middle" },
+            { key: "Agree", x: 60,  y: 126, anchor: "middle", baseline: "hanging" },
+            { key: "Deep",  x: -8,  y: 60,  anchor: "end",    baseline: "middle" },
+          ].map((item) =>
+            h("text", {
+              key: item.key,
+              x: item.x,
+              y: item.y,
+              fill: "var(--fg-1)",
+              fontSize: "11",
+              fontWeight: 600,
               fontFamily: "var(--mono)",
-              textAnchor: "middle",
-              dominantBaseline: "middle",
-            }, item[0]);
-          })
+              textAnchor: item.anchor,
+              dominantBaseline: item.baseline,
+              style: { letterSpacing: "0.04em" },
+            }, item.key)
+          )
         ),
         h("div", { className: "v3-sent-center" },
           h("div", { className: "dim2 mono", style: { fontSize: "var(--t-2xs)", letterSpacing: ".1em" } }, "NET"),
@@ -4563,16 +4577,29 @@
     return t;
   }
 
-  function DebateFloorConnectors({ live }) {
+  function DebateFloorConnectors({ live, activeFlows }) {
+    // Each segment now carries a destination tag so we can spawn an
+    // animated "message dot" traveling along the path when the
+    // destination role fires (operator wanted "one agent talking to
+    // another" visual — this is the explicit message-passing layer).
+    //
+    // Active flows (set by AgentFlow when a role's last_ts < 8s):
+    //   "in-regime"   regime tagger receives → fires from card top
+    //   "regime→bull" regime fans out to bull
+    //   "regime→arb"  regime fans out to arbiter
+    //   "regime→bear" regime fans out to bear
+    //   "→reflect"    bull/bear/arb feed reflector
+    //   "out-reflect" reflector publishes
     const stroke = "color-mix(in srgb, var(--fg-3) 55%, transparent)";
-    const paths = [
-      "M 160 6 L 160 38",
-      "M 160 38 L 52 38 L 52 58",
-      "M 160 38 L 160 58",
-      "M 160 38 L 268 38 L 268 58",
-      "M 52 118 L 160 150 L 268 118",
-      "M 160 150 L 160 178",
+    const segs = [
+      { d: "M 160 6 L 160 38",                        key: "in-regime",   color: "var(--v3-cold-blue)" },
+      { d: "M 160 38 L 52 38 L 52 58",                key: "regime→bull", color: "var(--up)" },
+      { d: "M 160 38 L 160 58",                       key: "regime→arb",  color: "var(--accent)" },
+      { d: "M 160 38 L 268 38 L 268 58",              key: "regime→bear", color: "var(--down)" },
+      { d: "M 52 118 L 160 150 L 268 118",            key: "→reflect",    color: "var(--warn)" },
+      { d: "M 160 150 L 160 178",                     key: "out-reflect", color: "var(--warn)" },
     ];
+    const flows = activeFlows || {};
     return h(
       "svg",
       {
@@ -4581,17 +4608,35 @@
         preserveAspectRatio: "none",
         "aria-hidden": "true",
       },
-      paths.map((d, i) =>
-        h("path", {
-          key: i,
-          className: "v3-debate-path",
-          d: d,
-          fill: "none",
-          stroke: stroke,
-          strokeWidth: 1.25,
-          strokeLinecap: "round",
-          strokeLinejoin: "round",
-        })
+      segs.map((s, i) =>
+        h(F, { key: i },
+          h("path", {
+            id: "v3-debate-path-" + i,
+            className: "v3-debate-path" + (flows[s.key] ? " v3-debate-path-active" : ""),
+            d: s.d,
+            fill: "none",
+            stroke: flows[s.key] ? s.color : stroke,
+            strokeWidth: flows[s.key] ? 1.75 : 1.25,
+            strokeLinecap: "round",
+            strokeLinejoin: "round",
+          }),
+          // When this flow is active, render a traveling "message" dot
+          // that re-keys per firing so the SMIL animation restarts.
+          flows[s.key] && h("circle", {
+            key: "dot-" + i + "-" + flows[s.key],
+            r: 3.5,
+            fill: s.color,
+            opacity: 1,
+            style: { filter: "drop-shadow(0 0 6px " + s.color + ")" },
+          },
+            h("animateMotion", {
+              dur: "1.2s",
+              repeatCount: "indefinite",
+              path: s.d,
+              rotate: "auto",
+            })
+          )
+        )
       )
     );
   }
@@ -4797,6 +4842,25 @@
       };
     });
 
+    // Build the activeFlows map for the connector SVG. A flow segment
+    // is "active" when its destination role has fired recently (last 8 s).
+    // Value is the role's last_ts so the SVG re-keys + restarts the
+    // animateMotion on each new fire.
+    const _flowKey = (det) => det && det.last_ts ? String(det.last_ts) : "";
+    const regimeMs = _afAgeMs(regime);
+    const bullMs   = _afAgeMs(bull);
+    const bearMs   = _afAgeMs(bear);
+    const arbMs    = _afAgeMs(arb);
+    const reflMs   = _afAgeMs(refl);
+    const activeFlows = {
+      "in-regime":   regimeMs != null && regimeMs < 8000 ? _flowKey(regime) : null,
+      "regime→bull": bullMs != null && bullMs < 8000 ? _flowKey(bull) : null,
+      "regime→arb":  arbMs != null && arbMs < 8000 ? _flowKey(arb) : null,
+      "regime→bear": bearMs != null && bearMs < 8000 ? _flowKey(bear) : null,
+      "→reflect":    reflMs != null && reflMs < 8000 ? _flowKey(refl) : null,
+      "out-reflect": reflMs != null && reflMs < 8000 ? _flowKey(refl) : null,
+    };
+
     return h(Card, {
       num: "21a",
       title: "Agent flow",
@@ -4859,7 +4923,7 @@
           "debate triggered · watching " + Object.keys(detailByRole).length + " roles for activity"),
       ),
       h("div", { className: "v3-debate-floor", id: "agent-flow-strip" },
-        h(DebateFloorConnectors, { live: debateLive }),
+        h(DebateFloorConnectors, { live: debateLive, activeFlows: activeFlows }),
         debateLive && h("div", { className: "v3-debate-live-anchor" },
           h("span", { className: "v3-debate-live-pill", "aria-live": "polite" }, "DEBATE LIVE")),
         h("div", { className: "v3-debate-grid" },
@@ -5546,8 +5610,26 @@
     const anthropicCalls = Math.max(0, Math.round(totalCalls * (1 - ollamaPct / 100)));
     const arbGist = (summary.by_role_detail && summary.by_role_detail.arbiter && summary.by_role_detail.arbiter.last_gist) || "";
 
-    const rightPill = h("span", { className: "pill info", style: { height: 18 } },
-      h("span", { className: "dot info" + (isEmpty ? "" : " pulse") }), " ",
+    // Stale detection — feed is "fresh" if any call in last 5 min, "warm"
+    // up to 30 min, "stale" beyond that. Operator-visible so they can tell
+    // "no recent activity" vs "log file frozen".
+    const latestCallMs = (() => {
+      if (!callsAll.length) return null;
+      const ts = callsAll[0] && (callsAll[0].timestamp || callsAll[0].ts);
+      const t = ts ? new Date(ts).getTime() : NaN;
+      return isFinite(t) ? Date.now() - t : null;
+    })();
+    const staleClass = latestCallMs == null ? "info"
+      : latestCallMs < 5 * 60_000  ? "up"
+      : latestCallMs < 30 * 60_000 ? "warn"
+      :                              "down";
+    const staleLabel = latestCallMs == null ? null
+      : latestCallMs < 60_000      ? "live · just now"
+      : latestCallMs < 3_600_000   ? "quiet · last call " + Math.floor(latestCallMs / 60_000) + "m ago"
+      :                              "quiet · last call " + Math.floor(latestCallMs / 3_600_000) + "h " + Math.floor((latestCallMs % 3_600_000) / 60_000) + "m ago";
+
+    const rightPill = h("span", { className: "pill " + staleClass, style: { height: 18 } },
+      h("span", { className: "dot " + staleClass + (latestCallMs != null && latestCallMs < 60_000 ? " pulse" : "") }), " ",
       isEmpty ? "NO CALLS YET" : (summary.total_calls || 0) + " · 24H");
 
     return h(F, null,
@@ -5556,9 +5638,10 @@
           num: "21", title: "LLM activity · last 24h",
           sub: isEmpty
             ? "No calls written yet — tracker hasn't fired or log file missing"
-            : "feed · " + (summary.total_calls || 0) + " calls · "
-              + fmtTokensCount(summary.total_tokens) + " tokens · "
-              + (logSize ? Math.round(logSize / 1024) + " KB on disk" : "—"),
+            : (staleLabel ? staleLabel + " · " : "")
+              + "feed · " + (summary.total_calls || 0) + " calls · "
+              + fmtTokensCount(summary.total_tokens) + " tokens"
+              + (logSize ? " · " + Math.round(logSize / 1024) + " KB on disk" : ""),
           right: cardRight(slot.fetchedAt, rightPill),
         },
           // ── HEADLINE NUMBERS ─────────────────────────────────────

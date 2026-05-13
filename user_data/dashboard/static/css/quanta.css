@@ -1554,6 +1554,15 @@ table.t tbody tr.flash-sell { animation: flash-sell 200ms cubic-bezier(0.2, 0, 0
   stroke-dasharray: 5 12;
   animation: v3-debate-dash 1.15s linear infinite;
 }
+/* When a specific role fires, its inbound flow gets brighter + thicker
+ * and a colored "message" dot travels along the path (rendered as an
+ * SVG <circle> with <animateMotion> next to the path). */
+.v3-debate-path-active {
+  opacity: 1;
+  animation: v3-debate-dash 0.6s linear infinite;
+  stroke-dasharray: 6 8;
+  filter: drop-shadow(0 0 4px currentColor);
+}
 @keyframes v3-debate-dash {
   to { stroke-dashoffset: -34; }
 }
