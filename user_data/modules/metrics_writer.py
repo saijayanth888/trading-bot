@@ -1,6 +1,15 @@
 """
 InfluxDB writer for Grafana dashboards.
 
+DEPRECATED 2026-05-13 — Grafana + InfluxDB containers were removed
+from docker-compose.yml on 2026-05-12 (commit b43b1b7). This module
+remains importable so legacy callers don't crash, but writes are
+no-ops by default (INFLUX_ENABLED defaults to "0"). To re-enable,
+set INFLUX_ENABLED=1 AND ship the influxdb container back. The
+replacement substrate is `src/quanta_core/observability/v4_buffer`
+plus the dashboard's /api/ops/* probes. See
+docs/V4_SHADOW_MODE_DESIGN.md for the cutover blueprint.
+
 The bot's hot path doesn't block on metric writes — every write goes
 into a bounded background queue and is flushed by a worker thread that
 batches up to `batch_size` points before POSTing. If the InfluxDB
@@ -77,7 +86,7 @@ class InfluxConfig:
             token=os.environ.get("INFLUX_TOKEN", ""),
             org=os.environ.get("INFLUX_ORG", "trading-bot"),
             bucket=os.environ.get("INFLUX_BUCKET", "trading"),
-            enabled=os.environ.get("INFLUX_ENABLED", "1") == "1",
+            enabled=os.environ.get("INFLUX_ENABLED", "0") == "1",
         )
 
 

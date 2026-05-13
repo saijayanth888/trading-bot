@@ -113,9 +113,10 @@ async def test_services_envelope_when_all_down(monkeypatch):
 async def test_services_envelope_partial(monkeypatch):
     """One probe down → status='degraded', error names the offender."""
     async def fake_summary():
+        # 2026-05-13: influxdb + grafana probes retired (services removed).
         out = {k: {"up": True, "via": "tcp", "endpoint": "x"} for k in
                ("ollama", "hermes_mcp", "hermes_gateway", "hermes_dashboard",
-                "freqtrade", "postgres", "influxdb", "grafana")}
+                "freqtrade", "postgres")}
         out["postgres"] = {"up": False, "via": "tcp", "endpoint": "postgres:5432", "error": "refused"}
         return out
     monkeypatch.setattr(ops_probes, "services_summary", fake_summary)

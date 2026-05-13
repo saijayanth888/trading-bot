@@ -133,6 +133,8 @@ class MonitoringMixin:
         try:
             self._metrics = MetricsWriter()
             if self._metrics and self._metrics.enabled:
+                # DEPRECATED 2026-05-13: influxdb retired; this branch only
+                # fires when an operator explicitly sets INFLUX_ENABLED=1.
                 logger.info("[monitoring] influx metrics writer enabled")
         except Exception as exc:
             logger.warning("[monitoring] metrics writer init failed: %s", exc)
