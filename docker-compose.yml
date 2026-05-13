@@ -394,6 +394,11 @@ services:
     environment:
       - LIVE_ENGINE_MODE=${LIVE_ENGINE_MODE:-shadow}
       - SHADOW_CYCLE_SEC=${SHADOW_CYCLE_SEC:-300}
+      # When set to a valid regime label (trending_up | trending_down |
+      # mean_reverting | high_volatility), bypasses the live regime feed.
+      # Use to force a strategy to fire entries for end-to-end testing
+      # without waiting for a natural regime flip. CLEAR THIS for real ops.
+      - REGIME_OVERRIDE=${REGIME_OVERRIDE:-}
       # Per-component env (keyword DSN) — password may contain '@', which
       # breaks the postgres:// URL parser. Runner composes a key=val DSN.
       - POSTGRES_USER=${POSTGRES_USER:-tradebot}

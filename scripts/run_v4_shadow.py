@@ -216,7 +216,18 @@ async def fetch_coinbase_candles(
 
 
 async def fetch_regime(session: aiohttp.ClientSession, url: str) -> dict[str, Any]:
-    """Pull current regime from the dashboard. Returns {} on failure."""
+    """Pull current regime from the dashboard. Returns {} on failure.
+
+    REGIME_OVERRIDE env var, when set to one of {trending_up, trending_down,
+    mean_reverting, high_volatility}, replaces the live regime with the
+    override value. Useful for end-to-end testing of the BUY/SELL pipeline
+    when the live regime would otherwise gate every entry to FLAT.
+    """
+    override = (os.environ.get("REGIME_OVERRIDE") or "").lower()
+    if override in {"trending_up", "trending_down", "mean_reverting", "high_volatility"}:
+        log.warning("REGIME_OVERRIDE active: returning %r (live regime ignored)", override)
+        return {"current": override, "probability": 1.0, "override": True}
+
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as r:
             r.raise_for_status()
