@@ -33,11 +33,50 @@ from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+# Local vendored copy; canonical lives at src/quanta_core/observability/v4_buffer.py.
+# The dashboard image's build context excludes src/, so we keep a sibling copy here.
+try:
+    from .v4_buffer import V4Buffer
+except ImportError:  # pragma: no cover — fallback for direct-host runs
+    from v4_buffer import V4Buffer  # type: ignore[no-redef]
+
 router = APIRouter(prefix="/api/v4", tags=["v4"])
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]                  # …/trading-bot
 V4_DIST = REPO_ROOT / "frontend-v4" / "dist"
+
+# ----------------------------------------------------------------------------
+# V4 runtime buffers (live-data substrate)
+#
+# Each /api/v4/* handler below tries the buffer first (O(1) ring read);
+# when empty (e.g., pre-shadow-mode, fresh container, no writers yet) the
+# handler falls back to the deterministic mock body via `_live_or_mock`.
+#
+# Writers (future): debate orchestrator, parity oracle, monte carlo runner.
+# See docs/V4_SHADOW_MODE_DESIGN.md for the cutover blueprint.
+#
+# Storage path resolution: prefer the existing USER_DATA_ROOT mount
+# (`/freqtrade/user_data` inside the container; `./user_data/` on host),
+# so the buffer files land on the bind-mounted volume — survives container
+# restarts and is visible to off-container tools.
+# ----------------------------------------------------------------------------
+_USER_DATA_ROOT = Path(os.environ.get("USER_DATA_ROOT", str(REPO_ROOT / "user_data")))
+_V4_DATA_DIR = _USER_DATA_ROOT / "v4_runtime"
+_DEBATE_BUFFER = V4Buffer(_V4_DATA_DIR / "debates.jsonl", capacity=256)
+_PARITY_BUFFER = V4Buffer(_V4_DATA_DIR / "parity.jsonl", capacity=128)
+_MONTECARLO_BUFFER = V4Buffer(_V4_DATA_DIR / "montecarlo.jsonl", capacity=64)
+
+
+def _live_or_mock(buffer: V4Buffer, mock_fn, limit: int = 8) -> list[dict[str, Any]]:
+    """Read live buffer; fall back to deterministic mock if empty.
+
+    The buffer is canonical when populated. Mocks keep the SPA rendering
+    end-to-end during early shadow-mode bring-up — once writers land,
+    `read_recent` will return real events and the mock branch goes cold.
+    """
+    live = buffer.read_recent(limit=limit)
+    return live if live else mock_fn()
 
 # ----------------------------------------------------------------------------
 # Debate
@@ -51,9 +90,7 @@ def _seed_session_id(suffix: str = "") -> str:
     return uuid.uuid5(uuid.NAMESPACE_DNS, f"quanta-v4-debate-{suffix}").hex[:16]
 
 
-@router.get("/debate/history")
-async def debate_history() -> dict[str, Any]:
-    """Recent debate sessions. Real impl reads `decisions` postgres table."""
+def _mock_debate_history() -> list[dict[str, Any]]:
     now = datetime.now(timezone.utc)
     sessions = []
     for i in range(8):
@@ -68,6 +105,20 @@ async def debate_history() -> dict[str, Any]:
                 "total_latency_ms": 28000 + (i * 1100) % 6000,
             }
         )
+    return sessions
+
+
+@router.get("/debate/history")
+async def debate_history() -> dict[str, Any]:
+    """Recent debate sessions.
+
+    Reads from `_DEBATE_BUFFER` (in-memory ring + JSONL at
+    `data/v4_runtime/debates.jsonl`) when populated; falls back to a
+    deterministic mock so the SPA always has content to render.
+    Real writers will land via the debate orchestrator — see
+    `docs/V4_SHADOW_MODE_DESIGN.md`.
+    """
+    sessions = _live_or_mock(_DEBATE_BUFFER, _mock_debate_history, limit=8)
     return {"sessions": sessions}
 
 
@@ -188,9 +239,7 @@ async def debate_stream(session_id: str) -> StreamingResponse:
 # ----------------------------------------------------------------------------
 
 
-@router.get("/montecarlo/{trade_id}")
-async def montecarlo(trade_id: str) -> dict[str, Any]:
-    """Deterministic stub run. Real impl wraps `quanta_core.risk.monte_carlo`."""
+def _mock_montecarlo(trade_id: str) -> dict[str, Any]:
     rng = random.Random(f"mc-{trade_id}")
     horizon = 48
     n_paths = 10_000
@@ -200,7 +249,6 @@ async def montecarlo(trade_id: str) -> dict[str, Any]:
 
     quantiles = {f"p{p:02d}": [] for p in (5, 25, 50, 75, 95)}
     for bar in range(horizon + 1):
-        # closed-form normal envelope around drift mu*bar, vol sigma*sqrt(bar)
         t = bar
         drift = 1 + mu * t
         scale = sigma * math.sqrt(t)
@@ -212,7 +260,7 @@ async def montecarlo(trade_id: str) -> dict[str, Any]:
         v = 1.0
         path = [v]
         for _bar in range(horizon):
-            v *= 1 + (rng.gauss(mu, sigma))
+            v *= 1 + rng.gauss(mu, sigma)
             path.append(round(v, 5))
         sample_paths.append({"values": path})
 
@@ -233,6 +281,20 @@ async def montecarlo(trade_id: str) -> dict[str, Any]:
         "blocked": blocked,
         "block_reason": "VaR breach" if blocked else None,
     }
+
+
+@router.get("/montecarlo/{trade_id}")
+async def montecarlo(trade_id: str) -> dict[str, Any]:
+    """Monte Carlo path envelope for a given trade id.
+
+    Looks up `trade_id` in `_MONTECARLO_BUFFER` (live runs published by
+    `quanta_core.risk.monte_carlo`); falls back to a deterministic
+    closed-form normal envelope when no real run is recorded.
+    """
+    for event in reversed(_MONTECARLO_BUFFER.read_recent(limit=64)):
+        if event.get("trade_id") == trade_id:
+            return event
+    return _mock_montecarlo(trade_id)
 
 
 # ----------------------------------------------------------------------------
@@ -379,8 +441,7 @@ _Bot run-mode this week: **paper**. Paper mode — all values shown as-is._
 # ----------------------------------------------------------------------------
 
 
-@router.get("/parity")
-async def parity() -> dict[str, Any]:
+def _mock_parity_rows() -> list[dict[str, Any]]:
     rng = random.Random("parity")
     now = datetime.now(timezone.utc)
     rows = []
@@ -389,7 +450,11 @@ async def parity() -> dict[str, Any]:
         live_action = rng.choice(["LONG", "FLAT", "FLAT", "FLAT", "SHORT"])
         backtest_action = live_action if rng.random() < 0.86 else "FLAT"
         live_pnl = round(rng.gauss(0, 0.012), 4) if live_action != "FLAT" else None
-        backtest_pnl = round((live_pnl or 0) + rng.gauss(0, 0.0015), 4) if backtest_action != "FLAT" else None
+        backtest_pnl = (
+            round((live_pnl or 0) + rng.gauss(0, 0.0015), 4)
+            if backtest_action != "FLAT"
+            else None
+        )
         rows.append(
             {
                 "ts": ts.strftime("%Y-%m-%d %H:%M"),
@@ -401,20 +466,35 @@ async def parity() -> dict[str, Any]:
                 "divergent": live_action != backtest_action,
             }
         )
+    return rows
 
-    weeks = []
-    for w in range(8):
-        weeks.append(
-            {
-                "iso": f"2026-{18 - w:02d}",
-                "divergence_pct": round(max(0.0, rng.gauss(6, 3)), 2),
-            }
-        )
+
+def _mock_parity_weeks() -> list[dict[str, Any]]:
+    rng = random.Random("parity")
+    weeks = [
+        {
+            "iso": f"2026-{18 - w:02d}",
+            "divergence_pct": round(max(0.0, rng.gauss(6, 3)), 2),
+        }
+        for w in range(8)
+    ]
     weeks.reverse()
+    return weeks
 
+
+@router.get("/parity")
+async def parity() -> dict[str, Any]:
+    """Backtest-vs-live parity rows + weekly divergence summary.
+
+    Reads from `_PARITY_BUFFER` (live shadow-mode parity oracle output)
+    when populated, falls back to a deterministic mock otherwise. Weekly
+    summary stays mocked until the shadow-mode runner has 4+ weeks of
+    data — that's an explicit Track-D follow-up.
+    """
+    rows = _live_or_mock(_PARITY_BUFFER, _mock_parity_rows, limit=36)
     return {
         "rows": rows,
-        "weeks": weeks,
+        "weeks": _mock_parity_weeks(),
         "consecutive_days_ok": 9,
         "cutover_threshold_days": 14,
     }
