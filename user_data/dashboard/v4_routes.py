@@ -32,6 +32,7 @@ from typing import Any, AsyncIterator
 from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 # Local vendored copy; canonical lives at src/quanta_core/observability/v4_buffer.py.
 # The dashboard image's build context excludes src/, so we keep a sibling copy here.
@@ -772,11 +773,36 @@ def _screen_row(symbol: str, asset_class: str, rng: random.Random, detected: boo
 # ----------------------------------------------------------------------------
 
 
+class _SpaStaticFiles(StaticFiles):
+    """StaticFiles that falls back to index.html for unmatched paths.
+
+    The frontend-v4 SPA uses react-router-dom's BrowserRouter with
+    basename="/v4". Direct navigation / reload of /v4/risk, /v4/parity etc.
+    must serve index.html so React Router can handle the route client-side.
+    The default StaticFiles 404s on any path that isn't a real file, breaking
+    deep-link reload / right-click-open-in-new-tab.
+    """
+
+    async def get_response(self, path: str, scope):  # type: ignore[override]
+        # Starlette's StaticFiles raises `starlette.exceptions.HTTPException`
+        # (NOT `fastapi.HTTPException`, which is a subclass) when a path isn't
+        # found. We catch the Starlette base so both flavours are covered.
+        # Asset 404s (path leaf contains ".") pass through unchanged; bare
+        # routes fall back to index.html so React Router takes over.
+        is_asset = "." in path.rsplit("/", 1)[-1]
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code == 404 and not is_asset:
+                return await super().get_response("index.html", scope)
+            raise
+
+
 def mount(app: FastAPI) -> None:
     """Wire v4 routes + serve `frontend-v4/dist/` at /v4 if the build exists."""
     app.include_router(router)
     if V4_DIST.is_dir():
-        app.mount("/v4", StaticFiles(directory=str(V4_DIST), html=True), name="v4_spa")
+        app.mount("/v4", _SpaStaticFiles(directory=str(V4_DIST), html=True), name="v4_spa")
     else:  # pragma: no cover — startup logs the absence
         import logging
         logging.getLogger(__name__).info(
