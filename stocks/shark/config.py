@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field, fields
+from datetime import date, datetime
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,29 @@ def _env_int(key: str, default: int) -> int:
 
 def _env_str(key: str, default: str = "") -> str:
     return os.environ.get(key, default) or default
+
+
+def _env_date(key: str, default: Optional[date] = None) -> Optional[date]:
+    """Parse an ISO-8601 date (YYYY-MM-DD) from env. Returns default when
+    unset or empty. Raises ConfigError on malformed input — fail fast at
+    startup beats silent date drift.
+
+    Used for time-bounded overrides (paper_priced_in_override_until,
+    REGIME_OVERRIDE_UNTIL pattern) — the operator sets these to enable a
+    relaxation for a fixed window; auto-tightening is the whole point, so
+    a bogus date that silently parses as None would defeat the safety net.
+    """
+    raw = os.environ.get(key)
+    if raw in (None, ""):
+        return default
+    try:
+        # Accept "2026-05-28" or "2026-05-28T00:00:00" — strip time if present.
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
+    except ValueError as exc:
+        raise ConfigError(
+            f"{key}={raw!r} is not a valid ISO date (YYYY-MM-DD). "
+            f"Example: PAPER_PRICED_IN_OVERRIDE_UNTIL=2026-05-28"
+        ) from exc
 
 
 def _require_range(
@@ -120,6 +144,15 @@ class Settings:
     paper_bear_size_mult: float          # position size multiplier (0.5 = half)
     paper_bear_confidence: float         # min confidence threshold
     paper_bear_min_score: int            # pre-market min score in BEAR regimes
+    # Time-bounded override of the `catalyst_priced_in` filter. When set
+    # AND today <= this date AND paper_bear_override AND trading_mode=paper,
+    # the market-open gating accepts candidates that Perplexity flagged as
+    # priced-in (i.e. >3% already moved on the news). Auto-clears past the
+    # expiry to prevent drift. None = override OFF (status quo). The hard
+    # kill at market_open.py is conditional on this — see that file for the
+    # restructured gating logic. Pattern matches REGIME_OVERRIDE_UNTIL from
+    # the 2026-05-14 V4 audit.
+    paper_priced_in_override_until: Optional[date]  # None = override OFF
 
     # ----- Regime detection -----
     regime_atr_high_vol_pct: float
@@ -341,6 +374,7 @@ def _load_from_env() -> Settings:
         paper_bear_size_mult=_env_float("PAPER_BEAR_SIZE_MULT", 0.5),
         paper_bear_confidence=_env_float("PAPER_BEAR_CONFIDENCE", 0.85),
         paper_bear_min_score=_env_int("PAPER_BEAR_MIN_SCORE", 3),
+        paper_priced_in_override_until=_env_date("PAPER_PRICED_IN_OVERRIDE_UNTIL", None),
 
         # API credentials
         alpaca_api_key=_env_str("ALPACA_API_KEY"),
