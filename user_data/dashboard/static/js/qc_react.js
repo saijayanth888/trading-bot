@@ -1343,29 +1343,20 @@
                     combinedPortfolio, mode: modeProp, services: servicesProp,
                     heartbeatStatus, onHeartbeatClick }) {
     const [clock, setClock] = useState(fmtClock());
-    // Real uptime — poll /api/ops/uptime every 30s for freqtrade's actual
-    // start time. Earlier this was page-load time, which made the pill
-    // read "0h 0m" every refresh — not useful.
+    // Dashboard uptime — poll /api/ops/uptime every 30s. Post-2026-05-14
+    // freqtrade decommissioning, the response only carries `data.dashboard`
+    // (its own start time); the freqtrade entry was removed from the
+    // backend in Phase 2 of the retirement campaign.
     const [uptime, setUptime] = useState("—");
-    // Tier C P1-8: track freqtrade up/down + last-good uptime timestamp.
-    // When /api/ops/uptime reports { status: "down" } (freqtrade crashed
-    // or hasn't started yet) we MUST NOT keep rendering the stale
-    // uptime_s — that lies to the operator about service health. Render
-    // an explicit "FT down" pill instead, with a tooltip showing the
-    // last-good timestamp so they know how stale the previous reading is.
-    //
-    // INVARIANT: when ftDown is true, the uptime pill MUST render the
-    // "FT down" affordance — never the cached numeric uptime.
-    const [ftDown, setFtDown] = useState(false);
     const [uptimeFetchedAt, setUptimeFetchedAt] = useState(null);
-    // Equity/mode/ftUp are derived from props when provided; otherwise
+    // Equity/mode/engineUp are derived from props when provided; otherwise
     // populated by the local-fallback fetch below.
     const [equityLocal, setEquityLocal] = useState({ value: null, deltaPct: null });
     const [modeLocal, setModeLocal] = useState({ label: "—", dry: true, healthy: false });
-    const [ftUpLocal, setFtUpLocal] = useState(null);
-    // Bonus #4 · Tier-B · freqtrade /api/mode round-trip latency in ms.
-    // Measured around the existing fetch — same URL, same options, same
-    // cadence (30s). null = not measured yet; -1 = the fetch threw.
+    const [engineUpLocal, setEngineUpLocal] = useState(null);
+    // Bonus #4 · Tier-B · /api/mode round-trip latency in ms. Measured
+    // around the existing fetch — same URL, same options, same cadence
+    // (30s). null = not measured yet; -1 = the fetch threw.
     const [latencyMs, setLatencyMs] = useState(null);
 
     // ── Always-on: clock + uptime (uptime not covered by useOpsData) ──
@@ -1378,25 +1369,17 @@
           if (!r.ok) return;
           const j = await r.json().catch(() => ({}));
           if (ctrl.signal.aborted) return;
-          const ft = (j && j.data && j.data.freqtrade) || {};
-          // P1-8: explicit down-state handling. status:"down" OR up:false
-          // means "do not trust uptime_s" — show the down pill instead.
-          const status = String(ft.status || "").toLowerCase();
-          const isDown = status === "down" || ft.up === false;
-          setFtDown(isDown);
-          if (!isDown && typeof ft.uptime_s === "number") {
-            const s = ft.uptime_s;
+          const dash = (j && j.data && j.data.dashboard) || {};
+          if (typeof dash.uptime_s === "number") {
+            const s = dash.uptime_s;
             const d = Math.floor(s / 86400);
             const hh = Math.floor((s % 86400) / 3600);
             const m = Math.floor((s % 3600) / 60);
             setUptime(d > 0 ? `${d}d ${hh}h ${m}m` : (hh > 0 ? `${hh}h ${m}m` : `${m}m`));
             setUptimeFetchedAt(new Date());
-          } else if (!isDown) {
+          } else {
             setUptime("—");
           }
-          // When isDown we deliberately do NOT clobber the cached uptime
-          // value — uptimeFetchedAt still points at the last clean read
-          // so the tooltip can surface "last good …" for the operator.
         } catch (e) { if (e && e.name !== "AbortError") { /* ignore */ } }
       };
       refreshUptime();
@@ -1450,14 +1433,16 @@
         } catch (e) {
           if (e && e.name !== "AbortError") setLatencyMs(-1);
         }
-        // /api/ops/services — { data: { freqtrade: { up: bool, ... }, ... } }
+        // /api/ops/services — { data: { quanta_core: { up: bool, ... }, ... } }
+        // Post-2026-05-14: the freqtrade probe key was removed in Phase 2
+        // of the retirement campaign; quanta_core is the only engine probe.
         try {
           const r = await fetch("/api/ops/services", { cache: "no-store", signal: ctrl.signal });
           if (!r.ok) return;
           const j = await r.json().catch(() => ({}));
           if (ctrl.signal.aborted) return;
-          const ftSvc = (j && j.data && j.data.freqtrade) || {};
-          setFtUpLocal(typeof ftSvc.up === "boolean" ? ftSvc.up : null);
+          const qcSvc = (j && j.data && j.data.quanta_core) || {};
+          setEngineUpLocal(typeof qcSvc.up === "boolean" ? qcSvc.up : null);
         } catch (e) { if (e && e.name !== "AbortError") { /* ignore */ } }
       };
       refresh();
@@ -1492,33 +1477,20 @@
       }
       return modeLocal;
     })();
-    // Engine label + up/down probe — V4 (quanta_core) post-cutover,
-    // freqtrade pre-cutover. Reads /api/mode.engine to pick the path.
+    // Engine label + up/down probe — quanta_core is the only engine
+    // post-2026-05-14 (freqtrade decommissioned).
     const engineMeta = (() => {
       if (servicesProp != null) {
         const svc = (servicesProp && servicesProp.data) || servicesProp || {};
-        // mode.engine arrives via modeProp; fall back to inferring from
-        // which probe row exists in the services payload.
-        const modeJ = (modeProp && modeProp.data) || modeProp || {};
-        const engine = String(modeJ.engine || "").toLowerCase();
-        if (engine === "quanta_core" || svc.quanta_core) {
-          const qc = svc.quanta_core || {};
-          return {
-            name: "QUANTA",
-            up: typeof qc.up === "boolean" ? qc.up : null,
-          };
-        }
-        if (engine === "freqtrade" || svc.freqtrade) {
-          const ft = svc.freqtrade || {};
-          return {
-            name: "FREQTRADE",
-            up: typeof ft.up === "boolean" ? ft.up : null,
-          };
-        }
+        const qc = svc.quanta_core || {};
+        return {
+          name: "QUANTA",
+          up: typeof qc.up === "boolean" ? qc.up : null,
+        };
       }
-      return { name: "ENGINE", up: ftUpLocal };
+      return { name: "QUANTA", up: engineUpLocal };
     })();
-    const ftUp = engineMeta.up;
+    const engineUp = engineMeta.up;
     const hb = heartbeatStatus === "warn" || heartbeatStatus === "bad" ? heartbeatStatus : "ok";
     return h(
       "header",
@@ -1554,19 +1526,16 @@
           h("span", { className: "dot " + (mode.dry ? "warn" : "down") + " pulse" }),
           " " + mode.label
         ),
-        // Engine up/down — from /api/ops/services. null = unknown (don't
-        // claim health while we still haven't heard back). Label flips
-        // based on which engine is active (QUANTA post-cutover, FREQTRADE
-        // pre-cutover); the probe key in /api/ops/services switches in
-        // lockstep, so this pill is always referring to the right service.
+        // Engine up/down — from /api/ops/services.quanta_core. null =
+        // unknown (don't claim health while we still haven't heard back).
         h(
           "span",
-          { className: "pill " + (ftUp === true ? "up" : ftUp === false ? "down" : "") },
-          h("span", { className: "dot " + (ftUp === true ? "up pulse" : ftUp === false ? "down" : "dim") }),
-          " " + engineMeta.name + " " + (ftUp === true ? "OK" : ftUp === false ? "DOWN" : "—")
+          { className: "pill " + (engineUp === true ? "up" : engineUp === false ? "down" : "") },
+          h("span", { className: "dot " + (engineUp === true ? "up pulse" : engineUp === false ? "down" : "dim") }),
+          " " + engineMeta.name + " " + (engineUp === true ? "OK" : engineUp === false ? "DOWN" : "—")
         ),
         // Bonus #4 · Tier-B · latency dot with backpressure pulse.
-        // 6px dot tints + pulses based on freqtrade /api/mode round-trip.
+        // 6px dot tints + pulses based on /api/mode round-trip.
         //   <100ms   : up   solid (fast)
         //   100-250ms: up   slow pulse 2s (ok)
         //   250-1000 : warn fast pulse 1s (slow)
@@ -1620,10 +1589,10 @@
         "div",
         {
           className: "tb-group",
-          // P1-8: surface last-good uptime timestamp on hover when freqtrade
-          // is down, so operator knows how stale the previous reading is.
-          title: ftDown && uptimeFetchedAt
-            ? ("last good uptime " + uptimeFetchedAt.toLocaleTimeString() + " ET")
+          // Tooltip surfaces last-good fetch timestamp so the operator
+          // can tell how stale the displayed value is.
+          title: uptimeFetchedAt
+            ? ("last refresh " + uptimeFetchedAt.toLocaleTimeString() + " ET")
             : undefined,
         },
         h(
@@ -1637,11 +1606,11 @@
               fontWeight: 500,
             },
           },
-          "BOT UP"
+          "DASH UP"
         ),
-        // P1-8: when ftDown, render the explicit down pill. Previously
-        // the stale uptime_s would keep ticking on screen forever.
-        ftDown
+        // Post-2026-05-14: freqtrade decommissioned; ftDown pill removed
+        // (it surfaced freqtrade's down state, which we no longer probe).
+        false
           ? h("span", { className: "pill down", style: { fontFamily: "var(--mono)" } },
               h("span", { className: "dot down pulse" }), " FT down")
           : h("span", { className: "num", style: { color: "var(--fg-1)" } }, uptime)

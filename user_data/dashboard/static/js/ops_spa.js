@@ -1452,14 +1452,17 @@
     const sharpeRaw = metrics.sharpe_ratio != null ? metrics.sharpe_ratio : metrics.sharpe;
     const sharpe = sharpeRaw != null ? Number(sharpeRaw).toFixed(2) : "—";
     const services = envelopeData(data.services) || {};
-    // Engine display: prefer /api/mode's engine field (post-cutover V4), then
-    // freqtrade probe (legacy), else dash.
+    // Engine display — quanta_core is the only engine post-cutover.
+    // /api/mode.engine is "quanta_core" when LIVE_ENGINE_MODE is set;
+    // null/empty otherwise (no fallback engine to probe).
     const engineName = (mode.engine || "").toLowerCase();
+    const qcSvc = services.quanta_core || {};
     const engineLabel = engineName === "quanta_core"
       ? "quanta_core · " + ((mode.state === "running") ? "ok" : (mode.state || "—"))
-      : (services.freqtrade && services.freqtrade.up) ? "freqtrade · ok"
-      : (services.freqtrade ? "freqtrade · down" : "—");
-    const strategyLabel = engineName === "quanta_core" ? "MeanRevBB + TrendFollow" : "EPT";
+      : (qcSvc.up === true ? "quanta_core · ok"
+        : qcSvc.up === false ? "quanta_core · down"
+        : "—");
+    const strategyLabel = engineName === "quanta_core" ? "MeanRevBB + TrendFollow" : "—";
     return h("div", { className: "card mountin", style: { padding: "var(--s-3) var(--s-4)" } },
       h("div", { style: { display: "flex", alignItems: "center", gap: "var(--s-2)" } },
         h("span", { className: "metric-label" }, "BOT STATE"),
@@ -3333,7 +3336,7 @@
         }
       },
         h("strong", null, "Blur-to-save"),
-        " writes ", h("code", null, "config.json"), " atomically and triggers freqtrade reload. Open trades keep current parameters until close."
+        " writes ", h("code", null, "config.json"), " atomically. Quanta-core / unified_risk re-read on the next cycle (no service-side reload call needed). Open trades keep current parameters until close."
       )
     );
   }
@@ -6188,7 +6191,7 @@
     // RESUME path was missing — once the operator hit the kill switch, the
     // visual chip flipped back to "normal" but no /api/ops/resume call was
     // ever made, so trading stayed paused. Mirror the pause call here so the
-    // "normal" transition actually unpauses freqtrade.
+    // "normal" transition actually clears quanta_schema.run_state.paused.
     const killStateRef = useRef("normal");
     const setKillState = useCallback((next) => {
       const prev = killStateRef.current;

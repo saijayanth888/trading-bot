@@ -140,7 +140,7 @@
   }
 
   // Crypto pairs are fetched from /api/pairs (server is source of truth —
-  // configured via the freqtrade pair_whitelist). Stocks venue stays
+  // configured via DASHBOARD_PAIRS env). Stocks venue stays
   // hardcoded since the endpoint is crypto-only; STOCK_SYMBOLS matches the
   // operator's paper-trading basket (SOFI / PLTR / NVDA / AMD / SPY).
   // Fallbacks if /api/pairs or /api/ops/stocks_sparklines is unreachable.
@@ -148,7 +148,7 @@
   // crypto, DASHBOARD_STOCK_SYMBOLS env var for stocks) so these arrays
   // only exist as emergency seeds. Operator can't be left with a dropdown
   // that omits tickers they're actively trading — kept in sync with the
-  // 8-pair freqtrade whitelist + 10-symbol wheel/dashboard basket.
+  // 12-pair quanta-core crypto basket + 10-symbol wheel/dashboard basket.
   // Minimal emergency seeds — used only if BOTH /api/universe AND /api/pairs
   // are unreachable on mount. Universe.json is the source of truth.
   const FALLBACK_CRYPTO_PAIRS = ["BTC/USD"];
@@ -158,7 +158,7 @@
   // Replaces the prototype's hardcoded Topbar ($119,842.42 + 1.84%). Wires
   // EQUITY to /api/ops/combined_portfolio.total_equity and the day-delta pill
   // to combined_drawdown_pct (signed: -dd surfaces below-peak as red). Also
-  // pulls /api/mode + /api/ops/services.freqtrade for the mode + freqtrade-OK
+  // pulls /api/mode + /api/ops/services.quanta_core for the mode + engine-OK
   // pills. Mirrors the legacy /ops topbar so /dashboard_spa A/Bs cleanly.
   function TopbarLive({ killState, setKillState, combined, mode, services, fetchedAt }) {
     const [clock, setClock] = useState(fmtClockET());
@@ -177,13 +177,11 @@
     const dayPct = dd != null ? -dd : null;
     const modeLabel = (modeD.mode || "unknown").toUpperCase() + (modeD.dry_run ? " · DRY-RUN" : "");
     const modeCls = modeD.mode === "live" ? "up" : modeD.mode === "paused" ? "warn" : "info";
-    // Engine label + probe — V4 (quanta_core) post-cutover, freqtrade pre-.
+    // Engine label + probe — quanta_core is the only engine post-cutover.
     const engineName = String(modeD.engine || "").toLowerCase();
     const engineMeta = (engineName === "quanta_core" || svc.quanta_core)
       ? { name: "QUANTA", up: (svc.quanta_core || {}).up }
-      : (engineName === "freqtrade" || svc.freqtrade)
-        ? { name: "FREQTRADE", up: (svc.freqtrade || {}).up }
-        : { name: "ENGINE", up: null };
+      : { name: "ENGINE", up: null };
     const ftOk = engineMeta.up === true;
     const hbStatus = deriveHeartbeatStatus({
       services: services,
@@ -291,7 +289,7 @@
     });
 
     // Crypto pair list — fetched from /api/pairs (server has the canonical
-    // freqtrade pair_whitelist). Falls back to FALLBACK_CRYPTO_PAIRS on a
+    // DASHBOARD_PAIRS env). Falls back to FALLBACK_CRYPTO_PAIRS on a
     // network error so the dropdown still has something selectable.
     const [cryptoPairs, setCryptoPairs] = useState(FALLBACK_CRYPTO_PAIRS);
     // Stocks basket from /api/ops/stocks_sparklines.basket — config-driven
@@ -351,7 +349,7 @@
     }, []);
 
     // Fetch /api/state (sidebar / pair drill payload). The endpoint is
-    // single-pair so it gives best context for whatever pair freqtrade is
+    // single-pair so it gives best context for whatever pair quanta-core is
     // showing — we surface it as the "model view" payload.
     //
     // Tier C P1-2 INVARIANT: every fetch issued from these callbacks must
@@ -393,7 +391,7 @@
     }, []);
 
     // Fetch candles on pair/tf change. Crypto routes through
-    // `/api/candles/{base}/{quote}` (freqtrade-backed). Stocks have NO
+    // `/api/candles/{base}/{quote}` (coinbase-backed post-cutover). Stocks have NO
     // base/quote split — they route through `/api/ops/stock_candles/{symbol}`
     // (enveloped, Alpaca-cached on disk). The latter uses Alpaca's timeframe
     // codes (`5Min` / `1Hour` / `1Day`) and exposes `bars[]`, not `candles[]`.
@@ -489,7 +487,7 @@
     const px = (meta.last_close != null) ? meta.last_close : (state && state.last_close) || 0;
     // Venue-aware day-delta: when on stocks, surface stocks_drawdown_pct +
     // (stocks_equity − stocks_peak_equity); when on crypto, the crypto
-    // drawdown + state.daily_pnl (freqtrade-only). Bleeding crypto numbers
+    // drawdown + state.daily_pnl (was freqtrade-only pre-cutover). Bleeding crypto numbers
     // into the stocks view was misleading (operator saw "Crypto day P&L:
     // −$23.37" while looking at SOFI).
     const cpData = envelopeData(combined) || {};
@@ -711,7 +709,7 @@
     // Wave B (2026-05-14): TFT and META-AGENT are now independent blocks
     // with their own LIVE/OFFLINE states. quanta-core writes meta_signal
     // per cycle (LIVE); the TFT classifier has no replacement producer
-    // post-freqtrade-cutover (OFFLINE until Wave D wires it).
+    // post-cutover (OFFLINE until Wave D wires it).
     const hasTft = (tft.up != null || tft.flat != null || tft.down != null
                     || tft.confidence != null);
     const hasMeta = (meta_signal != null || meta_conf != null);
@@ -744,7 +742,7 @@
     },
       // Classifier block — LIVE when classifier_log producer writes;
       // OFFLINE until then. Wave D: this is the heuristic momentum
-      // classifier from quanta-core (NOT the old freqtrade TFT). Label
+      // classifier from quanta-core (post-cutover replacement for the retired FreqAI TFT). Label
       // accurately so the operator isn't misled.
       h("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
         h("div", { className: "metric-label", style: { flex: 1 } },
@@ -981,7 +979,7 @@
               )
       );
     }
-    // Crypto venue: original freqtrade positions path
+    // Crypto venue: positions from quanta-core's trade_journal writes
     const positions = (state && state.positions) || [];
     const forPair = positions.filter(p => (p.pair || "").toUpperCase() === pair.toUpperCase());
     const others = positions.filter(p => (p.pair || "").toUpperCase() !== pair.toUpperCase());
@@ -1020,7 +1018,7 @@
     //   { pair, opened_at, closed_at, entry_price, exit_price, pnl, pnl_pct,
     //     exit_reason, confidence, regime }
     // pnl_pct is a FRACTION (e.g. -0.012305 = -1.23%). Multiply for display.
-    // There is no `side` field — freqtrade is long-only here, so display LONG.
+    // There is no `side` field — crypto is long-only here, so display LONG.
     return h(Card, {
       num: "05", title: "Recent trades · last 10",
       sub: trades.length + " rows · " + (trades.filter(t => Number(t.pnl_pct || 0) > 0).length) + " green",
@@ -1045,7 +1043,7 @@
               const closedShort = fmtET(closedAt);
               const entryPx = t.entry_price;
               const exitPx = t.exit_price;
-              // freqtrade crypto today is long-only, but state.recent_trades will
+              // quanta-core crypto today is long-only, but state.recent_trades will
               // carry wheel rows (short_put / short_call / long_shares) once
               // wheel execution is wired. Prefer the explicit side field when
               // present; fall back to t.kind; finally to LONG.
