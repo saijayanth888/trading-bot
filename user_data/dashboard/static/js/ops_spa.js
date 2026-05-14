@@ -4057,8 +4057,13 @@
     const env = envelopeData(slot.env) || {};
     // daily_pnl_pct, drawdown_pct_30d, live_tape[].pnl_pct are all fractional
     // ratios (e.g. -0.012305 = -1.23%) — multiply by 100 before fmtPct.
+    // null-render fix (FIX-J 2026-05-14): never coerce null → 0 here; let
+    // the render branch decide between fmtPct(value) and "—". The old
+    // `Number(env.daily_pnl_pct || 0) * 100` produced a fake "+0.00%" when
+    // the API returned daily_pnl_pct: null (the producer leaves it null
+    // when day_start_equity is unavailable — see ops_db.py:389).
     const dayPnl = Number(env.daily_pnl_usd || 0);
-    const dayPct = Number(env.daily_pnl_pct || 0) * 100;
+    const dayPct = env.daily_pnl_pct != null ? Number(env.daily_pnl_pct) * 100 : null;
     const dd30 = env.drawdown_pct_30d != null ? Number(env.drawdown_pct_30d) * 100 : null;
     const cb = env.circuit_breaker || {};
     const cbActive = cb.active === true;
@@ -4090,7 +4095,7 @@
         h("div", { className: "dim mono" }, "DAY PNL"),
         h("div", { className: "v3-num " + (dayPnl >= 0 ? "up" : "down") }, (dayPnl >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(dayPnl))),
         h("div", { className: "dim mono" }, "DAY %"),
-        h("div", { className: "v3-num " + (dayPct >= 0 ? "up" : "down") }, fmtPct(dayPct)),
+        h("div", { className: "v3-num " + (dayPct == null ? "dim" : (dayPct >= 0 ? "up" : "down")) }, dayPct != null ? fmtPct(dayPct) : "—"),
         h("div", { className: "dim mono" }, "DD 30d"),
         h("div", { className: "v3-num " + (dd30 != null && dd30 < 0 ? "down" : "dim") }, dd30 != null ? fmtPct(dd30) : "—"),
         h("div", { className: "dim mono" }, "OPEN"),
