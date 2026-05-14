@@ -135,8 +135,6 @@
             "warmup_pct": 0.05
         }
     },
-    "freqaimodel": "TFTModel",
-    "freqaimodel_path": "user_data/freqaimodels",
     "telegram": {
         "enabled": false,
         "token": "",

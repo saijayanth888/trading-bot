@@ -2330,9 +2330,16 @@ async def stocks_status():
         degraded_reasons.append("alpaca snapshot missing — run `python -m wheel.cli snapshot`")
     elif alpaca["age_seconds"] > DAILY_STALE_S:
         degraded_reasons.append(f"alpaca snapshot stale ({alpaca['age_seconds']}s old)")
+    # NYSE-aware stale check: the shark intraday cache is refreshed by the
+    # market_open / pre_execute crons that ONLY run during the regular
+    # session (09:30-16:00 ET). After-hours / weekends / holidays the
+    # cache is the last-session snapshot — flagging it "stale" misleads
+    # the operator into chasing a non-issue. Only enforce the 4 h
+    # threshold while NYSE is in the regular session.
+    _nyse_open_now = _is_nyse_open_now()
     if shark["age_seconds"] is None:
         degraded_reasons.append("shark dashboard data missing")
-    elif shark["age_seconds"] > INTRADAY_STALE_S:
+    elif _nyse_open_now and shark["age_seconds"] > INTRADAY_STALE_S:
         degraded_reasons.append(
             f"shark intraday stale: generated_at={shark_gen_iso} "
             f"({shark['age_seconds']}s ago > {INTRADAY_STALE_S}s)"
@@ -2797,7 +2804,7 @@ async def gates():
         if meta_conf is None and _meta_row.get("confidence") is not None:
             meta_conf = float(_meta_row["confidence"])
 
-        gate_results = []
+        gate_results: list[dict[str, Any]] = []
 
         # 1. Pair capital allocation — we don't have per-pair weight here
         #    without parsing config.json; assume allowed (most operators set this once).
