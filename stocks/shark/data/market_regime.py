@@ -35,6 +35,10 @@ class MarketRegime(str, Enum):
 
 
 # Regime → trading rules
+# `min_risk_reward` added 2026-05-14 (stagnant-config audit Wave 1.3) —
+# previously hardcoded as 2.0 in three duplicated module constants.
+# Volatile regimes demand more cushion; bear regimes don't allow new
+# longs at all so the value is academic but kept consistent.
 REGIME_RULES: dict[str, dict[str, Any]] = {
     MarketRegime.BULL_QUIET: {
         "new_trades_allowed": True,
@@ -42,6 +46,7 @@ REGIME_RULES: dict[str, dict[str, Any]] = {
         "max_new_trades_per_day": 3,
         "stop_width_multiplier": 1.0,
         "confidence_threshold": 0.65,
+        "min_risk_reward": 2.0,
         "description": "Trending up, low vol — full aggression",
     },
     MarketRegime.BULL_VOLATILE: {
@@ -50,6 +55,7 @@ REGIME_RULES: dict[str, dict[str, Any]] = {
         "max_new_trades_per_day": 2,
         "stop_width_multiplier": 1.3,
         "confidence_threshold": 0.75,
+        "min_risk_reward": 2.5,
         "description": "Trending up, high vol — half size, wider stops",
     },
     MarketRegime.BEAR_QUIET: {
@@ -58,6 +64,7 @@ REGIME_RULES: dict[str, dict[str, Any]] = {
         "max_new_trades_per_day": 0,
         "stop_width_multiplier": 1.0,
         "confidence_threshold": 1.0,
+        "min_risk_reward": 3.0,
         "description": "Trending down, low vol — NO new longs, manage exits",
     },
     MarketRegime.BEAR_VOLATILE: {
@@ -66,6 +73,7 @@ REGIME_RULES: dict[str, dict[str, Any]] = {
         "max_new_trades_per_day": 0,
         "stop_width_multiplier": 0.8,
         "confidence_threshold": 1.0,
+        "min_risk_reward": 3.0,
         "description": "Trending down, high vol — DEFENSE MODE, tighten everything",
     },
     MarketRegime.UNKNOWN: {
@@ -74,6 +82,7 @@ REGIME_RULES: dict[str, dict[str, Any]] = {
         "max_new_trades_per_day": 1,
         "stop_width_multiplier": 1.2,
         "confidence_threshold": 0.80,
+        "min_risk_reward": 2.2,
         "description": "Cannot determine regime — conservative defaults",
     },
 }

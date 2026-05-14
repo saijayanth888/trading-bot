@@ -11,9 +11,13 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from shark.risk_floors import min_confidence
+
 logger = logging.getLogger(__name__)
 
-_MIN_CONFIDENCE = 0.70
+# Risk floors moved to shark.risk_floors (single source of truth, 2026-05-14
+# stagnant-config audit Wave 1.3). Signal-generator doesn't yet receive
+# regime_rules; the helper falls back to the conservative default (0.70).
 
 
 def generate_signal(
@@ -45,12 +49,13 @@ def generate_signal(
         )
         return None
 
-    if confidence < _MIN_CONFIDENCE:
+    _conf_floor = min_confidence()
+    if confidence < _conf_floor:
         logger.debug(
             "Signal suppressed for %s — confidence %.2f below %.2f threshold.",
             symbol,
             confidence,
-            _MIN_CONFIDENCE,
+            _conf_floor,
         )
         return None
 

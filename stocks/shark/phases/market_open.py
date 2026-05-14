@@ -9,7 +9,8 @@ from pathlib import Path
 from shark.data.alpaca_data import get_account, get_positions, get_bars
 from shark.data.technical import compute_indicators
 from shark.data.perplexity import fetch_market_intel
-from shark.data.market_regime import detect_regime
+from shark.data.market_regime import detect_regime, get_regime_rules
+from shark.risk_floors import min_confidence, min_risk_reward, min_risk_reward_tol
 from shark.data.relative_strength import compute_relative_strength
 from shark.data.macro_calendar import check_macro_calendar
 from shark.data.watchlist import get_ticker_sector, SECTOR_ETFS
@@ -37,11 +38,12 @@ _DECISIONS_FILE = Path(_REPO_ROOT) / "memory" / "market-open-decisions.json"
 MAX_TRADES_PER_RUN = 3
 _EARNINGS_BLOCK_DAYS = 2
 
-# Server-side hard floors — duplicate the rules in routines/market-open.md
-# so a misbehaving LLM cannot place sub-quality trades.
-_MIN_CONFIDENCE = 0.70
-_MIN_RISK_REWARD = 2.0          # claimed by LLM
-_MIN_RISK_REWARD_TOL = 1.8      # derived from stop/target/entry, small tolerance
+# Server-side hard floors moved to shark/risk_floors.py 2026-05-14
+# (stagnant-config audit Wave 1.3). The values used to live as duplicated
+# module-level constants here, in agents/decision_arbiter.py, and in
+# signals/generator.py — change-one-forget-the-others drift bait. The
+# helpers are regime-aware: pass regime_rules at the call site to get the
+# tighter floor in volatile / bear markets.
 
 # Stocks TFT inference gate — a trained model votes UP/FLAT/DOWN on the
 # candidate. We veto BUYs the model disagrees with above the confidence
@@ -682,6 +684,10 @@ def _execute(dry_run: bool = False) -> bool:
 
     candidate_map = {c["symbol"]: c for c in analysis_data.get("candidates", [])}
     regime_str = analysis_data.get("regime", "UNKNOWN")
+    # Regime-aware floor resolution (Wave 1.3) — the helpers below read
+    # confidence_threshold + min_risk_reward from this dict, so the floor
+    # ladders 0.65 / 2.0 (quiet) → 0.75 / 2.5 (volatile) → 1.0 / 3.0 (bear).
+    _regime_rules = get_regime_rules(regime_str)
     weekly_count = state.get_weekly_trade_count()
     max_trades = analysis_data.get("max_trades_remaining", MAX_TRADES_PER_RUN)
     symbols_traded: list[str] = []
@@ -705,18 +711,22 @@ def _execute(dry_run: bool = False) -> bool:
             continue
 
         # === Server-side hard rules (defense-in-depth, see Bug B + F) ===
+        # Floors regime-aware — see shark.risk_floors. Pre-2026-05-14 these
+        # were hardcoded 0.70 / 2.0; now they ladder per regime.
+        _conf_floor = min_confidence(_regime_rules)
+        _rr_floor = min_risk_reward(_regime_rules)
         confidence = float(dec.get("confidence", 0) or 0)
         claimed_rr = float(dec.get("risk_reward_ratio", 0) or 0)
-        if confidence < _MIN_CONFIDENCE:
+        if confidence < _conf_floor:
             logger.info(
-                "%s rejected — confidence %.2f < %.2f floor",
-                symbol, confidence, _MIN_CONFIDENCE,
+                "%s rejected — confidence %.2f < %.2f floor (regime=%s)",
+                symbol, confidence, _conf_floor, regime_str,
             )
             continue
-        if claimed_rr < _MIN_RISK_REWARD:
+        if claimed_rr < _rr_floor:
             logger.info(
-                "%s rejected — claimed R:R %.2f < %.2f floor",
-                symbol, claimed_rr, _MIN_RISK_REWARD,
+                "%s rejected — claimed R:R %.2f < %.2f floor (regime=%s)",
+                symbol, claimed_rr, _rr_floor, regime_str,
             )
             continue
 
@@ -735,11 +745,12 @@ def _execute(dry_run: bool = False) -> bool:
                 symbol, current_price, llm_stop, llm_target,
             )
             continue
-        if derived_rr < _MIN_RISK_REWARD_TOL:
+        _rr_tol = min_risk_reward_tol(_regime_rules)
+        if derived_rr < _rr_tol:
             logger.info(
-                "%s rejected — derived R:R %.2f < %.2f tolerance "
+                "%s rejected — derived R:R %.2f < %.2f tolerance (regime=%s) "
                 "(LLM claimed %.2f; entry=%.2f stop=%.2f target=%.2f)",
-                symbol, derived_rr, _MIN_RISK_REWARD_TOL,
+                symbol, derived_rr, _rr_tol, regime_str,
                 claimed_rr, current_price, float(llm_stop), float(llm_target),
             )
             continue

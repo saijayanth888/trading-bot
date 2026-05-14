@@ -17,11 +17,16 @@ except ImportError:
 
 from shark.config import get_settings
 from shark.llm.client import chat_json
+from shark.risk_floors import min_confidence, min_risk_reward
 
 logger = logging.getLogger(__name__)
 
-_MIN_CONFIDENCE = 0.70
-_MIN_RISK_REWARD = 2.0
+# Risk floors moved to shark.risk_floors (single source of truth, 2026-05-14
+# stagnant-config audit Wave 1.3). The decision_arbiter does not yet
+# receive regime context at the call site below; the helpers fall back
+# to the conservative default (0.70 / 2.0) when regime_rules is None.
+# Wave 2 follow-up: thread regime_rules into the arbiter call chain so
+# the floor ladders per regime here too.
 
 
 def make_decision(
@@ -157,18 +162,20 @@ Rules:
 
         result["confidence"] = max(0.0, min(1.0, float(result["confidence"])))
 
-        # Enforce confidence threshold
-        if result["confidence"] < _MIN_CONFIDENCE and result["decision"] == "BUY":
+        # Enforce confidence threshold (default 0.70; regime-aware floor
+        # not yet threaded into this call — see Wave 2 follow-up note above).
+        _conf_floor = min_confidence()
+        if result["confidence"] < _conf_floor and result["decision"] == "BUY":
             logger.info(
                 "Decision for %s downgraded from BUY to NO_TRADE — confidence %.2f < %.2f",
                 symbol,
                 result["confidence"],
-                _MIN_CONFIDENCE,
+                _conf_floor,
             )
             result["decision"] = "NO_TRADE"
             result["reasoning"] += (
                 f" Confidence {result['confidence']:.0%} below required threshold of "
-                f"{_MIN_CONFIDENCE:.0%}."
+                f"{_conf_floor:.0%}."
             )
 
         logger.info(
