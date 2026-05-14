@@ -33,12 +33,16 @@ console.
 The stack went through a major architectural cutover on **2026-05-13**:
 the legacy `freqtrade` container was retired and replaced by `quanta_core`
 (V4) — a from-scratch async Python engine with explicit ledger writes,
-ownership-aware strategies, and a paper-fill simulator. Freqtrade's image
-is retained on disk for ≤ 30-second rollback, but no code path imports it.
+ownership-aware strategies, and a paper-fill simulator. Phases 4–7
+(2026-05-13 → 2026-05-14) deleted the freqtrade folder, repointed paths,
+removed dashboard imports of `freqaimodels`, and swapped the dashboard's
+crypto entry-gate matrix from the V3 FreqAI columns (`model_freshness`,
+`tft_confidence`, …) to the V4 strategy gates (`mr_dip`, `tf_break`,
+`tf_aligned`, …) that MeanRevBB + TrendFollow actually evaluate.
 
-This README reflects the **post-cutover** architecture. For the pre-cutover
-freqtrade-era version, check `git tag pre-spa-cutover` or the design doc at
-`docs/V4_SHADOW_MODE_DESIGN.md`.
+This README reflects the **post-cutover, post-cleanup** architecture as of
+**2026-05-14**. For the pre-cutover freqtrade-era version, check
+`git tag pre-spa-cutover` or `docs/V4_SHADOW_MODE_DESIGN.md`.
 
 ---
 
@@ -120,6 +124,83 @@ freqtrade-era version, check `git tag pre-spa-cutover` or the design doc at
 ```
 
 ---
+
+## System architecture (Mermaid)
+
+A higher-fidelity view of the same diagram above — every box is a real
+process, every arrow is a real read/write path:
+
+```mermaid
+flowchart TB
+  classDef container fill:#0b1220,stroke:#7c5cff,color:#e7e9ee,stroke-width:1.5px
+  classDef cron      fill:#10142a,stroke:#22c55e,color:#e7e9ee
+  classDef store     fill:#0a1015,stroke:#f59e0b,color:#e7e9ee
+  classDef ext       fill:#1a0f0a,stroke:#ef4444,color:#e7e9ee
+
+  Operator(("Operator browser<br/>http://localhost:8081"))
+
+  subgraph Frontend [SPA · React 18]
+    OpsPage["/ops — operations console"]
+    PairPage["/ — per-pair drill"]
+    DocsPage["/docs — glossary"]
+  end
+
+  subgraph Dashboard [dashboard container · FastAPI]
+    OpsAPI["/api/ops/* — 35 routes<br/>combined_portfolio · gates ·<br/>market_hours · flash_status ·<br/>stocks · training_health · …"]
+    V4API["/api/v4/* — V4 trade tape<br/>positions · trades · fills"]
+    StateAPI["/api/state · /api/candles · /api/mode"]
+  end
+
+  subgraph QuantaCore [quanta-core container · 5-min poll]
+    Cycle{"Cycle<br/>(every 5 min)"}
+    Strats["MeanRevBB + TrendFollow<br/>ownership-scoped per strategy"]
+    PaperFill["Paper-fill simulator<br/>fills t-5 proposals at this cycle's close"]
+    RegimeJob["Hourly HMM regime<br/>BTC 1h × 30d → regime_log"]
+  end
+
+  subgraph Postgres [tradebot-postgres · TimescaleDB]
+    PubSchema[("public.*<br/>trade_journal · regime_log ·<br/>sentiment_log · equity_snapshots ·<br/>classifier_log · meta_signal_log")]
+    QSchema[("quanta_schema.*<br/>run_state · proposals · orders ·<br/>fills · decisions")]
+  end
+
+  subgraph Hermes [Hermes user-systemd · 31 cron jobs]
+    SentRefresh["sentiment_refresh<br/>(15 min)"]
+    WheelCrons["wheel_snapshot / sell_csps /<br/>sell_calls / profit_take"]
+    SharkCrons["shark pre-market / market_open /<br/>midday / EOD / daily_summary"]
+    MFCrons["modelforge ingest / curate /<br/>nightly_reflector"]
+  end
+
+  subgraph Externals [Outside the box]
+    Coinbase["Coinbase public REST<br/>(crypto candles)"]
+    Alpaca["Alpaca paper API<br/>(stocks + options)"]
+    Ollama["Ollama (host systemd)<br/>hermes3:8b · hermes3:70b · qwen3:30b"]
+    Perplexity["Perplexity API<br/>(optional sentiment side-channel)"]
+  end
+
+  Operator --> Frontend
+  Frontend --> OpsAPI & V4API & StateAPI
+
+  OpsAPI -.reads.-> PubSchema & QSchema
+  V4API  -.reads.-> QSchema
+  StateAPI -.reads.-> PubSchema & QSchema
+
+  Cycle --> Strats --> PaperFill --> QSchema
+  Cycle --> PubSchema
+  RegimeJob --> PubSchema
+  Cycle -.candles.-> Coinbase
+
+  SentRefresh --> Ollama --> PubSchema
+  WheelCrons  --> Alpaca
+  SharkCrons  --> Ollama
+  SharkCrons  -.briefing.-> Perplexity
+  MFCrons     --> Ollama
+  WheelCrons  --> PubSchema
+
+  class Dashboard,QuantaCore container
+  class Hermes cron
+  class Postgres store
+  class Externals ext
+```
 
 ## Architecture
 
@@ -254,6 +335,147 @@ counted in `quanta_schema` aggregate → strategy sees it next cycle and
 may emit `SELL` exit → SELL proposed → next cycle paper-filled →
 trade_journal row closed with `pnl`, `pnl_pct`, `duration_min`.
 
+### Trade lifecycle — sequence view
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant Op as Operator
+  participant Run as quanta-core cycle
+  participant Strat as MeanRevBB
+  participant DB as quanta_schema
+  participant Jour as trade_journal
+  participant Dash as Dashboard
+  participant Brow as Browser
+
+  Note over Run: t = 0 (cycle N)
+  Run->>DB: SELECT paused FROM run_state
+  DB-->>Run: paused=false
+  Run->>DB: fill_pending_proposals()
+  Note right of DB: prior-cycle BUY (if any) → fills row + position aggregate
+  Run->>Strat: load_positions(strategy='mean_rev_bb')
+  Strat-->>Run: own positions only
+  Run->>Strat: evaluate(candles)
+  Strat-->>Run: BUY @ close (BBlower touch)
+  Run->>DB: INSERT decision + proposal
+  Run->>Jour: INSERT open row
+
+  Note over Run: t = +5 min (cycle N+1)
+  Run->>DB: fill_pending_proposals()
+  Note right of DB: cycle-N BUY → mark FILLED + write fills row
+  Run->>Strat: evaluate
+  Strat-->>Run: still LONG · FLAT this cycle
+
+  Note over Run: t = +k×5 min (some cycle later)
+  Run->>Strat: evaluate
+  Strat-->>Run: SELL @ close (BBmid recovery)
+  Run->>DB: INSERT decision + proposal (SELL)
+  Run->>Jour: UPDATE close + pnl / pnl_pct / duration_min
+
+  Brow->>Dash: GET /api/ops/flash_status
+  Dash->>DB: SELECT engine + open_positions + last_fill
+  Dash->>Jour: SELECT realized today
+  Dash-->>Brow: {engine: quanta_core, open: 3, last_fill: BUY XRP 5min ago}
+```
+
+### V4 entry-gate evaluation (per pair, every cycle)
+
+The dashboard's `/api/ops/gates` endpoint exposes the same per-pair gate
+matrix the strategies internally evaluate. Post-cutover the V3 FreqAI
+gates were swapped for V4 strategy conditions:
+
+```mermaid
+flowchart LR
+  classDef pass fill:#0e2014,stroke:#22c55e,color:#cdf3d8
+  classDef fail fill:#220e0e,stroke:#ef4444,color:#fbcccc
+  classDef gate fill:#10142a,stroke:#7c5cff,color:#e7e9ee
+
+  Start([Pair × cycle]) --> G1
+  G1{{"capital_allocation<br/>weight > 0 ?"}}:::gate
+  G1 -- yes --> G2
+  G1 -- no  --> Block1[/BENCHED/]:::fail
+
+  G2{{"regime<br/>∈ {trending_up, mean_reverting, …}<br/>for ≥1 strategy ?"}}:::gate
+  G2 -- yes --> G3 & G4
+  G2 -- no  --> Block2[/Regime blocked/]:::fail
+
+  G3{{"mr_dip<br/>close < lower_bb ?"}}:::gate
+  G4{{"tf_break + tf_aligned<br/>close > short_ma > long_ma ?"}}:::gate
+
+  G3 -- yes --> G5
+  G4 -- yes --> G5
+
+  G5{{"account_capacity<br/>open_count < max_open<br/>AND not paused ?"}}:::gate
+  G5 -- yes --> Fire[BUY proposal queued]:::pass
+  G5 -- no  --> Block3[/Capacity full/]:::fail
+
+  G3 -- no  --> Wait1[mr: waiting for dip]:::fail
+  G4 -- no  --> Wait2[tf: waiting for break/alignment]:::fail
+```
+
+Each gate row in the UI carries a concrete WHY string with prices:
+`mr: close $79,732 ≥ lower_bb $79,383 · tf: short_ma $79,724 ≤ long_ma $79,881`.
+
+### NYSE session state machine
+
+Because stocks phases gate on regular-session hours but crypto runs 24/7,
+the dashboard surfaces a venue-aware NYSE pill so the operator never
+mistakes the 24/7 engine pill for "stocks are trading":
+
+```mermaid
+stateDiagram-v2
+  [*] --> CLOSED
+  CLOSED --> EXT: 04:00 ET (pre-market)
+  EXT    --> OPEN: 09:30 ET
+  OPEN   --> EXT: 16:00 ET (after-hours)
+  EXT    --> CLOSED: 20:00 ET
+  CLOSED --> CLOSED: weekend / holiday
+
+  note right of OPEN
+    NYSE OPEN (green pulse)
+    · shark phases active
+    · wheel snapshot refreshes
+    · intraday stale-check enforced
+  end note
+
+  note right of EXT
+    NYSE EXT-HRS (amber)
+    · stocks phases idle
+    · intraday stale-check skipped
+    · existing CSPs/CCs unchanged
+  end note
+
+  note left of CLOSED
+    NYSE CLOSED (red)
+    · stocks phases idle
+    · cache = last-session snapshot
+  end note
+```
+
+### Dashboard surfaces (route → consumer card)
+
+```mermaid
+flowchart LR
+  classDef route fill:#10142a,stroke:#7c5cff,color:#e7e9ee
+  classDef card  fill:#0b1220,stroke:#22c55e,color:#cdf3d8
+
+  R1["/api/ops/combined_portfolio"]:::route --> C1["Topbar EQUITY · Scoreboard"]:::card
+  R2["/api/ops/flash_status"]:::route       --> C2["Scoreboard flash row<br/>(engine pill + open + last fill)"]:::card
+  R3["/api/ops/market_hours"]:::route       --> C3["NYSE pill (topbar + scoreboard)"]:::card
+  R4["/api/ops/gates"]:::route              --> C4["BlockerBanner + EntryGatesLive matrix"]:::card
+  R5["/api/ops/regime"]:::route             --> C5["Market context · regime"]:::card
+  R6["/api/ops/sentiment"]:::route          --> C6["Market context · sentiment"]:::card
+  R7["/api/ops/stocks"]:::route             --> C7["Stocks · Wheel + Shark<br/>(NYSE-aware stale check)"]:::card
+  R8["/api/ops/stocks_sparklines"]:::route  --> C8["Stocks pair telemetry"]:::card
+  R9["/api/ops/stocks_ml"]:::route          --> C9["Stocks · Shark TFT"]:::card
+  R10["/api/ops/services"]:::route          --> C10["Engine pill · heartbeat dot"]:::card
+  R11["/api/ops/training_health"]:::route   --> C11["TFT health (retired — empty-state)"]:::card
+  R12["/api/ops/circuit_breakers"]:::route  --> C12["Service breakers panel"]:::card
+  R13["/api/ops/shark_override_health"]:::route --> C13["Override stalled/healthy pill"]:::card
+  R14["/api/state"]:::route                 --> C14["Model view · meta-agent"]:::card
+  R15["/api/candles/{base}/{quote}"]:::route --> C15["Per-pair candle chart"]:::card
+```
+
 ---
 
 ## Bootstrapping
@@ -358,9 +580,33 @@ trading-bot/
 
 ---
 
-## CHANGELOG (post-cutover, 2026-05-13)
+## CHANGELOG
 
-### Major architectural changes
+### 2026-05-14 — dashboard cleanup pass (post-cutover debt paydown)
+
+Two commits (`a4941c9`, `b6c7756`) finished scrubbing the dashboard of
+references to deleted freqtrade surfaces. After this pass, 20/21
+`/api/ops/*` endpoints return `status=ok` (the 1 remaining `degraded`
+is legitimate Shark "override stalled" signal — BEAR_VOLATILE regime
+killing all candidates, not a bug).
+
+| Area | Before | After |
+|---|---|---|
+| `/api/ops/training_health` | `status=down · "No module named 'freqaimodels'"` | `status=ok` with empty pairs |
+| `/api/ops/gates` (crypto) | Returned V3 FreqAI gates (`model_freshness`, `tft_confidence`, `up_prob_threshold`, …) — all failing because `pair_dictionary.json` is gone | Returns V4 strategy gates (`mr_dip`, `tf_break`, `tf_aligned`, …) that MeanRevBB + TrendFollow actually evaluate; V3 set preserved under `v3_gates` for legacy callers |
+| `/api/ops/stocks` after-hours | `degraded · "shark intraday stale: 17627s > 14400s"` whenever NYSE closed | NYSE-aware: stale check only enforced during regular session |
+| Dashboard topbar (stocks venue) | Green "PAPER · DRY-RUN" pill always — operator misread as "stocks are trading" | Adds venue-aware **NYSE OPEN / EXT-HRS / CLOSED** pill |
+| Ops scoreboard flash row | `QUANTA_CORE · LIVE` green-pulsing, no market context | Adds NYSE pill next to the engine pill |
+| TFT model-health card empty-state copy | "bot is still in warm-up" | "FreqAI TFT retired post-cutover · quanta-core training-health producer not yet wired (Wave D)" |
+| Blocker banner | `🚦 14/27 pairs blocked · 12/27 on model_freshness · …` (misleading) | `🚦 14/27 pairs blocked · 12/27 on mr_dip · 11/27 on tf_aligned · …` (truth) |
+| Dead config keys | `freqaimodel` + `freqaimodel_path` in `config.json` + `config.backtest_blind.json` | Stripped |
+
+Cache-bust bumped to `v4-cutover-019-cleanup`. Verified live via
+Playwright (see commit messages for the verification commands).
+
+### 2026-05-13 — V4 cutover
+
+#### Major architectural changes
 
 - **V4 cutover** — `freqtrade` retired (image retained for rollback);
   `quanta-core` container running `scripts/run_v4_shadow.py` is the
@@ -473,6 +719,7 @@ PYTHONPATH=. python3 -m pytest tests/observability/ -v
 
 ## Honest open items
 
+### Engine & strategy (substantive)
 1. **No real Coinbase order placement.** Paper-fill simulator stays
    until the V4 ExecutionEngine + WebSocket streams land. See
    `docs/POST-CUTOVER-AUDIT-2026-05-13.md` Track D.
@@ -487,6 +734,24 @@ PYTHONPATH=. python3 -m pytest tests/observability/ -v
    2026-05-13. A periodic reconciler (`wheel_snapshot` cron syncing
    `positions.json` against `Alpaca.get_all_positions()`) is
    recommended next.
+5. **No quanta-core training-health producer.** Wave D — a stocks-side
+   `Stocks · Shark TFT` card exists and works; the crypto-side
+   `/api/ops/training_health` endpoint returns empty pairs gracefully
+   but won't show useful per-pair model freshness until quanta-core
+   starts writing artifact-validity records to a successor of
+   `pair_dictionary.json`.
+
+### Dashboard cleanup debt (cosmetic, no runtime impact)
+- `TrainingCardLive` + `TrainingHealthLive` React components still
+  exist in `ops_spa.js` as dead code (~3 KB) — not mounted, but a
+  future cleanup pass should delete them outright.
+- `ops_routes.py:1698` still references `freqtrade.log` in the
+  explainability endpoint; the file doesn't exist post-cutover and
+  the read is guarded by `if log_path.exists()` so it's a silent
+  no-op — but the comment block deserves a refresh.
+- `frontend-v4/` SPA is untouched and additive (operator preference
+  per `[[v4-is-additive]]`). When you revisit it, the legacy
+  `/dashboard_spa` and `/ops` remain the active surfaces.
 
 See `docs/POST-CUTOVER-AUDIT-2026-05-13.md` for the full ranked
 backlog from the 4-agent post-cutover audit.

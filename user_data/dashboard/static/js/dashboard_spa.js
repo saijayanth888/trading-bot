@@ -210,22 +210,38 @@
         // trading — they're not (cron phases gate on NYSE hours).
         (venue === "stocks" ? (function() {
           const mh = envelopeData(marketHours) || {};
-          if (mh.is_open == null) {
+          if (mh.is_open == null && mh.session == null) {
             return h("span", { className: "pill", title: "loading market hours" },
               h("span", { className: "dot dim" }), " NYSE —");
           }
-          const isOpen = !!mh.is_open;
-          const isExt = !!mh.is_extended;
-          const cls = isOpen ? "up" : isExt ? "warn" : "down";
-          const txt = isOpen ? "NYSE OPEN" : isExt ? "NYSE EXT-HRS" : "NYSE CLOSED";
-          const title = isOpen
-            ? "NYSE regular session"
-            : isExt
-              ? "NYSE extended hours (pre-mkt 04:00-09:30 or after-hrs 16:00-20:00 ET) — stocks phases idle"
-              : "NYSE closed — stocks phases idle until " + (mh.next_open_utc || "next session");
-          return h("span", { className: "pill " + cls, title },
-            h("span", { className: "dot " + cls + (isOpen ? " pulse" : "") }),
-            " ", txt);
+          // Granular labels match the canonical NYSE schedule:
+          //   regular     09:30-16:00 ET → "NYSE OPEN" (green, pulse)
+          //   pre_market  06:30-09:30 ET → "NYSE PRE-MKT" (amber, pulse)
+          //   after_hours 16:00-20:00 ET → "NYSE AFT-HRS" (amber)
+          //   broker_pre  04:00-06:30 ET → "BROKER EXT" (amber, dim)
+          //   closed                     → "NYSE CLOSED" (down)
+          const session = mh.session || (mh.is_open ? "regular"
+            : mh.is_pre_market ? "pre_market"
+            : mh.is_after_hours ? "after_hours"
+            : mh.is_broker_pre ? "broker_pre"
+            : mh.is_extended ? "after_hours" : "closed");
+          const map = {
+            regular:     { cls: "up",   txt: "NYSE OPEN",    pulse: true,
+                           title: "NYSE regular session (09:30-16:00 ET) — stocks phases active" },
+            pre_market:  { cls: "warn", txt: "NYSE PRE-MKT", pulse: true,
+                           title: "NYSE pre-opening (06:30-09:30 ET) — limited liquidity; most phases idle" },
+            after_hours: { cls: "warn", txt: "NYSE AFT-HRS", pulse: false,
+                           title: "NYSE after-hours (16:00-20:00 ET) — stocks phases idle until next session" },
+            broker_pre:  { cls: "info", txt: "BROKER EXT",   pulse: false,
+                           title: "Broker extended-hours window (04:00-06:30 ET) — NYSE pre-opening not yet" },
+            closed:      { cls: "down", txt: "NYSE CLOSED",  pulse: false,
+                           title: "NYSE closed — next open " + (mh.next_open_utc || "next session")
+                                  + (mh.holiday_note ? " · " + mh.holiday_note : "") },
+          };
+          const m = map[session] || map.closed;
+          return h("span", { className: "pill " + m.cls, title: m.title },
+            h("span", { className: "dot " + m.cls + (m.pulse ? " pulse" : "") }),
+            " ", m.txt);
         })() : null)
       ),
       h("div", { className: "tb-divider" }),

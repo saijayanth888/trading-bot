@@ -3210,24 +3210,57 @@ async def gates():
     })
 
 
+# NYSE / Nasdaq full-day holiday closures for 2026. Source: NYSE official
+# 2026 trading-calendar. When the official holiday falls on a weekend the
+# observed close shifts to the adjacent weekday per US-federal-holiday rule
+# (Sat → Fri; Sun → Mon). Half-days (early 13:00 ET close) are listed in
+# NYSE_EARLY_CLOSE_DATES below — those are NOT in this set.
+NYSE_FULL_DAY_HOLIDAYS_2026: set[str] = {
+    "2026-01-01",  # New Year's Day (Thu)
+    "2026-01-19",  # MLK Jr Day (Mon)
+    "2026-02-16",  # Presidents' Day (Mon)
+    "2026-04-03",  # Good Friday
+    "2026-05-25",  # Memorial Day (Mon)
+    "2026-06-19",  # Juneteenth (Fri)
+    "2026-07-03",  # Independence Day observed (Jul 4 is Sat → close Fri 7/3)
+    "2026-09-07",  # Labor Day (Mon)
+    "2026-11-26",  # Thanksgiving (Thu)
+    "2026-12-25",  # Christmas (Fri)
+}
+
+# Half-day (early 13:00 ET close) calendar. Used to surface "early close"
+# in the holiday_note so the operator knows the schedule deviates.
+NYSE_EARLY_CLOSE_DATES_2026: dict[str, str] = {
+    "2026-11-27": "Day after Thanksgiving — early close 13:00 ET",
+    "2026-12-24": "Christmas Eve — early close 13:00 ET",
+}
+
+
 @router.get("/market_hours")
 async def market_hours():
     """NYSE / US-equities session state for the dashboard.
 
-    Markets are M-F 09:30-16:00 America/New_York. Crypto charts run 24/7;
-    stocks are paused 17/24 of each weekday plus all weekends. The dashboard
-    uses this to show "🔒 NYSE closed · reopens Monday 09:30 ET" instead of
-    a stale chart that looks broken.
+    Hours match the canonical NYSE specification:
+      Pre-Opening Session: 06:30-09:30 ET   (broker extended typically starts at 04:00)
+      Core Trading:        09:30-16:00 ET
+      After-Hours:         16:00-20:00 ET
+      Closed:              all other times + weekends + holidays
 
-    No external dependency on `pandas_market_calendars` (which would add
-    holiday awareness). Returns:
-        is_open:           bool
-        is_extended:       bool   (premarket 04:00-09:30 or after-hours 16:00-20:00)
+    Returns:
+        is_open:           bool   (core 09:30-16:00 ET weekday, not holiday)
+        is_extended:       bool   (pre-market OR after-hours; kept for back-compat)
+        is_pre_market:     bool   (06:30-09:30 ET — NYSE official pre-opening)
+        is_after_hours:    bool   (16:00-20:00 ET — NYSE official late-session)
+        is_broker_pre:     bool   (04:00-06:30 ET — Alpaca/IBKR ext window only)
+        session:           "regular" | "pre_market" | "after_hours" | "broker_pre" | "closed"
         last_close_utc:    ISO    (UTC)
-        next_open_utc:     ISO    (UTC)
+        next_open_utc:     ISO    (UTC) — next 09:30 ET that isn't a holiday/weekend
         next_close_utc:    ISO    (UTC)
         now_et:            string in ET for display
-        holiday_note:      None for now (TODO: NYSE holiday feed)
+        weekday:           "Mon" .. "Sun"
+        holiday_note:      string if today/upcoming is a holiday or early-close; else None
+
+    Crypto charts run 24/7 regardless of this payload.
     """
     from datetime import datetime, time, timedelta, timezone
     try:
@@ -3242,56 +3275,108 @@ async def market_hours():
 
     REG_OPEN = time(9, 30)
     REG_CLOSE = time(16, 0)
-    EXT_OPEN = time(4, 0)
-    EXT_CLOSE = time(20, 0)
+    # NYSE official pre-opening + after-hours per their published schedule.
+    # Broker extended typically starts at 04:00 (Alpaca / IBKR); we surface
+    # that separately as `is_broker_pre` so the operator knows when their
+    # broker-extended window is alive vs the NYSE-official pre-opening.
+    PRE_OPEN = time(6, 30)
+    AFT_CLOSE = time(20, 0)
+    BROKER_EXT_OPEN = time(4, 0)
 
     weekday = now_et.weekday()  # 0=Mon..6=Sun
     is_weekday = weekday < 5
     cur_t = now_et.time()
-    is_open = is_weekday and (REG_OPEN <= cur_t < REG_CLOSE)
-    is_extended = is_weekday and (
-        (EXT_OPEN <= cur_t < REG_OPEN) or (REG_CLOSE <= cur_t < EXT_CLOSE)
-    ) and not is_open
+    today_iso = now_et.strftime("%Y-%m-%d")
+    is_full_holiday = today_iso in NYSE_FULL_DAY_HOLIDAYS_2026
+    is_early_close = today_iso in NYSE_EARLY_CLOSE_DATES_2026
+    is_tradable_day = is_weekday and not is_full_holiday
 
-    # Compute last-close: most recent weekday at 16:00 ET that has already passed
-    def _last_weekday_at(target: datetime, t: time) -> datetime:
+    # Half-day adjustment — when the NYSE closes early at 13:00 the core
+    # session ends at 13:00 ET, after-hours runs 13:00-17:00 ET (per the
+    # NYSE half-day spec).
+    if is_early_close:
+        eff_close = time(13, 0)
+        eff_aft_close = time(17, 0)
+    else:
+        eff_close = REG_CLOSE
+        eff_aft_close = AFT_CLOSE
+
+    is_open = is_tradable_day and (REG_OPEN <= cur_t < eff_close)
+    is_pre_market = is_tradable_day and (PRE_OPEN <= cur_t < REG_OPEN)
+    is_after_hours = is_tradable_day and (eff_close <= cur_t < eff_aft_close)
+    is_broker_pre = is_tradable_day and (BROKER_EXT_OPEN <= cur_t < PRE_OPEN)
+    is_extended = is_pre_market or is_after_hours or is_broker_pre
+
+    if is_open:
+        session = "regular"
+    elif is_pre_market:
+        session = "pre_market"
+    elif is_after_hours:
+        session = "after_hours"
+    elif is_broker_pre:
+        session = "broker_pre"
+    else:
+        session = "closed"
+
+    # Holiday-aware weekday roller — skips weekends AND full-day holidays.
+    def _is_tradable(d: datetime) -> bool:
+        return d.weekday() < 5 and d.strftime("%Y-%m-%d") not in NYSE_FULL_DAY_HOLIDAYS_2026
+
+    # Compute last-close: most recent tradable day at REG_CLOSE that has already passed
+    def _last_tradable_at(target: datetime, t: time) -> datetime:
         candidate = target.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
         if candidate > target:
             candidate -= timedelta(days=1)
-        while candidate.weekday() >= 5:  # roll back through weekend
+        while not _is_tradable(candidate):
             candidate -= timedelta(days=1)
         return candidate
 
-    last_close_et = _last_weekday_at(now_et, REG_CLOSE)
-
-    # Compute next open/close
-    def _next_weekday_at(target: datetime, t: time) -> datetime:
+    def _next_tradable_at(target: datetime, t: time) -> datetime:
         candidate = target.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
         if candidate <= target:
             candidate += timedelta(days=1)
-        while candidate.weekday() >= 5:
+        while not _is_tradable(candidate):
             candidate += timedelta(days=1)
         return candidate
 
+    last_close_et = _last_tradable_at(now_et, REG_CLOSE)
     if is_open:
-        next_close_et = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        next_close_et = now_et.replace(hour=eff_close.hour, minute=eff_close.minute, second=0, microsecond=0)
         if next_close_et <= now_et:
             next_close_et += timedelta(days=1)
-        # Next open after that day's close
-        next_open_et = _next_weekday_at(next_close_et, REG_OPEN)
+        next_open_et = _next_tradable_at(next_close_et, REG_OPEN)
     else:
-        next_open_et = _next_weekday_at(now_et, REG_OPEN)
-        next_close_et = next_open_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        next_open_et = _next_tradable_at(now_et, REG_OPEN)
+        next_close_et = next_open_et.replace(hour=REG_CLOSE.hour, minute=REG_CLOSE.minute, second=0, microsecond=0)
+
+    # Build operator-facing holiday note. Cover today AND next-tradable-day
+    # so the operator gets a heads-up the day before a half-day.
+    holiday_note: str | None = None
+    if is_full_holiday:
+        holiday_note = f"NYSE closed today ({today_iso}) — federal holiday"
+    elif is_early_close:
+        holiday_note = NYSE_EARLY_CLOSE_DATES_2026[today_iso]
+    else:
+        # Heads-up: is the next tradable session a half-day?
+        next_open_iso = next_open_et.strftime("%Y-%m-%d")
+        if next_open_iso in NYSE_EARLY_CLOSE_DATES_2026:
+            holiday_note = f"Next session ({next_open_iso}): {NYSE_EARLY_CLOSE_DATES_2026[next_open_iso]}"
+        elif next_open_iso in NYSE_FULL_DAY_HOLIDAYS_2026:
+            holiday_note = f"Next session pushed past holiday on {next_open_iso}"
 
     return _envelope("ok", data={
         "is_open": is_open,
         "is_extended": is_extended,
+        "is_pre_market": is_pre_market,
+        "is_after_hours": is_after_hours,
+        "is_broker_pre": is_broker_pre,
+        "session": session,
         "last_close_utc": last_close_et.astimezone(timezone.utc).isoformat(),
         "next_open_utc": next_open_et.astimezone(timezone.utc).isoformat(),
         "next_close_utc": next_close_et.astimezone(timezone.utc).isoformat(),
         "now_et": now_et.isoformat(timespec="seconds"),
         "weekday": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][weekday],
-        "holiday_note": None,
+        "holiday_note": holiday_note,
     })
 
 
