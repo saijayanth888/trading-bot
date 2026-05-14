@@ -124,42 +124,76 @@ def sentiment_latest() -> dict[str, Any] | None:
 
 
 def open_positions(limit: int = 50) -> list[dict[str, Any]]:
-    """All currently-open paper positions from trade_journal.
+    """All currently-open paper positions from trade_journal, mark-to-market.
 
     Shape matches what the dashboard `positions` payload expects:
     ``pair``, ``open_rate`` (= entry_price), ``stake_amount`` (= stake),
-    ``current_profit`` (None — would need a live price feed to compute),
+    ``current_profit`` (fractional return on entry price; positive = up),
+    ``mark_price``, ``mark_ts`` (mark observation timestamp, ISO),
     ``open_date`` (ISO timestamp), ``trade_id``, ``direction``.
+
+    C-5 (2026-05-14) fix — historically returned ``current_profit=None`` with
+    a comment "would need a live-quote join". quanta-core actually writes a
+    fresh execution price per symbol every cycle into ``quanta_schema.fills``
+    (joined to ``quanta_schema.proposals`` for the symbol). That row is the
+    best available mark price proxy in-DB — same engine, ~5 min cadence, no
+    external API hop. We compute ``(mark - entry) / entry`` as a **fraction**
+    so the rest of the codebase convention (display layer × 100) stays
+    consistent. Direction is honored — SHORT positions invert the sign.
     """
     if not _HAVE_PG:
         return []
     with _connect() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT trade_id, pair, direction, entry_price, stake,
-                   opened_at, external_id, regime
-            FROM trade_journal
-            WHERE closed_at IS NULL
-            ORDER BY opened_at DESC
+            WITH latest_mark AS (
+                SELECT DISTINCT ON (p.symbol)
+                       p.symbol AS pair,
+                       f.price  AS mark_price,
+                       f.ts     AS mark_ts
+                FROM quanta_schema.fills f
+                JOIN quanta_schema.proposals p
+                  ON p.client_order_id = f.client_order_id
+                ORDER BY p.symbol, f.ts DESC
+            )
+            SELECT j.trade_id, j.pair, j.direction, j.entry_price, j.stake,
+                   j.opened_at, j.external_id, j.regime,
+                   m.mark_price AS mark_price,
+                   m.mark_ts    AS mark_ts
+            FROM trade_journal j
+            LEFT JOIN latest_mark m ON m.pair = j.pair
+            WHERE j.closed_at IS NULL
+            ORDER BY j.opened_at DESC
             LIMIT %s
             """,
             (limit,),
         )
         rows = cur.fetchall()
-        return [
-            {
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            entry = float(r["entry_price"]) if r["entry_price"] is not None else None
+            mark = float(r["mark_price"]) if r["mark_price"] is not None else None
+            direction = (r["direction"] or "long").lower()
+            cp: float | None = None
+            if entry and mark and entry > 0:
+                # Fractional return on entry — display layer multiplies by 100.
+                cp = (mark - entry) / entry
+                if direction in ("short", "sell"):
+                    cp = -cp
+            out.append({
                 "trade_id": int(r["trade_id"]),
                 "pair": r["pair"],
                 "direction": r["direction"],
-                "open_rate": float(r["entry_price"]) if r["entry_price"] is not None else None,
+                "open_rate": entry,
                 "stake_amount": float(r["stake"]) if r["stake"] is not None else None,
-                "current_profit": None,  # would need a live-quote join; UI tolerates None
+                "current_profit": cp,
+                "mark_price": mark,
+                "mark_ts": r["mark_ts"].isoformat() if r["mark_ts"] else None,
                 "open_date": r["opened_at"].isoformat() if r["opened_at"] else None,
                 "external_id": r["external_id"],
                 "regime_at_entry": r["regime"],
-            }
-            for r in rows
-        ]
+            })
+        return out
 
 
 # --------------------------------------------------------------------------
