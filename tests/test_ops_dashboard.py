@@ -312,27 +312,11 @@ class _FakeRegimeReq:
 
 
 def _stub_httpx_async_client(monkeypatch):
-    """Neutralise the best-effort freqtrade /reload_config POST inside
-    regime_config_post so the test doesn't need a live freqtrade. The handler
-    swallows exceptions and records them in reload_status, so we just need
-    the call to not block forever / not network out."""
-
-    class _Resp:
-        status_code = 200
-
-    class _Client:
-        def __init__(self, *a, **kw): ...
-        async def __aenter__(self): return self
-        async def __aexit__(self, *exc): return False
-        async def post(self, *a, **kw): return _Resp()
-        async def get(self, *a, **kw): return _Resp()
-
-    monkeypatch.setattr(ops_routes.httpx, "AsyncClient", _Client)
-
-    async def _fake_jwt(client, force_refresh: bool = False):
-        return "fake-jwt-token"
-
-    monkeypatch.setattr(ops_routes, "_ensure_jwt", _fake_jwt)
+    """Post-2026-05-14: the best-effort freqtrade /reload_config POST inside
+    regime_config_post was removed in Phase 2 of the freqtrade retirement.
+    No httpx / _ensure_jwt monkeypatching is needed anymore — the handler
+    just writes config.json atomically and returns; quanta-core re-reads on
+    its next cycle."""
 
 
 @pytest.mark.asyncio

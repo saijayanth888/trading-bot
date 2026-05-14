@@ -32,9 +32,12 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "user_data"))
+# Post-2026-05-14: freqaimodels/ was deleted; the TFT architecture lives at
+# src/quanta_core/models/tft_architecture.py (a faithful port — same classes,
+# same pinball_loss). See memory `freqtrade_decommissioned`.
+sys.path.insert(0, str(ROOT / "src"))
 
-from freqaimodels.tft_architecture import (   # noqa: E402
+from quanta_core.models.tft_architecture import (   # noqa: E402
     TemporalFusionTransformer,
     pinball_loss,
 )

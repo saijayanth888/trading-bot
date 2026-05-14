@@ -228,7 +228,7 @@ def test_http_endpoints(tmp_user_data: Path) -> None:
         if r.status_code == 200:
             body = r.json()
             assert body["pair"] == "BTC/USD"
-            assert body["source"] in ("freqtrade", "coinbase")
+            assert body["source"] == "coinbase"  # post-2026-05-14: coinbase is the only candle source
             assert isinstance(body["candles"], list)
             if body["candles"]:
                 c0 = body["candles"][0]
