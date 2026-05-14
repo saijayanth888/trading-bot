@@ -34,8 +34,6 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Callable
 
-import httpx
-
 from . import ops_db
 
 logger = logging.getLogger(__name__)
@@ -47,11 +45,6 @@ USER_DATA_ROOT = Path(os.environ.get(
     str(Path(__file__).resolve().parent.parent),
 ))
 AUDIT_LOG = USER_DATA_ROOT / "logs" / "hermes_mcp.log"
-CONFIG_PATH = Path(os.environ.get(
-    "FREQTRADE_CONFIG_PATH",
-    "/freqtrade/user_data/config.json",
-))
-FREQTRADE_API = os.environ.get("FREQTRADE_API_URL", "http://freqtrade:8080")
 HERMES_MCP_KEY = os.environ.get("HERMES_MCP_KEY", "").strip()
 
 # Rotate at the same size/backup count as hermes-mcp/server.py:_audit so the
@@ -133,44 +126,46 @@ def _require_auth() -> dict | None:
 
 
 # --------------------------------------------------------------------------
-# freqtrade API helper — STUBBED 2026-05-14
-# --------------------------------------------------------------------------
-#
-# Post-freqtrade-decommissioning: _ft_get always returns None. The MCP tools
-# get_open_trades / get_risk_status that consume it now produce empty data
-# instead of crashing the dashboard. A proper port to quanta-core sources
-# (ops_db.open_positions + ops_db.trades_risk_summary) is queued for the
-# file-deletion phase. See memory `freqtrade_decommissioned`.
-
-
-async def _ft_get(path: str) -> Any:
-    """No-op stub — freqtrade is gone. Returns None so callers degrade
-    gracefully (empty list / zero counts) instead of hitting an ImportError.
-    """
-    return None
-
-
-# --------------------------------------------------------------------------
 # Trade data tools
 # --------------------------------------------------------------------------
+#
+# Post-2026-05-14: data sourced from public.trade_journal (which quanta-core
+# writes to on every paper-fill) and quanta_schema.fills (latest mark-price
+# proxy). The freqtrade /api/v1/status helper was removed when the freqtrade
+# container was decommissioned. See memory `freqtrade_decommissioned`.
 
 
 async def get_open_trades() -> list[dict]:
-    data = await _ft_get("/api/v1/status") or []
-    out = [
-        {
-            "trade_id": t.get("trade_id"),
-            "pair": t.get("pair"),
-            "open_rate": t.get("open_rate"),
-            "current_rate": t.get("current_rate"),
-            "stake_amount": t.get("stake_amount"),
-            "profit_pct": t.get("profit_pct"),
-            "profit_abs": t.get("profit_abs"),
-            "open_date": t.get("open_date_hum") or t.get("open_date"),
-            "duration": t.get("trade_duration_s"),
-        }
-        for t in data
-    ]
+    """Open paper positions from public.trade_journal, mark-to-market against
+    the latest quanta_schema.fills price for each symbol.
+    """
+    rows = ops_db.open_positions(limit=50)
+    out = []
+    now = datetime.now(timezone.utc)
+    for r in rows:
+        cp = r.get("current_profit")  # fractional return (e.g. 0.012 = +1.2%)
+        stake = r.get("stake_amount")
+        opened_at = r.get("open_date")
+        duration_s = None
+        if opened_at:
+            try:
+                opened_dt = datetime.fromisoformat(opened_at.replace("Z", "+00:00"))
+                duration_s = int((now - opened_dt).total_seconds())
+            except Exception:
+                pass
+        out.append({
+            "trade_id": r.get("trade_id"),
+            "pair": r.get("pair"),
+            "open_rate": r.get("open_rate"),
+            "current_rate": r.get("mark_price"),
+            "stake_amount": stake,
+            "profit_pct": (cp * 100.0) if cp is not None else None,
+            "profit_abs": (cp * stake) if (cp is not None and stake is not None) else None,
+            "open_date": opened_at,
+            "duration": duration_s,
+            "direction": r.get("direction"),
+            "regime_at_entry": r.get("regime_at_entry"),
+        })
     _audit("get_open_trades", {}, f"{len(out)} open")
     return out
 
@@ -426,54 +421,96 @@ def get_champion_genome() -> dict:
 
 
 async def get_risk_status() -> dict:
-    open_trades = await _ft_get("/api/v1/status") or []
-    profit = await _ft_get("/api/v1/profit") or {}
+    """Risk snapshot from postgres — open positions count + V4 risk numbers.
+
+    Post-2026-05-14: shape changed. The legacy keys
+    (total_pnl_closed/trade_count/winning_trades/first_trade/latest_trade)
+    came from freqtrade's /api/v1/profit endpoint which is gone. The new
+    shape exposes the V4 risk surface that quanta-core actually drives:
+    daily PnL, 30-day drawdown, circuit-breaker state.
+    """
+    risk = ops_db.trades_risk_summary() or {}
+    open_trades = ops_db.open_positions(limit=50)
     out = {
         "open_positions": len(open_trades),
-        "total_pnl_closed": profit.get("profit_closed_coin", 0),
-        "trade_count": profit.get("trade_count", 0),
-        "winning_trades": profit.get("winning_trades", 0),
-        "first_trade": profit.get("first_trade_humanized"),
-        "latest_trade": profit.get("latest_trade_humanized"),
+        "daily_pnl_usd": risk.get("daily_pnl_usd"),
+        "daily_pnl_pct": risk.get("daily_pnl_pct"),
+        "closed_today": risk.get("closed_today"),
+        "drawdown_pct_30d": risk.get("drawdown_pct_30d"),
+        "circuit_breaker": risk.get("circuit_breaker"),
     }
     _audit("get_risk_status", {}, f"open={out['open_positions']}")
     return out
 
 
+def _set_run_state_paused(*, paused: bool, reason: str | None, set_by: str) -> dict:
+    """UPSERT quanta_schema.run_state.paused — single source of truth for
+    the V4 runner's kill switch. Mirrors ops_routes._run_state_set without
+    the import dependency (mcp_local must not import from ops_routes).
+    """
+    if not ops_db._HAVE_PG:
+        raise RuntimeError("postgres unavailable")
+    with ops_db._connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE quanta_schema.run_state
+               SET paused        = %s,
+                   paused_reason = %s,
+                   paused_at     = CASE WHEN %s THEN NOW() ELSE NULL END,
+                   set_by        = %s,
+                   updated_at    = NOW()
+             WHERE id = 1
+            RETURNING paused, paused_reason, paused_at, set_by, updated_at
+            """,
+            (paused, reason, paused, set_by),
+        )
+        row = cur.fetchone()
+        conn.commit()
+    if not row:
+        raise RuntimeError("run_state row missing (migration 003 not applied?)")
+    return {
+        "paused": row["paused"],
+        "paused_reason": row["paused_reason"],
+        "paused_at": row["paused_at"].isoformat() if row["paused_at"] else None,
+        "set_by": row["set_by"],
+        "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+    }
+
+
 def pause_trading(reason: str = "manual_pause_via_dashboard") -> dict:
+    """Pause V4 trading by writing to quanta_schema.run_state.paused.
+
+    Post-2026-05-14: rewritten to target quanta-core's run_state instead of
+    flipping freqtrade's config.json `dry_run` flag (the old freqtrade
+    container was retired and the config.json knob is no longer read by any
+    live engine). The V4 runner reads run_state on every cycle; new BUY
+    proposals are skipped while paused.
+    """
     refused = _require_auth()
     if refused:
         return refused
     try:
-        cfg = json.loads(CONFIG_PATH.read_text())
-        was = cfg.get("dry_run", True)
-        cfg["dry_run"] = True
-        tmp = CONFIG_PATH.with_suffix(".tmp")
-        tmp.write_text(json.dumps(cfg, indent=4))
-        tmp.replace(CONFIG_PATH)
-        _audit("pause_trading", {"reason": reason}, f"was={was}")
-        return {"ok": True, "previously_dry_run": was, "reason": reason,
-                "note": "restart freqtrade for this to take effect"}
+        state = _set_run_state_paused(paused=True, reason=reason, set_by="mcp_local")
+        _audit("pause_trading", {"reason": reason}, f"paused={state['paused']}")
+        return {"ok": True, "run_state": state, "reason": reason}
     except Exception as exc:
         return {"error": str(exc)}
 
 
 def resume_trading(confirm: bool = False) -> dict:
+    """Resume V4 trading by clearing quanta_schema.run_state.paused.
+
+    Post-2026-05-14: rewritten — see pause_trading docstring.
+    """
     refused = _require_auth()
     if refused:
         return refused
     if not confirm:
-        return {"error": "confirm=True required to flip out of dry-run"}
+        return {"error": "confirm=True required to clear the run_state pause"}
     try:
-        cfg = json.loads(CONFIG_PATH.read_text())
-        was = cfg.get("dry_run", True)
-        cfg["dry_run"] = False
-        tmp = CONFIG_PATH.with_suffix(".tmp")
-        tmp.write_text(json.dumps(cfg, indent=4))
-        tmp.replace(CONFIG_PATH)
-        _audit("resume_trading", {"confirm": True}, f"was={was}")
-        return {"ok": True, "previously_dry_run": was,
-                "note": "restart freqtrade for this to take effect"}
+        state = _set_run_state_paused(paused=False, reason=None, set_by="mcp_local")
+        _audit("resume_trading", {"confirm": True}, f"paused={state['paused']}")
+        return {"ok": True, "run_state": state}
     except Exception as exc:
         return {"error": str(exc)}
 

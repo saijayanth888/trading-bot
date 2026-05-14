@@ -32,11 +32,11 @@ services:
 
   # ── freqtrade decommissioned 2026-05-14 ──────────────────────────────
   # The `freqtrade` and `freqtrade-nfi` services were removed from this
-  # compose file as part of the post-cutover cleanup. Quanta-core is the
-  # live engine. See memory `freqtrade_decommissioned` and
-  # `vllm_machine_crash_2026_05_14` for context. Strategy files,
-  # entrypoint script, and Dockerfile.freqtrade are queued for deletion
-  # in a follow-up phase but kept on disk in case any rollback is needed.
+  # compose file. Quanta-core is the live engine. Strategy files
+  # (FreqAIMeanRevV1, NostalgiaForInfinityX6), Dockerfile.freqtrade,
+  # entrypoint script, and the freqaimodels/ TFT classifier are also
+  # gone — quanta-core's standalone TFT port (src/quanta_core/models/tft.py)
+  # supersedes them. See memory `freqtrade_decommissioned`.
   # ──────────────────────────────────────────────────────────────────────
 
   # ── vLLM with hot-swappable LoRA adapters (PROFILED OFF) ──────────────
