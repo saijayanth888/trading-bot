@@ -1937,11 +1937,14 @@ async def slack_preview():
         if not ops_db._HAVE_PG:
             return _envelope("degraded", data={}, error="postgres unavailable")
         with ops_db._connect() as conn, conn.cursor() as cur:
+            # H-1 audit fix: NEVER SUM(pnl_pct) — it's per-trade fractional
+            # return on each trade's own stake. Summing 50 fills × ~5%
+            # each yields "+250%" for a $14 day. The denominator must be
+            # the day's starting portfolio equity (see ops_db.py:337-342).
             cur.execute(
                 """
                 SELECT
                     COALESCE(SUM(pnl), 0)                               AS pnl_usd,
-                    COALESCE(SUM(pnl_pct), 0)                           AS pnl_pct,
                     COUNT(*)                                             AS trades,
                     SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END)             AS wins,
                     SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END)             AS losses
@@ -1974,6 +1977,28 @@ async def slack_preview():
                 """
             )
             regime_dist = [dict(r) for r in cur.fetchall()]
+
+            # H-1: day-start equity. Prefer an explicit snapshot from
+            # quanta_schema.equity_snapshots if the table exists; fall
+            # back to the algebraic identity used in combined_portfolio
+            # (start = current_total - daily_pnl_usd).
+            day_start_equity: float | None = None
+            try:
+                cur.execute(
+                    """
+                    SELECT equity
+                    FROM quanta_schema.equity_snapshots
+                    WHERE ts >= date_trunc('day', NOW() AT TIME ZONE 'UTC')
+                    ORDER BY ts ASC
+                    LIMIT 1
+                    """
+                )
+                _row = cur.fetchone()
+                if _row and _row.get("equity") is not None:
+                    day_start_equity = float(_row["equity"])
+            except Exception as _exc:
+                # Table may not exist on this deployment — that's fine.
+                logger.debug("slack_preview: equity_snapshots probe failed: %s", _exc)
     except Exception as exc:
         logger.exception("slack_preview db failed")
         return _envelope("down", error=str(exc))
@@ -1982,20 +2007,46 @@ async def slack_preview():
 
     n = int(today.get("trades") or 0)
     pnl_usd = float(today.get("pnl_usd") or 0)
-    # trade_journal.pnl_pct is fractional (-0.0123 = -1.23%); the Slack-styled
-    # card renders this verbatim as a percent, so multiply once here.
-    pnl_pct = float(today.get("pnl_pct") or 0) * 100
     wins = int(today.get("wins") or 0)
     losses = int(today.get("losses") or 0)
     win_rate = (wins / n * 100) if n else 0.0
+
+    # H-1: compute day P&L percent honestly.
+    #   pnl_pct = pnl_usd / day_start_equity × 100
+    # When we can't establish day_start_equity, surface None — the UI
+    # then renders dollars-only. Better than a fictional number.
+    pnl_pct: float | None = None
+    if day_start_equity is None:
+        # Fallback: combined_portfolio algebra (start = current − pnl).
+        try:
+            import sys as _sys
+            repo_root = STOCKS_ROOT.parent
+            if str(repo_root) not in _sys.path:
+                _sys.path.insert(0, str(repo_root))
+            from user_data.modules.unified_risk import get_combined_risk_status
+            _status = await loop.run_in_executor(None, get_combined_risk_status)
+            _total_equity = float((_status or {}).get("total_equity") or 0)
+            if _total_equity > 0:
+                day_start_equity = _total_equity - pnl_usd
+        except Exception as _exc:
+            logger.debug("slack_preview: combined_portfolio fallback failed: %s", _exc)
+
+    if day_start_equity is not None and day_start_equity > 0:
+        pnl_pct = (pnl_usd / day_start_equity) * 100.0
 
     best = per_pair[0] if per_pair else None
     worst = per_pair[-1] if per_pair and len(per_pair) > 1 else None
 
     return _envelope("ok", data={
         "date_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        # Keep `pnl_usd` and the new explicit aliases. day_pnl_* mirror
+        # combined_portfolio's contract so the Slack preview card and
+        # the hero card render the same numbers.
         "pnl_usd": pnl_usd,
         "pnl_pct": pnl_pct,
+        "day_pnl_usd": pnl_usd,
+        "day_pnl_pct": pnl_pct,
+        "day_start_equity": day_start_equity,
         "trades": n,
         "wins": wins,
         "losses": losses,
@@ -2143,6 +2194,25 @@ async def stocks_status():
         open_trades = open_trades_obj
     else:
         open_trades = []
+    # Real age of the shark intraday content: prefer the JSON's own
+    # `generated_at` field (truth of the producer) over mtime, which can
+    # be moved forward by a touch/rewrite that didn't actually refresh
+    # the data — exactly what we saw 2026-05-14 where mtime was fresh
+    # but generated_at was still 2026-05-13 17:30 ET.
+    shark_gen_iso = shark_raw.get("generated_at")
+    shark_content_age: int | None = None
+    if shark_gen_iso:
+        try:
+            # Tolerate naive (no tz) timestamps — fall back to UTC.
+            _dt = datetime.fromisoformat(str(shark_gen_iso))
+            if _dt.tzinfo is None:
+                _dt = _dt.replace(tzinfo=timezone.utc)
+            shark_content_age = int(datetime.now(timezone.utc).timestamp() - _dt.timestamp())
+        except (ValueError, TypeError) as exc:
+            logger.debug("stocks: failed to parse generated_at %r: %s", shark_gen_iso, exc)
+    if shark_content_age is None:
+        shark_content_age = _file_age_seconds(shark_data_file)
+
     shark = {
         "mode": state.get("current_mode"),
         "peak_equity": state.get("peak_equity"),
@@ -2159,24 +2229,51 @@ async def stocks_status():
             "total_pnl": stats.get("total_pnl", 0.0),
             "current_drawdown_pct": stats.get("current_drawdown_pct", 0.0),
         },
-        "generated_at": shark_raw.get("generated_at"),
-        "age_seconds": _file_age_seconds(shark_data_file),
+        "generated_at": shark_gen_iso,
+        # Content age (from generated_at) — what the operator cares about.
+        "age_seconds": shark_content_age,
+        # File-mtime age, kept for backward compat / debugging.
+        "file_age_seconds": _file_age_seconds(shark_data_file),
     }
+
+    # ── Staleness thresholds (C-8 audit fix) ─────────────────────────────
+    # The shark intraday content (regime, candidate counts, open trades)
+    # refreshes every ~30 min when the shark cron is healthy; > 4 h means
+    # something is wrong. Daily-summary stats (total_trades / win_rate /
+    # current_drawdown_pct) only refresh once a day at 17:30 ET — those
+    # tolerate 24 h staleness before degrading.
+    INTRADAY_STALE_S = int(os.environ.get("STOCKS_INTRADAY_STALE_S", "14400"))   # 4 h
+    DAILY_STALE_S    = int(os.environ.get("STOCKS_DAILY_STALE_S",    "86400"))   # 24 h
 
     # ── Status: degraded if any source is stale or missing ───────────────
     degraded_reasons: list[str] = []
     if alpaca["age_seconds"] is None:
         degraded_reasons.append("alpaca snapshot missing — run `python -m wheel.cli snapshot`")
-    elif alpaca["age_seconds"] > 86400:
+    elif alpaca["age_seconds"] > DAILY_STALE_S:
         degraded_reasons.append(f"alpaca snapshot stale ({alpaca['age_seconds']}s old)")
     if shark["age_seconds"] is None:
         degraded_reasons.append("shark dashboard data missing")
+    elif shark["age_seconds"] > INTRADAY_STALE_S:
+        degraded_reasons.append(
+            f"shark intraday stale: generated_at={shark_gen_iso} "
+            f"({shark['age_seconds']}s ago > {INTRADAY_STALE_S}s)"
+        )
     if shark["circuit_breaker"]:
         degraded_reasons.append("shark circuit breaker tripped")
     if shark["kill_switch_active"]:
         degraded_reasons.append(f"shark kill switch: {shark['kill_switch_reason'] or 'active'}")
 
-    payload = {"alpaca": alpaca, "wheel": wheel, "shark": shark}
+    # Top-level convenience fields so the UI can render an
+    # "as-of HH:MM ET" badge without digging through shark.*.
+    payload = {
+        "alpaca": alpaca,
+        "wheel": wheel,
+        "shark": shark,
+        "as_of_iso": shark_gen_iso,
+        "age_seconds": shark_content_age,
+        "intraday_stale_threshold_s": INTRADAY_STALE_S,
+        "daily_stale_threshold_s": DAILY_STALE_S,
+    }
     if not degraded_reasons:
         return _envelope("ok", data=payload)
     return _envelope("degraded", data=payload, error="; ".join(degraded_reasons))
@@ -2495,21 +2592,46 @@ async def gates():
     pairs = [p.strip() for p in os.environ.get("DASHBOARD_PAIRS", "BTC/USD,ETH/USD,SOL/USD").split(",") if p.strip()]
     timeframe = os.environ.get("DASHBOARD_TIMEFRAME", "5m")
 
-    # Account-level inputs from existing endpoints
+    # Account-level inputs.
+    # H-2 audit fix: post-cutover the freqtrade ft_authed_get call
+    # silently returns None (jwt short-circuits in V4 mode), leaving
+    # open_count=0 and breaker_active=False — a confidently-displayed
+    # lie about account capacity. Read from the V4 sources of truth:
+    #   open_count       = count(*) FROM public.trade_journal WHERE closed_at IS NULL
+    #   breaker_active   = quanta_schema.run_state.paused
     open_count = 0
-    max_open = 6
+    max_open = int(os.environ.get("MAX_OPEN_TRADES", "6"))
     breaker_active = False
     try:
+        if ops_db._HAVE_PG:
+            with ops_db._connect() as _conn, _conn.cursor() as _cur:
+                _cur.execute(
+                    "SELECT COUNT(*) AS n FROM public.trade_journal WHERE closed_at IS NULL"
+                )
+                _row = _cur.fetchone() or {}
+                open_count = int(_row.get("n") or 0)
+                try:
+                    _cur.execute(
+                        "SELECT paused FROM quanta_schema.run_state WHERE id = 1"
+                    )
+                    _rs = _cur.fetchone() or {}
+                    breaker_active = bool(_rs.get("paused"))
+                except Exception as _exc:
+                    logger.debug("gates: run_state read failed: %s", _exc)
+    except Exception as exc:
+        logger.warning("gates: account-level pg read failed: %s", exc)
+
+    # Legacy freqtrade probe — kept only to surface max_open_trades if the
+    # bot is still alive, otherwise we use the env default. Failures are
+    # silent because the call is expected to short-circuit post-cutover.
+    try:
         async with httpx.AsyncClient(timeout=ENDPOINT_TIMEOUT_S) as client:
-            r = await ft_authed_get(client, "/api/v1/status", timeout=ENDPOINT_TIMEOUT_S)
-            if r is not None and r.status_code == 200:
-                open_count = len(r.json() or [])
             r2 = await ft_authed_get(client, "/api/v1/show_config", timeout=ENDPOINT_TIMEOUT_S)
             if r2 is not None and r2.status_code == 200:
                 cfg = r2.json() or {}
-                max_open = int(cfg.get("max_open_trades") or 6)
+                max_open = int(cfg.get("max_open_trades") or max_open)
     except Exception as exc:
-        logger.warning("gates: account-level fetch failed: %s", exc)
+        logger.debug("gates: freqtrade max_open_trades probe failed (expected post-cutover): %s", exc)
 
     # Per-pair gate evaluation
     # Pre-fetch the V4-era canonical regime once (single postgres roundtrip);
@@ -2521,6 +2643,40 @@ async def gates():
             _v4_regime = _v4_row["regime"]
     except Exception:
         pass
+
+    # H-3 audit fix: pre-fetch the LATEST row per symbol from
+    # public.classifier_log and public.meta_signal_log so the gates
+    # snapshot reflects fresh quanta-core writes. Without this every
+    # crypto pair returned {up:null, tft_confidence:null, meta_signal:
+    # null} despite the producers writing every 5 min.
+    _classifier_by_symbol: dict[str, dict] = {}
+    _meta_by_symbol: dict[str, dict] = {}
+    try:
+        if ops_db._HAVE_PG:
+            with ops_db._connect() as _conn, _conn.cursor() as _cur:
+                _cur.execute(
+                    """
+                    SELECT DISTINCT ON (symbol)
+                        symbol, ts, p_up, p_flat, p_down, confidence,
+                        classifier
+                    FROM public.classifier_log
+                    ORDER BY symbol, ts DESC
+                    """
+                )
+                for _r in _cur.fetchall():
+                    _classifier_by_symbol[str(_r["symbol"])] = dict(_r)
+                _cur.execute(
+                    """
+                    SELECT DISTINCT ON (symbol)
+                        symbol, ts, signal, confidence, regime, strategies
+                    FROM public.meta_signal_log
+                    ORDER BY symbol, ts DESC
+                    """
+                )
+                for _r in _cur.fetchall():
+                    _meta_by_symbol[str(_r["symbol"])] = dict(_r)
+    except Exception as _exc:
+        logger.warning("gates: classifier_log/meta_signal_log prefetch failed: %s", _exc)
 
     # Post-cutover: surface V4 strategy entry conditions instead of the dead
     # FreqAI gate set. When LIVE_ENGINE_MODE is live/shadow we'll emit a
@@ -2555,6 +2711,19 @@ async def gates():
         meta_conf = state.get("meta_confidence")
         volume = state.get("volume")
         do_predict = state.get("do_predict")
+
+        # H-3 audit fix: when the freqtrade df path didn't populate these
+        # (always the case post-cutover), fall back to the V4 producers.
+        _cls_row = _classifier_by_symbol.get(pair) or {}
+        _meta_row = _meta_by_symbol.get(pair) or {}
+        if up is None and _cls_row.get("p_up") is not None:
+            up = float(_cls_row["p_up"])
+        if tft_conf is None and _cls_row.get("confidence") is not None:
+            tft_conf = float(_cls_row["confidence"])
+        if meta_sig is None and _meta_row.get("signal") is not None:
+            meta_sig = int(_meta_row["signal"])
+        if meta_conf is None and _meta_row.get("confidence") is not None:
+            meta_conf = float(_meta_row["confidence"])
 
         gate_results = []
 
@@ -2718,6 +2887,17 @@ async def gates():
                 "threshold": threshold,
                 "model_age_h": _age_h,
                 "model_expiration_h": _expiration_h,
+                # H-3: source timestamps so the UI can show "as of HH:MM" badges
+                "classifier_ts": (
+                    _cls_row.get("ts").isoformat()
+                    if _cls_row.get("ts") is not None and hasattr(_cls_row.get("ts"), "isoformat")
+                    else _cls_row.get("ts")
+                ),
+                "meta_signal_ts": (
+                    _meta_row.get("ts").isoformat()
+                    if _meta_row.get("ts") is not None and hasattr(_meta_row.get("ts"), "isoformat")
+                    else _meta_row.get("ts")
+                ),
             },
         }
 
