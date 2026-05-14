@@ -51,37 +51,57 @@ _TFT_MIN_UP_PROB = float(os.environ.get("TFT_MIN_UP_PROB", "0.40"))
 _TFT_MIN_CONFIDENCE = float(os.environ.get("TFT_MIN_CONFIDENCE", "0.05"))
 
 
-def _tft_gate(symbol: str) -> tuple[bool, str]:
-    """Run the stocks TFT against the most recent 60-bar window for *symbol*
-    and decide whether the candidate clears the model's UP-direction floor.
+def _tft_predict(symbol: str) -> dict | None:
+    """Run the stocks TFT once for *symbol* and return the raw prediction
+    dict {up, conf, down, ...} or None on any failure. Pure prediction;
+    no gating decisions. Used by:
+      - the runtime composite-override check in _collect_candidate_data
+        (priced-in candidates can pass to the bull/bear debate if model
+        signals strongly bullish — replaces stagnant date-based override)
+      - _tft_gate below (the later hard-floor check, unchanged semantics)
 
-    Returns (allowed, reason). On any failure (model missing, insufficient
-    bars, runtime error) the gate FAILS OPEN — we'd rather pass a trade
-    through than veto every signal because of an infrastructure hiccup."""
+    Caller should treat None as 'no TFT signal' — fail-open at each call
+    site (don't kill a candidate just because the model isn't available).
+    """
     try:
         from shark.ml.tft_stock import predict_direction
         from shark.ml.dataset_stock import _load_bars_json
         from shark.ml.features_stock import build_features, FEATURE_COLS
     except ImportError as exc:
-        return True, f"tft-import-failed:{exc}"
+        logger.debug("[TFT] import failed for %s: %s", symbol, exc)
+        return None
 
     bars_path = Path(_REPO_ROOT) / "kb" / "historical_bars" / f"{symbol.upper()}.json"
     if not bars_path.is_file():
-        return True, "tft-no-bars"
+        return None
 
     try:
         bars = _load_bars_json(bars_path)
         feats = build_features(bars)
         if len(feats) < 60:
-            return True, "tft-insufficient-history"
+            return None
         window = feats[list(FEATURE_COLS)].iloc[-60:].values
         pred = predict_direction(symbol.upper(), window)
     except Exception as exc:
-        logger.warning("[TFT_GATE] %s — gate failed open: %s", symbol, exc)
-        return True, f"tft-runtime-err:{exc}"
+        logger.warning("[TFT] %s — prediction failed: %s", symbol, exc)
+        return None
 
     if pred.get("error"):
-        return True, f"tft-no-model:{pred['error']}"
+        return None
+    return pred
+
+
+def _tft_gate(symbol: str, pred: dict | None = None) -> tuple[bool, str]:
+    """Apply the TFT hard-floor gate for *symbol*. Accepts a pre-computed
+    *pred* (from _tft_predict) to avoid redundant inference; if absent,
+    fetches it. Fails open on any infrastructure issue.
+
+    Returns (allowed, reason).
+    """
+    if pred is None:
+        pred = _tft_predict(symbol)
+    if pred is None:
+        return True, "tft-unavailable"
 
     up = float(pred.get("up") or 0.0)
     conf = float(pred.get("confidence") or 0.0)
@@ -280,30 +300,91 @@ def _collect_candidate_data(
         except Exception:
             _paper_override = False
 
+        # ─── Gather signals once, use everywhere below ────────────────────
+        # Pre-2026-05-14 this function fetched RS only after the priced_in
+        # hard kill, and TFT later still. The priced_in kill was unconditional
+        # and the soft-gate's "not priced_in" AND was unreachable past it —
+        # both structural bugs. The fix: gather all signals up front, then
+        # compute one "runtime composite override" boolean that any
+        # LLM-boolean hard kill can consult. Replaces the reverted
+        # PAPER_PRICED_IN_OVERRIDE_UNTIL date-based mechanism — operator's
+        # principle is that the intelligent layer should DERIVE this at
+        # runtime, not read a stagnant env var.
+        priced_in = bool(perplexity_intel.get("catalyst_priced_in", False))
         has_specific_catalyst = bool(perplexity_intel.get("catalyst_specific", True))
+        sentiment_score = float(perplexity_intel.get("sentiment_score") or 0.0)
+        analyst_rating = str(perplexity_intel.get("analyst_rating") or "hold").lower()
+        headlines_count = len(perplexity_intel.get("headlines") or [])
+
+        rs_data = compute_relative_strength(symbol)
+        rs_composite = float(rs_data.get("rs_composite") or 0.0)
+        outperforming = bool(rs_data.get("outperforming", False))
+
+        tft_pred = _tft_predict(symbol)  # reused by _tft_gate later — no double-inference
+        tft_up = float(tft_pred.get("up") or 0.0) if tft_pred else None
+        tft_conf = float(tft_pred.get("confidence") or 0.0) if tft_pred else None
+
+        # Runtime composite override — when set, downstream LLM-boolean
+        # hard kills become advisory rather than fatal. The thresholds
+        # below (TFT up ≥ 0.55, sentiment ≥ 0.5, RS ≥ 1.0) intentionally
+        # require BOTH model conviction AND market-state confirmation; a
+        # candidate that triggers all three has multi-signal agreement
+        # well above any single-LLM-boolean's weight.
+        composite_override = (
+            tft_up is not None
+            and tft_up >= 0.55
+            and sentiment_score >= 0.5
+            and rs_composite >= 1.0
+        )
+
+        # ─── Catalyst-specific gate ────────────────────────────────────────
+        # The paper-mode soft-gate kept its original criteria; the priced_in
+        # AND moved out of here (it has its own gate below now). Composite
+        # override OR's around the soft-gate too — a candidate with no
+        # specific catalyst but strong multi-signal agreement still flows.
         if not has_specific_catalyst:
             soft_ok = (
                 _paper_override
-                and not perplexity_intel.get("catalyst_priced_in", False)
-                and bool(perplexity_intel.get("headlines"))
-                and float(perplexity_intel.get("sentiment_score") or 0.0) >= 0.30
-                and str(perplexity_intel.get("analyst_rating") or "hold").lower() != "sell"
-            )
+                and headlines_count > 0
+                and sentiment_score >= 0.30
+                and analyst_rating != "sell"
+            ) or composite_override
             if not soft_ok:
                 logger.info("%s skipped — no specific catalyst", symbol)
                 return None
-            logger.info(
-                "%s — no specific catalyst, but paper-mode soft gate passed "
-                "(sentiment=%.2f, headlines=%d, rating=%s)",
-                symbol,
-                float(perplexity_intel.get("sentiment_score") or 0.0),
-                len(perplexity_intel.get("headlines") or []),
-                perplexity_intel.get("analyst_rating") or "hold",
-            )
+            if composite_override:
+                logger.info(
+                    "%s — no specific catalyst BUT runtime composite passes "
+                    "(tft_up=%.2f, sentiment=%.2f, rs=%.2f). Letting through.",
+                    symbol, tft_up or 0.0, sentiment_score, rs_composite,
+                )
+            else:
+                logger.info(
+                    "%s — no specific catalyst, but paper-mode soft gate passed "
+                    "(sentiment=%.2f, headlines=%d, rating=%s)",
+                    symbol, sentiment_score, headlines_count, analyst_rating,
+                )
 
-        if perplexity_intel.get("catalyst_priced_in", False):
-            logger.info("%s skipped — catalyst already priced in", symbol)
-            return None
+        # ─── Priced-in gate ────────────────────────────────────────────────
+        # Was an unconditional hard kill; now consults the composite. When
+        # composite is True we log loudly (this is the case the operator
+        # specifically called out — bot decides per-candidate, not by date).
+        if priced_in:
+            if composite_override:
+                logger.info(
+                    "%s — catalyst_priced_in=true BUT runtime composite passes "
+                    "(tft_up=%.2f≥0.55, sentiment=%.2f≥0.5, rs=%.2f≥1.0). "
+                    "Letting through to bull/bear/arbiter debate.",
+                    symbol, tft_up or 0.0, sentiment_score, rs_composite,
+                )
+            else:
+                tft_str = f"{tft_up:.2f}" if tft_up is not None else "n/a"
+                logger.info(
+                    "%s skipped — catalyst already priced in "
+                    "(composite failed: tft_up=%s, sentiment=%.2f, rs=%.2f)",
+                    symbol, tft_str, sentiment_score, rs_composite,
+                )
+                return None
 
         sector = get_ticker_sector(symbol)
         sector_ok, sector_reason = _check_sector_momentum(sector)
@@ -311,11 +392,15 @@ def _collect_candidate_data(
             logger.info("%s skipped — %s", symbol, sector_reason)
             return None
 
-        rs_data = compute_relative_strength(symbol)
-        if not rs_data.get("outperforming", False):
+        # ─── Relative-strength gate ────────────────────────────────────────
+        # Uses rs_data computed above — composite_override does NOT bypass
+        # this because RS is one of the composite's own inputs (RS ≥ 1.0
+        # being a requirement). If composite passed, this gate passes too,
+        # so no special-case logic is needed.
+        if not outperforming:
             logger.info(
                 "%s skipped — underperforming SPY (RS=%.2f)",
-                symbol, rs_data.get("rs_composite", 0),
+                symbol, rs_composite,
             )
             return None
 
@@ -401,6 +486,10 @@ def _collect_candidate_data(
                 "momentum_score": round(float(momentum_score), 1),
                 "atr_14": round(float(atr), 2),
             },
+            # _tft_pred cached so the later TFT hard-floor gate (line ~747)
+            # reuses the prediction computed for the composite override above.
+            # Saves one TFT inference per candidate.
+            "_tft_pred": tft_pred,
             "perplexity_intel": perplexity_intel,
             "rs_data": {
                 "rs_composite": round(float(rs_data.get("rs_composite", 0)), 3),
@@ -658,8 +747,10 @@ def _execute(dry_run: bool = False) -> bool:
         # === Stocks TFT inference gate ===
         # The LLM agreed; now ask the trained model. If TFT predicts DOWN
         # with confidence or UP-prob is under the floor, skip the trade.
+        # Reuses the prediction computed earlier in _collect_candidate_data
+        # (composite-override path) — avoids running TFT inference twice.
         if _TFT_GATE_ENABLED:
-            allowed, reason = _tft_gate(symbol)
+            allowed, reason = _tft_gate(symbol, pred=candidate.get("_tft_pred"))
             if not allowed:
                 logger.info("%s rejected — %s", symbol, reason)
                 continue
