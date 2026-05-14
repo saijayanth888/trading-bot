@@ -271,15 +271,12 @@ TRAINING_HEALTH_STALE_HOURS = float(
 
 
 def _training_health_payload(identifier: str = "tft_v1") -> dict[str, Any]:
-    import sys as _sys
-    user_data_root = Path(os.environ.get(
-        "USER_DATA_ROOT",
-        str(Path(__file__).resolve().parent.parent),
-    ))
-    if str(user_data_root) not in _sys.path:
-        _sys.path.insert(0, str(user_data_root))
-    from freqaimodels import tft_pickle as _save_mod
-    scan = _save_mod.scan_pair_dictionary_for_quarantine(identifier)
+    # Post-Phase-4 cutover (2026-05-13): the FreqAI ``freqaimodels`` package
+    # was retired and `user_data/models/<id>/pair_dictionary.json` is no
+    # longer written by quanta-core. Until a quanta-core training-health
+    # producer is wired (Wave D), return an empty-pairs envelope so the UI
+    # renders a clean "NO PAIRS YET" state instead of "endpoint unavailable".
+    scan: dict[str, dict[str, Any]] = {}
 
     # Read strategy_overrides.tft_blind_fallback so the dashboard can
     # show whether the operator has opted in. We surface BOTH the
@@ -408,8 +405,12 @@ async def training_health(identifier: str = "tft_v1"):
         status = "degraded"
         err = f"{stale} pair(s) > {TRAINING_HEALTH_STALE_HOURS:.0f}h stale"
     elif not result.get("pairs"):
-        status = "degraded"
-        err = "pair_dictionary.json empty or unreadable"
+        # Post-Phase-4 cutover: FreqAI's `pair_dictionary.json` is no
+        # longer written. Return "ok" with empty pairs so the dashboard
+        # card stops flashing red — the UI's empty-state copy explains
+        # the retired-producer state.
+        status = "ok"
+        err = None
     else:
         status = "ok"
         err = None
@@ -2972,18 +2973,29 @@ async def gates():
             },
         }
 
-        # Post-cutover: ALSO emit V4 strategy gates ─ what MeanRevBB +
-        # TrendFollow are actually waiting for. The frontend will choose
-        # which gate set to render based on /api/mode.engine. Computes
-        # BB lower + short/long MA from Coinbase REST candles (30 bars).
+        # Post-cutover: when quanta-core is the active engine, the V3
+        # FreqAI gate set above (model_freshness / freqai_predict /
+        # up_prob_threshold / tft_confidence) is dead — pair_dictionary
+        # is no longer written and quanta-core's MeanRevBB + TrendFollow
+        # strategies don't consult those columns. Surface the V4 gate set
+        # (capital, regime, mr_dip, tf_break, tf_aligned, open) as the
+        # primary `gates` array so the BlockerBanner reports what's
+        # actually waiting on a fire. Keep the V3 set under `v3_gates`
+        # for any legacy panels still wired to that schema.
         if _v4_active:
             try:
-                row["v4_gates"] = await _eval_v4_gates(
+                v4_payload = await _eval_v4_gates(
                     pair=pair,
                     regime=regime,
                     open_count=_v4_open_count,
                     max_open=max_open,
                 )
+                row["v4_gates"] = v4_payload
+                row["v3_gates"] = row["gates"]
+                row["gates"] = v4_payload.get("gates", [])
+                row["n_gates"] = v4_payload.get("n_gates", len(row["gates"]))
+                row["n_blocking"] = v4_payload.get("n_blocking", 0)
+                row["first_blocker"] = v4_payload.get("first_blocker")
             except Exception as exc:
                 logger.debug("v4 gates eval failed for %s: %s", pair, exc)
 

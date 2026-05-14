@@ -160,7 +160,7 @@
   // to combined_drawdown_pct (signed: -dd surfaces below-peak as red). Also
   // pulls /api/mode + /api/ops/services.quanta_core for the mode + engine-OK
   // pills. Mirrors the legacy /ops topbar so /dashboard_spa A/Bs cleanly.
-  function TopbarLive({ killState, setKillState, combined, mode, services, fetchedAt }) {
+  function TopbarLive({ killState, setKillState, combined, mode, services, marketHours, venue, fetchedAt }) {
     const [clock, setClock] = useState(fmtClockET());
     useEffect(() => {
       const t = setInterval(() => setClock(fmtClockET()), 1000);
@@ -202,7 +202,31 @@
           h("span", { className: "dot " + modeCls + " pulse" }), " ", modeLabel),
         h("span", { className: "pill " + (engineMeta.up === true ? "up" : engineMeta.up === false ? "down" : "") },
           h("span", { className: "dot " + (engineMeta.up === true ? "up pulse" : engineMeta.up === false ? "down" : "dim") }),
-          " ", engineMeta.name, " ", engineMeta.up === true ? "OK" : engineMeta.up === false ? "DOWN" : "—")
+          " ", engineMeta.name, " ", engineMeta.up === true ? "OK" : engineMeta.up === false ? "DOWN" : "—"),
+        // NYSE session pill — surfaces ONLY on the Stocks venue tab. The
+        // mode/engine pills above reflect the bot process (24/7), not the
+        // equity market. Without this pill the operator sees "PAPER · LIVE"
+        // green on the Stocks tab after-hours and assumes stocks are
+        // trading — they're not (cron phases gate on NYSE hours).
+        (venue === "stocks" ? (function() {
+          const mh = envelopeData(marketHours) || {};
+          if (mh.is_open == null) {
+            return h("span", { className: "pill", title: "loading market hours" },
+              h("span", { className: "dot dim" }), " NYSE —");
+          }
+          const isOpen = !!mh.is_open;
+          const isExt = !!mh.is_extended;
+          const cls = isOpen ? "up" : isExt ? "warn" : "down";
+          const txt = isOpen ? "NYSE OPEN" : isExt ? "NYSE EXT-HRS" : "NYSE CLOSED";
+          const title = isOpen
+            ? "NYSE regular session"
+            : isExt
+              ? "NYSE extended hours (pre-mkt 04:00-09:30 or after-hrs 16:00-20:00 ET) — stocks phases idle"
+              : "NYSE closed — stocks phases idle until " + (mh.next_open_utc || "next session");
+          return h("span", { className: "pill " + cls, title },
+            h("span", { className: "dot " + cls + (isOpen ? " pulse" : "") }),
+            " ", txt);
+        })() : null)
       ),
       h("div", { className: "tb-divider" }),
       h("div", { className: "tb-group", "data-test": "topbar-equity" },
@@ -277,6 +301,9 @@
     const [combined, setCombined] = useState(null);
     const [mode, setMode] = useState(null);
     const [services, setServices] = useState(null);
+    // NYSE session state — used by the topbar to surface a "NYSE OPEN /
+    // CLOSED / EXT-HRS" pill when the Stocks venue tab is active.
+    const [marketHours, setMarketHours] = useState(null);
     // Wheel positions snapshot — drives the stocks-venue positions card so
     // selecting NVDA / SOFI / etc. surfaces the open short put / long shares
     // instead of an empty "no positions" panel.
@@ -380,6 +407,11 @@
       fetch("/api/ops/services", { signal }).then(r => r.json()).then(j => {
         if (signal && signal.aborted) return;
         setServices(j);
+      }).catch((e) => { if (!isAbortError(e)) { /* ignore */ } });
+      // NYSE session — server-side cached 60s; polling on the same tick is cheap.
+      fetch("/api/ops/market_hours", { signal }).then(r => r.json()).then(j => {
+        if (signal && signal.aborted) return;
+        setMarketHours(j);
       }).catch((e) => { if (!isAbortError(e)) { /* ignore */ } });
       // Wheel positions (cash, BP, open short puts / covered calls / longs).
       // Polled on the same 10s cadence as the topbar so the per-pair stocks
@@ -519,6 +551,7 @@
         h(TopbarLive, {
           killState, setKillState,
           combined, mode, services,
+          marketHours, venue,
           fetchedAt: meta.combined_fetched_at,
         }),
         h(Sidebar, { active: "dashboard" }),

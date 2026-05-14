@@ -531,8 +531,39 @@
     const lastSide = env.last_fill_side;
     const engineCls = engine === "QUANTA_CORE" ? "up" : "info";
     const pnlCls = closedPnl > 0 ? "up" : closedPnl < 0 ? "down" : "dim";
+    const mh = useMarketHours();
 
     const sep = h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)", margin: "0 8px" } }, "·");
+
+    // NYSE pill — clarifies that the green engine pill above reflects the
+    // 24/7 crypto engine, NOT the stocks venue. Without this, an operator
+    // glancing at the scoreboard after-hours reads "QUANTA_CORE · PAPER"
+    // green and assumes stocks are trading too.
+    let nysePill = null;
+    if (mh) {
+      const isOpen = !!mh.is_open;
+      const isExt = !!mh.is_extended;
+      const label = isOpen ? "NYSE OPEN" : isExt ? "NYSE EXT" : "NYSE CLOSED";
+      const cls = isOpen ? "up" : isExt ? "warn" : "down";
+      const title = isOpen
+        ? "NYSE regular session — stocks phases active"
+        : isExt
+          ? "NYSE extended hours — stocks phases idle until 09:30 ET"
+          : "NYSE closed — stocks phases idle until next session";
+      nysePill = h("span", {
+        className: "pill " + cls,
+        title,
+        style: { padding: "2px 8px", flexShrink: 0 },
+      },
+        h("span", { className: "dot " + cls + (isOpen ? " pulse" : "") }),
+        " ", label);
+    } else {
+      nysePill = h("span", {
+        className: "pill",
+        title: "loading market hours",
+        style: { padding: "2px 8px", flexShrink: 0 },
+      }, h("span", { className: "dot dim" }), " NYSE —");
+    }
 
     return h("div", {
       style: {
@@ -549,6 +580,8 @@
       },
         h("span", { className: "dot " + engineCls + " pulse" }),
         " ", engine, " · ", mode || "—"),
+      h("span", { style: { width: 6 } }),
+      nysePill,
       sep,
       h("span", { className: "dim mono" }, "open"),
       h("span", { className: "num " + (openN > 0 ? "up" : "dim") + " mono", style: { marginLeft: 4 } },
@@ -1050,7 +1083,7 @@
                 gridColumn: "span 5", padding: "var(--s-3)",
                 fontSize: "var(--t-xs)", textAlign: "center",
               }
-            }, "pair_dictionary.json not yet written — bot is still in warm-up")
+            }, "FreqAI TFT retired post-cutover · quanta-core training-health producer not yet wired (Wave D)")
           : pairs.map(p => h(TrainingHealthRow, { key: p.pair, p })),
       ),
       h("div", {
