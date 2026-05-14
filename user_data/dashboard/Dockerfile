@@ -9,7 +9,10 @@ WORKDIR /app
 
 # Install deps first so they cache between code edits.
 COPY requirements.txt /app/requirements.txt
-RUN pip install -r /app/requirements.txt
+# Resolver is uv with a 48h release-age cooldown — refuses versions published in the last 2 days.
+RUN pip install --no-cache-dir "uv==0.11.11" \
+    && UV_EXCLUDE_NEWER="$(date -u -d '2 days ago' +%Y-%m-%d)" \
+       uv pip install --system --no-cache -r /app/requirements.txt
 
 # Copy the app *into the container* so it can be run standalone, but the
 # real production deployment mounts user_data/ as a volume (see compose).

@@ -19,6 +19,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements-extra.txt /tmp/requirements-extra.txt
-RUN pip install --no-cache-dir -r /tmp/requirements-extra.txt
+# Resolver is uv with a 48h release-age cooldown — refuses package versions
+# published in the last 2 days (defense against fast-yanked supply-chain attacks).
+RUN pip install --no-cache-dir "uv==0.11.11" \
+    && UV_EXCLUDE_NEWER="$(date -u -d '2 days ago' +%Y-%m-%d)" \
+       uv pip install --system --no-cache -r /tmp/requirements-extra.txt
 
 USER ftuser

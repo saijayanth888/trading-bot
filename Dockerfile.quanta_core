@@ -14,7 +14,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # Minimal stdlib + 3 third-party packages — no fancy deps.
-RUN pip install \
+# Resolver is uv with a 48h release-age cooldown — refuses package versions
+# published in the last 2 days to defeat fast-yanked supply-chain attacks
+# (Shai-Hulud / Mini Shai-Hulud / Qix). uv version is pinned so this layer
+# is itself reproducible.
+RUN pip install --no-cache-dir "uv==0.11.11" \
+    && UV_EXCLUDE_NEWER="$(date -u -d '2 days ago' +%Y-%m-%d)" \
+       uv pip install --system --no-cache \
         "aiohttp>=3.9,<4" \
         "psycopg[binary]>=3.1,<4" \
         "pydantic>=2.6,<3" \
