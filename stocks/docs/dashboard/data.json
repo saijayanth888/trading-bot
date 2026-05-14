@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-12T17:30:03.256883",
+  "generated_at": "2026-05-13T17:30:36.176888",
   "state": {
     "peak_equity": 100000.0,
     "circuit_breaker_triggered": false,
@@ -83,6 +83,12 @@
       "equity": 99534.73,
       "cash": 99534.73,
       "day_pnl": -405.23
+    },
+    {
+      "date": "2026-05-13",
+      "equity": 99519.46,
+      "cash": 100609.46,
+      "day_pnl": -15.27
     }
   ],
   "daily_snapshots": [
@@ -206,23 +212,127 @@
       "positions": [],
       "trades_today": 0,
       "trades_this_week": 5
+    },
+    {
+      "date": "2026-05-13",
+      "equity": 99519.46,
+      "cash": 100609.46,
+      "day_pnl_dollars": -15.269999999989523,
+      "day_pnl_pct": -0.015341378833287159,
+      "positions": [
+        {
+          "symbol": "COIN260522P00190000",
+          "qty": -1.0,
+          "avg_entry_price": 4.55,
+          "current_price": 4.65,
+          "unrealized_pl": -10.0,
+          "unrealized_plpc": -0.02198,
+          "market_value": -465.0,
+          "side": "short",
+          "asset_class": "us_option"
+        },
+        {
+          "symbol": "NVDA260522P00220000",
+          "qty": -1.0,
+          "avg_entry_price": 6.2,
+          "current_price": 6.25,
+          "unrealized_pl": -5.0,
+          "unrealized_plpc": -0.00806,
+          "market_value": -625.0,
+          "side": "short",
+          "asset_class": "us_option"
+        }
+      ],
+      "trades_today": 0,
+      "trades_this_week": 5
     }
   ],
   "open_trades": {},
-  "closed_trades": [],
+  "closed_trades": [
+    {
+      "symbol": "SOFI260522P00015500",
+      "exit_price": null,
+      "pnl_pct": -45.714,
+      "exit_reason": "stop-out",
+      "ticker": "SOFI260522P00015500",
+      "exit_date": "2026-05-12",
+      "regime": "BEAR_VOLATILE",
+      "side": "long",
+      "phase": "midday",
+      "setup_tag": "momentum",
+      "pead_event_date": null,
+      "entry_date": null
+    },
+    {
+      "symbol": "PLTR260522P00130000",
+      "exit_price": null,
+      "pnl_pct": -28.505000000000003,
+      "exit_reason": "stop-out",
+      "ticker": "PLTR260522P00130000",
+      "exit_date": "2026-05-12",
+      "regime": "BEAR_VOLATILE",
+      "side": "long",
+      "phase": "midday",
+      "setup_tag": "momentum",
+      "pead_event_date": null,
+      "entry_date": null
+    },
+    {
+      "symbol": "NVDA260522P00215000",
+      "exit_price": null,
+      "pnl_pct": -35.294,
+      "exit_reason": "stop-out",
+      "ticker": "NVDA260522P00215000",
+      "exit_date": "2026-05-12",
+      "regime": "BEAR_VOLATILE",
+      "side": "long",
+      "phase": "midday",
+      "setup_tag": "momentum",
+      "pead_event_date": null,
+      "entry_date": null
+    },
+    {
+      "symbol": "MARA260522P00012000",
+      "exit_price": null,
+      "pnl_pct": -105.55600000000001,
+      "exit_reason": "stop-out",
+      "ticker": "MARA260522P00012000",
+      "exit_date": "2026-05-12",
+      "regime": "BEAR_VOLATILE",
+      "side": "long",
+      "phase": "midday",
+      "setup_tag": "momentum",
+      "pead_event_date": null,
+      "entry_date": null
+    },
+    {
+      "symbol": "HOOD260522P00078000",
+      "exit_price": null,
+      "pnl_pct": -57.143,
+      "exit_reason": "stop-out",
+      "ticker": "HOOD260522P00078000",
+      "exit_date": "2026-05-12",
+      "regime": "BEAR_VOLATILE",
+      "side": "long",
+      "phase": "midday",
+      "setup_tag": "momentum",
+      "pead_event_date": null,
+      "entry_date": null
+    }
+  ],
   "stats": {
-    "total_trades": 0,
+    "total_trades": 5,
     "wins": 0,
     "losses": 0,
     "win_rate": 0.0,
-    "total_pnl": 0,
+    "total_pnl": 0.0,
     "best_trade": 0.0,
     "worst_trade": 0.0,
     "avg_r_multiple": 0.0,
-    "max_drawdown_pct": 0.47,
-    "current_drawdown_pct": 0.47
+    "max_drawdown_pct": 0.48,
+    "current_drawdown_pct": 0.48
   },
   "handoff": {
-    "raw": "# Daily Handoff \u2014 2026-05-12\n\n## pre-market | 09:02 EDT\nconfirmed: NVDA\nskipped: AMD, CCJ, GOOGL, CRDO, AVGO\nmarket: bullish=9 bearish=0 of 30\nregime: BEAR_VOLATILE\nmacro: HIGH\nlessons: none\n\n## pre-execute | 09:30 EDT\nvalidated: NVDA\nrejected: none\n\n## market-open | 09:36 EDT\ntraded: none\ncount: 0\nregime: BEAR_VOLATILE\nmacro: Event day: CPI May 2026\n\n## midday | 13:02 EDT\ncuts: SOFI260522P00015500, NVDA260522P00215000, PLTR260522P00130000, MARA260522P00012000, HOOD260522P00078000\nstops_tightened: 0\nthesis_breaks: none\nregime: BEAR_VOLATILE\nactions: HOOD260522P00078000: hard cut at -57.1%; MARA260522P00012000: hard cut at -105.6%; NVDA260522P00215000: hard cut at -35.3%; PLTR260522P00130000: hard cut at -28.5%; SOFI260522P00015500: hard cut at -45.7%\n\n## daily-summary | 17:30 EDT\nequity: $99,534.73\ncash: $99,534.73\nday_pnl: -0.41%\nopen_positions: 0\ncircuit_breaker: OK\n"
+    "raw": "# Daily Handoff \u2014 2026-05-13\n\n## pre-market | 09:03 EDT\nconfirmed: GOOGL\nskipped: AMD, NVDA, AVGO, CRDO, META\nmarket: bullish=18 bearish=1 of 30\nregime: BEAR_VOLATILE\nmacro: ELEVATED\nlessons: C | -45.7% | stop_hunt | Consider tightening stop-losses earlier in volatile bear markets to limit downside risk.; C | -28.5% | thesis_decay | Avoid holding bearish options trades through major market declines.; C | -35.3% | thesis_decay | In volatile bearish regimes, prioritize protecting gains over trying to capture remaining upside.\n\n## pre-execute | 09:30 EDT\nvalidated: GOOGL\nrejected: none\n\n## market-open | 09:36 EDT\ntraded: none\ncount: 0\nregime: BEAR_VOLATILE\nmacro: Day after: CPI May 2026\n\n## midday | 13:00 EDT\ncuts: none\nstops_tightened: 0\nthesis_breaks: none\nregime: BEAR_VOLATILE\nactions: no actions\n\n## daily-summary | 17:30 EDT\nequity: $99,519.46\ncash: $100,609.46\nday_pnl: -0.02%\nopen_positions: 2\ncircuit_breaker: OK\n"
   }
 }
