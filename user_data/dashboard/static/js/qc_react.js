@@ -80,7 +80,27 @@
     );
   }
 
-  function NumberRoll({ value, decimals = 2, prefix = "", suffix = "", className = "" }) {
+  // C-4 fix: NumberRoll splattered "0 1 2 3 4 5 6 7 8 9" when value was
+  // null/undefined/NaN because the digit-track structure rendered (one
+  // Digit per character of "—") and on the very first render `prev.current`
+  // was set to whatever-the-initial-value-was, while the useMemo branch
+  // mid-update could collide with stale per-digit transforms. The right
+  // place to guard is at the top of the render function — collapse to a
+  // plain "—" span BEFORE the per-digit rolodex structure ever mounts.
+  // Wrapper does the null check; impl is the original rolodex renderer.
+  function NumberRoll(props) {
+    const value = props && props.value;
+    if (value == null || (typeof value === "number" && isNaN(value))) {
+      return h(
+        "span",
+        { className: cls("num", "dim", "mono", props && props.className) },
+        "—"
+      );
+    }
+    return h(_NumberRollImpl, props);
+  }
+
+  function _NumberRollImpl({ value, decimals = 2, prefix = "", suffix = "", className = "" }) {
     const str = useMemo(() => {
       if (value == null || isNaN(value)) return "—";
       return Math.abs(value).toLocaleString("en-US", {

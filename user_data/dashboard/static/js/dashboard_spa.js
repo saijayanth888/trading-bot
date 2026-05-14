@@ -725,8 +725,18 @@
       ? h("span", { className: "pill accent" }, h("span", { className: "dot accent pulse" }), " LIVE")
       : h("span", { className: "pill down" }, h("span", { className: "dot down" }), " OFFLINE");
 
+    // H-4 fix: subtitle used to read "TFT · meta-agent" — a Wave D
+    // holdover. The inline label below correctly says "MOMENTUM CLASSIFIER"
+    // because Wave D renamed the producer to a heuristic momentum
+    // classifier (no deep TFT model live yet). Derive the subtitle from
+    // tft.classifier so the two never drift again. Falls back to
+    // "momentum" if the producer hasn't tagged itself.
+    const classifierName = (tft.classifier ? String(tft.classifier) : "momentum")
+      .toLowerCase().replace(/_/g, " ");
+    const cardSub = classifierName + " · meta-agent";
+
     return h(Card, {
-      num: "02", title: "Model view", sub: "TFT · meta-agent",
+      num: "02", title: "Model view", sub: cardSub,
       right: h(F, null,
         h(TimeSince, { ts: fetchedAt, className: "mono dim", style: { fontSize: "var(--t-2xs)", marginRight: 8 } }),
         cardPill
