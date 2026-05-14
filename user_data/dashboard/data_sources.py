@@ -1,17 +1,16 @@
 """
 Data fetchers for the dashboard.
 
-Three sources, each with graceful degradation:
+Post-2026-05-14 (freqtrade decommissioned), three sources remain:
 
-  1. Freqtrade REST API (port 8080) — live candles + analyzed columns
-     (regime_label, up/flat/down, meta_signal, tft_confidence). Requires
-     `FREQTRADE_API_USER` / `FREQTRADE_API_PASS`.
-  2. trade_journal in PostgreSQL — trade markers,
-     daily P&L, recent trade history.
+  1. Coinbase Advanced Trade public REST — live candles for chart rendering.
+  2. trade_journal in PostgreSQL — trade markers, daily P&L, recent trade
+     history. Quanta-core writes here on every paper-fill.
   3. evolution.json (`user_data/logs/evolution.json`) — current champion ID.
 
-When the freqtrade API is unreachable the candle endpoint falls back to
-public CCXT/Coinbase fetches so the chart still renders.
+The freqtrade REST API client (ft_authed_get + JWT cache + fetch_freqtrade_*)
+was removed when the freqtrade service was retired. See memory
+`freqtrade_decommissioned`.
 """
 
 from __future__ import annotations
@@ -65,235 +64,13 @@ def _resolve_dsn() -> str:
 
 DATABASE_URL = _resolve_dsn()
 
-FREQTRADE_API = os.environ.get("FREQTRADE_API_URL", "http://freqtrade:8080")
-FREQTRADE_USER = os.environ.get("FREQTRADE_API_USER", "freqtrader")
-FREQTRADE_PASS = os.environ.get("FREQTRADE_API_PASS", "")
-
-# Public Coinbase Advanced Trade public-data endpoint, used only as a
-# fallback when freqtrade is unreachable. Public, no auth needed.
+# Public Coinbase Advanced Trade public-data endpoint — primary candle
+# source post-freqtrade decommissioning (2026-05-14).
 COINBASE_PUBLIC = "https://api.exchange.coinbase.com"
 
 
 # ---------------------------------------------------------------------------
-# Freqtrade API
-# ---------------------------------------------------------------------------
-
-
-_jwt_lock = asyncio.Lock()
-_jwt_token: str | None = None
-_jwt_expires_at: datetime | None = None
-
-
-async def _ensure_jwt(client: httpx.AsyncClient, force_refresh: bool = False) -> str | None:
-    """Login once, cache the JWT until ~9 minutes have passed.
-
-    When ``force_refresh`` is True we drop the cached token and re-login —
-    used by ``ft_authed_get`` to recover from server-side 401s (freqtrade
-    rotates its signing key on restart, invalidating our cached JWT before
-    the 9-minute TTL expires).
-
-    Post-cutover (LIVE_ENGINE_MODE=live|shadow), freqtrade is stopped —
-    short-circuit early so the dashboard doesn't spam "name resolution
-    failure" warnings 20×/second on every legacy endpoint that still
-    calls ft_authed_get under the hood.
-    """
-    # V4 short-circuit — avoid 20+ "Temporary failure in name resolution"
-    # warnings per request when freqtrade is dead.
-    import os as _os
-    if (_os.environ.get("LIVE_ENGINE_MODE") or "").lower() in ("live", "shadow"):
-        return None
-
-    global _jwt_token, _jwt_expires_at
-    async with _jwt_lock:
-        if force_refresh:
-            _jwt_token = None
-            _jwt_expires_at = None
-        if _jwt_token and _jwt_expires_at and datetime.now(timezone.utc) < _jwt_expires_at:
-            return _jwt_token
-        if not FREQTRADE_PASS:
-            return None
-        try:
-            resp = await client.post(
-                f"{FREQTRADE_API}/api/v1/token/login",
-                auth=(FREQTRADE_USER, FREQTRADE_PASS), timeout=5.0,
-            )
-            if resp.status_code != 200:
-                logger.warning("freqtrade login failed status=%s", resp.status_code)
-                return None
-            payload = resp.json()
-            _jwt_token = payload.get("access_token")
-            _jwt_expires_at = datetime.now(timezone.utc) + timedelta(minutes=9)
-            return _jwt_token
-        except Exception as exc:
-            logger.warning("freqtrade login exception: %s", exc)
-            return None
-
-
-def _invalidate_jwt() -> None:
-    """Drop the cached JWT so the next caller re-logs in.
-
-    Used by ``ft_authed_get`` after a 401 — fixes the "78 401s in 30 min"
-    cascade where freqtrade rotated keys (restart, reload_config) but our
-    cache kept the stale token until the 9-min TTL expired. Synchronous so
-    it can be called from inside the request flow without re-acquiring the
-    asyncio lock.
-    """
-    global _jwt_token, _jwt_expires_at
-    _jwt_token = None
-    _jwt_expires_at = None
-
-
-async def ft_authed_get(
-    client: httpx.AsyncClient,
-    path: str,
-    *,
-    params: dict | None = None,
-    timeout: float = 5.0,
-) -> httpx.Response | None:
-    """GET <freqtrade>/path with the cached JWT; retry once on 401.
-
-    Pattern:
-      1. Attach the cached/freshly-issued token via _ensure_jwt().
-      2. Issue the GET.
-      3. If response is 401, invalidate the cache, force-refresh, retry ONCE.
-      4. Returns the (possibly-second-attempt) Response; None if no token at all.
-
-    This is the single hot path that previously produced the 78 401s/30 min
-    flood in the dashboard logs whenever freqtrade restarted — we now
-    transparently re-auth on first failure instead of 401-spinning for 9 min.
-    """
-    token = await _ensure_jwt(client)
-    if token is None:
-        return None
-    url = f"{FREQTRADE_API}{path}"
-    headers = {"Authorization": f"Bearer {token}"}
-    resp = await client.get(url, params=params, headers=headers, timeout=timeout)
-    if resp.status_code != 401:
-        return resp
-    # 401 → drop the cache, force a re-login, retry once.
-    logger.info("freqtrade %s returned 401 with cached JWT — refreshing token", path)
-    _invalidate_jwt()
-    token = await _ensure_jwt(client, force_refresh=True)
-    if token is None:
-        return resp  # caller sees the 401 since we couldn't re-auth.
-    headers = {"Authorization": f"Bearer {token}"}
-    return await client.get(url, params=params, headers=headers, timeout=timeout)
-
-
-# Tiny in-process TTL cache for pair_candles. The dashboard's gates,
-# sparklines and pair-telemetry endpoints all hit freqtrade for the same
-# (pair, timeframe, limit) triple every 10s. Without caching, 8 crypto
-# pairs × 3 endpoints × 6 calls/min = 144 freqtrade hits/min, which
-# trickled through to Coinbase REST and produced the 429 Too Many Requests
-# bursts on 2026-05-11 17:59 / 18:28. 30s TTL dedupes within a single
-# polling sweep without staling beyond a 5m-candle's resolution.
-_CANDLE_CACHE: dict[tuple, tuple[float, "pd.DataFrame | None"]] = {}
-_CANDLE_CACHE_TTL_S = float(os.environ.get("DASHBOARD_CANDLE_CACHE_TTL_S", "30"))
-
-
-async def fetch_freqtrade_candles(
-    pair: str, timeframe: str = "5m", limit: int = 500,
-) -> pd.DataFrame | None:
-    """Pull pair_candles (candles + analyzed columns) from freqtrade.
-
-    Retry-with-smaller-limit: freqtrade's pair_candles still 500s on some
-    older candles for the newer alts (ADA/XRP/DOGE/AVAX/LINK) due to a
-    deep numpy.int64 serialization issue we can't fully scrub from the
-    strategy side (only newer candles get the int promotion; the cached
-    frame's older rows from before the fix landed are stuck). If a fetch
-    fails, we step down to a smaller limit so we at least return SOMETHING
-    for telemetry rather than 0 rows.
-
-    Cache: 30s TTL per (pair, timeframe, limit) — Coinbase 429 mitigation.
-    """
-    cache_key = (pair, timeframe, limit)
-    now = time.monotonic()
-    cached = _CANDLE_CACHE.get(cache_key)
-    if cached is not None and (now - cached[0]) < _CANDLE_CACHE_TTL_S:
-        # Return a shallow copy so callers that mutate the df don't poison
-        # the cache. pandas DataFrame copy is cheap for the ≤500-row frames
-        # we deal with here.
-        return cached[1].copy() if cached[1] is not None else None
-    async with httpx.AsyncClient() as client:
-        # Use ft_authed_get so a 401 (e.g. freqtrade restart rotated its
-        # signing key) triggers exactly one transparent re-login instead of
-        # silently returning None for the next ~9 minutes.
-
-        # Try the requested limit first, then progressively smaller windows
-        # that strip away the int64-tainted older rows.
-        ladder: list[int] = [limit]
-        for step in (50, 30, 20, 10):
-            if step < limit and step not in ladder:
-                ladder.append(step)
-
-        payload: dict[str, Any] | None = None
-        for try_limit in ladder:
-            try:
-                resp = await ft_authed_get(
-                    client,
-                    "/api/v1/pair_candles",
-                    params={"pair": pair, "timeframe": timeframe, "limit": try_limit},
-                    timeout=10.0,
-                )
-                if resp is None:
-                    return None
-                if resp.status_code == 200:
-                    payload = resp.json()
-                    if try_limit != limit:
-                        logger.info(
-                            "pair_candles %s: served limit=%d (asked %d) — older rows tainted",
-                            pair, try_limit, limit,
-                        )
-                    break
-                if resp.status_code != 500:
-                    logger.warning(
-                        "pair_candles %s status=%s body=%s",
-                        pair, resp.status_code, resp.text[:200],
-                    )
-                    return None
-            except Exception as exc:
-                logger.warning("pair_candles fetch %s limit=%d: %s", pair, try_limit, exc)
-                continue
-
-        if payload is None:
-            logger.warning("pair_candles %s: all retries failed", pair)
-            return None
-
-    cols = payload.get("columns") or []
-    rows = payload.get("data") or []
-    if not cols or not rows:
-        return None
-    df = pd.DataFrame(rows, columns=cols)
-    if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
-    _CANDLE_CACHE[cache_key] = (now, df)
-    # Bound the cache so it can't grow unbounded if the operator scans
-    # many pairs. Drop entries older than 2× TTL.
-    if len(_CANDLE_CACHE) > 64:
-        stale_cutoff = now - (2 * _CANDLE_CACHE_TTL_S)
-        for k in [k for k, v in _CANDLE_CACHE.items() if v[0] < stale_cutoff]:
-            _CANDLE_CACHE.pop(k, None)
-    return df
-
-
-async def fetch_freqtrade_status() -> dict[str, Any]:
-    """Open-trade summary + balance from freqtrade."""
-    out: dict[str, Any] = {"open_trades": [], "balance": None}
-    async with httpx.AsyncClient() as client:
-        try:
-            r1 = await ft_authed_get(client, "/api/v1/status", timeout=5.0)
-            if r1 is not None and r1.status_code == 200:
-                out["open_trades"] = r1.json() or []
-            r2 = await ft_authed_get(client, "/api/v1/balance", timeout=5.0)
-            if r2 is not None and r2.status_code == 200:
-                out["balance"] = r2.json()
-        except Exception as exc:
-            logger.debug("freqtrade status fetch failed: %s", exc)
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Coinbase public fallback
+# Coinbase public REST (the only candle source post-2026-05-14)
 # ---------------------------------------------------------------------------
 
 

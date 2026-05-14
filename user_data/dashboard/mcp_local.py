@@ -36,7 +36,6 @@ from typing import Any, Callable
 
 import httpx
 
-from .data_sources import _ensure_jwt
 from . import ops_db
 
 logger = logging.getLogger(__name__)
@@ -134,26 +133,21 @@ def _require_auth() -> dict | None:
 
 
 # --------------------------------------------------------------------------
-# freqtrade API helper (mirrors hermes-mcp/server.py:_ft_get)
+# freqtrade API helper — STUBBED 2026-05-14
 # --------------------------------------------------------------------------
+#
+# Post-freqtrade-decommissioning: _ft_get always returns None. The MCP tools
+# get_open_trades / get_risk_status that consume it now produce empty data
+# instead of crashing the dashboard. A proper port to quanta-core sources
+# (ops_db.open_positions + ops_db.trades_risk_summary) is queued for the
+# file-deletion phase. See memory `freqtrade_decommissioned`.
 
 
 async def _ft_get(path: str) -> Any:
-    """Authenticated freqtrade GET with transparent 401 → re-login retry.
-
-    Wraps ``data_sources.ft_authed_get`` to keep this module's public surface
-    unchanged (callers still receive parsed JSON-or-None).
+    """No-op stub — freqtrade is gone. Returns None so callers degrade
+    gracefully (empty list / zero counts) instead of hitting an ImportError.
     """
-    from .data_sources import ft_authed_get
-    async with httpx.AsyncClient(timeout=4.0) as client:
-        try:
-            r = await ft_authed_get(client, path, timeout=4.0)
-            if r is None:
-                return None
-            return r.json() if r.status_code == 200 else None
-        except Exception as exc:
-            logger.debug("ft_get %s failed: %s", path, exc)
-            return None
+    return None
 
 
 # --------------------------------------------------------------------------

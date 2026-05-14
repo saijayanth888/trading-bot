@@ -116,27 +116,21 @@ def heartbeat_probe(path: Path = HEARTBEAT_FILE, max_age_s: float = HEARTBEAT_MA
 async def services_summary() -> dict[str, Any]:
     """Run all service probes in parallel.
 
-    Post-2026-05-13 cutover: freqtrade is replaced by quanta_core. The
-    quanta_core probe is a postgres query (no http listener on the
-    container) — checks decision freshness in quanta_schema.decisions.
+    Post-2026-05-14 (freqtrade decommissioned): quanta_core is the only
+    engine probed. The quanta_core probe is a postgres query (no http
+    listener on the container) — checks decision freshness in
+    quanta_schema.decisions.
 
     The host-only services (hermes-mcp, hermes-gateway, hermes-dashboard) are
     checked via heartbeat files because the host's firewall blocks docker
     bridge traffic to those ports. Heartbeat files are written by the
     hermes-gateway-heartbeat.service (user systemd, every 30 s).
     """
-    v4_active = (os.environ.get("LIVE_ENGINE_MODE") or "").lower() in ("live", "shadow")
-
     tasks: dict[str, Any] = {
-        "ollama":     tcp_probe(HOST, 11434),
-        "postgres":   tcp_probe("postgres", 5432),
+        "ollama":      tcp_probe(HOST, 11434),
+        "postgres":    tcp_probe("postgres", 5432),
+        "quanta_core": _quanta_core_probe(),
     }
-    # Engine probe: post-cutover, quanta_core (decision freshness via pg).
-    # Pre-cutover, fall back to the freqtrade HTTP ping. Never probe both.
-    if v4_active:
-        tasks["quanta_core"] = _quanta_core_probe()
-    else:
-        tasks["freqtrade"] = http_probe("http://freqtrade:8080/api/v1/ping")
 
     # Heartbeat-based (sync, fast)
     results: dict[str, Any] = {

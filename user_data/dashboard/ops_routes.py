@@ -33,7 +33,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from . import mcp_local, ops_db, ops_probes
-from .data_sources import _ensure_jwt, _invalidate_jwt, fetch_freqtrade_candles, ft_authed_get
+from .data_sources import fetch_coinbase_candles
 # NOTE: removed `from .stocks_sentiment import StocksSentimentFetcher` —
 # the placeholder pipeline was redundant. Per-symbol sentiment is already
 # produced by Shark's analyst_bull/analyst_bear/debate_orchestrator using
@@ -50,7 +50,6 @@ HERE = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(HERE / "templates"))
 
 ENDPOINT_TIMEOUT_S = float(os.environ.get("OPS_ENDPOINT_TIMEOUT_S", "3.5"))
-FREQTRADE_API_URL = os.environ.get("FREQTRADE_API_URL", "http://freqtrade:8080")
 
 
 def _envelope(status: str, data: Any = None, error: str | None = None) -> dict[str, Any]:
@@ -212,70 +211,20 @@ async def services():
 
 
 # --------------------------------------------------------------------------
-# /api/ops/uptime — real freqtrade + dashboard uptime for the SPA topbar
+# /api/ops/uptime — dashboard uptime for the SPA topbar
 # --------------------------------------------------------------------------
-# Replaces the hardcoded "14d 06:42:18" mock that previously sat in the
-# topbar. Reads freqtrade's first "Bot heartbeat" log line for its actual
-# start time; dashboard tracks its own start via _DASHBOARD_START_TS at
-# module import. Both values are seconds since UTC epoch.
+# Post-2026-05-14: freqtrade decommissioned, so the "BOT UP" pill that read
+# the freqtrade Bot-heartbeat line from rotated logs is gone. Dashboard
+# tracks its own start via _DASHBOARD_START_TS at module import. Quanta-core
+# liveness is surfaced via _quanta_core_probe in /api/ops/services instead.
 
 import time as _uptime_time
 _DASHBOARD_START_TS = _uptime_time.time()
 
 
-def _freqtrade_started_at() -> int | None:
-    """Approximate freqtrade's startup time as the earliest heartbeat across
-    rotated logs.
-
-    The traceback flood (numpy.int64 serialization errors) pushes the real
-    startup messages out of even the oldest rotated log. Using the EARLIEST
-    "Bot heartbeat" line across freqtrade.log + freqtrade.log.1..N gives us
-    a tight lower bound on actual startup (heartbeats fire every 60s after
-    boot, so we under-report by at most ~60s — acceptable for a topbar pill).
-
-    Returns Unix timestamp (seconds, UTC) or None if unreadable.
-    """
-    from datetime import datetime, timezone
-    log_dir = Path("/freqtrade/user_data/logs")
-    if not log_dir.exists():
-        return None
-    # Sort by numeric suffix DESC so oldest rotation is first (the .10 file
-    # is older than .1; .log is newest).
-    def _sort_key(name: str) -> int:
-        suffix = name.split(".")[-1]
-        return -int(suffix) if suffix.isdigit() else 0
-    files = sorted(
-        [f for f in os.listdir(log_dir) if f.startswith("freqtrade.log")],
-        key=_sort_key,
-    )
-    for name in files:
-        log = log_dir / name
-        try:
-            with log.open("r", errors="replace") as f:
-                for _ in range(50000):
-                    line = f.readline()
-                    if not line:
-                        break
-                    if "Bot heartbeat" in line:
-                        try:
-                            ts_part = line.split(" - ")[0]
-                            dt = datetime.strptime(ts_part, "%Y-%m-%d %H:%M:%S,%f")
-                            return int(dt.replace(tzinfo=timezone.utc).timestamp())
-                        except Exception:
-                            continue
-        except Exception as exc:
-            logger.debug("uptime: log %s parse failed: %s", log, exc)
-    return None
-
-
 @router.get("/uptime")
 async def uptime():
-    """Per-service start timestamps + computed uptime seconds.
-
-    Used by the SPA topbar's "BOT UP" / "DASH UP" pills so we stop showing
-    page-load time (which restarts every refresh) and instead show real
-    freqtrade process age.
-    """
+    """Dashboard start timestamp + computed uptime seconds for the topbar."""
     now = int(_uptime_time.time())
     out: dict[str, Any] = {
         "now": now,
@@ -283,14 +232,7 @@ async def uptime():
             "started_at": int(_DASHBOARD_START_TS),
             "uptime_s": now - int(_DASHBOARD_START_TS),
         },
-        "freqtrade": {"started_at": None, "uptime_s": None},
     }
-    ft_started = _freqtrade_started_at()
-    if ft_started:
-        out["freqtrade"] = {
-            "started_at": ft_started,
-            "uptime_s": now - ft_started,
-        }
     return _envelope("ok", data=out)
 
 
@@ -643,24 +585,17 @@ async def mcp():
 
 @router.get("/trades_risk")
 async def trades_risk():
-    """Combine freqtrade live status + Postgres-derived risk numbers."""
+    """Postgres-derived risk numbers + open positions from trade_journal.
+
+    Post-2026-05-14: freqtrade /api/v1/status is gone; quanta-core writes
+    every paper-fill into trade_journal, so open positions come from
+    ops_db.open_positions() (used by _quanta_open_positions in app.py).
+    """
     try:
-        # Run DB query and freqtrade probe concurrently
         loop = asyncio.get_running_loop()
-        db_task = loop.run_in_executor(None, ops_db.trades_risk_summary)
-
-        async def _ft():
-            async with httpx.AsyncClient(timeout=ENDPOINT_TIMEOUT_S) as client:
-                # ft_authed_get handles 401 → re-login → retry-once so a
-                # freqtrade restart no longer floods the dashboard with 401s
-                # until the cached JWT's 9-min TTL expires.
-                r = await ft_authed_get(client, "/api/v1/status", timeout=ENDPOINT_TIMEOUT_S)
-                if r is None:
-                    return {"status": None, "open_trades": [], "error": "freqtrade auth failed"}
-                return {"status": r.status_code, "open_trades": r.json() if r.status_code == 200 else []}
-
-        ft_data, db_data = await asyncio.wait_for(
-            asyncio.gather(_ft(), db_task), timeout=ENDPOINT_TIMEOUT_S * 2,
+        db_data = await asyncio.wait_for(
+            loop.run_in_executor(None, ops_db.trades_risk_summary),
+            timeout=ENDPOINT_TIMEOUT_S,
         )
     except asyncio.TimeoutError:
         return _envelope("down", error="trades_risk timed out")
@@ -668,11 +603,15 @@ async def trades_risk():
         logger.exception("trades_risk failed")
         return _envelope("down", error=str(exc))
 
-    open_trades = ft_data.get("open_trades") or []
+    try:
+        open_trades = ops_db.open_positions(limit=50)
+    except Exception:
+        logger.debug("open_positions fetch failed", exc_info=True)
+        open_trades = []
     open_count = len(open_trades) if isinstance(open_trades, list) else 0
 
     return _envelope(
-        "ok" if ft_data.get("status") == 200 else "degraded",
+        "ok",
         data={
             "open_count": open_count,
             "max_open": int(os.environ.get("OPS_MAX_OPEN_TRADES", "6")),
@@ -691,41 +630,12 @@ async def trades_risk():
                 for r in (db_data.get("live_tape") or [])
             ],
         },
-        error=None if ft_data.get("status") == 200 else f"freqtrade status={ft_data.get('status')}",
     )
 
 
 # --------------------------------------------------------------------------
 # Mutating: /api/ops/pause + /api/ops/resume
 # --------------------------------------------------------------------------
-
-
-async def _freqtrade_post(endpoint: str) -> tuple[int, dict | None, str | None]:
-    """POST to a freqtrade endpoint with auto re-auth on 401.
-
-    Pause/resume calls used to spend the rest of a 9-min TTL returning 401s
-    after a freqtrade restart — now we invalidate-and-retry-once exactly like
-    ft_authed_get does for the read side.
-    """
-    async with httpx.AsyncClient(timeout=ENDPOINT_TIMEOUT_S) as client:
-        token = await _ensure_jwt(client)
-        if token is None:
-            return 401, None, "freqtrade auth failed"
-        url = f"{FREQTRADE_API_URL}{endpoint}"
-        headers = {"Authorization": f"Bearer {token}"}
-        r = await client.post(url, headers=headers)
-        if r.status_code == 401:
-            logger.info("freqtrade POST %s 401 with cached JWT — refreshing token", endpoint)
-            _invalidate_jwt()
-            token = await _ensure_jwt(client, force_refresh=True)
-            if token is None:
-                return 401, None, "freqtrade auth failed (post-refresh)"
-            headers = {"Authorization": f"Bearer {token}"}
-            r = await client.post(url, headers=headers)
-        try:
-            return r.status_code, r.json(), None
-        except ValueError:
-            return r.status_code, None, "non-JSON response"
 
 
 def _run_state_set(*, paused: bool, reason: str | None, set_by: str) -> dict[str, Any]:
@@ -804,16 +714,12 @@ async def sparklines(timeframe: str = "5m", limit: int = 288):
         timeframe = "5m"
 
     async def _one(pair: str):
-        # Prefer freqtrade when available; fall back to Coinbase public REST
-        # post-cutover (the freqtrade container is stopped). Either source
-        # yields a df with a 'close' column; the rest of the math is the same.
-        df = await fetch_freqtrade_candles(pair, timeframe=timeframe, limit=limit)
-        if df is None or df.empty:
-            try:
-                from .data_sources import fetch_coinbase_candles
-                df = await fetch_coinbase_candles(pair, timeframe=timeframe, limit=limit)
-            except Exception:
-                df = None
+        # Post-2026-05-14: freqtrade decommissioned; coinbase public REST
+        # is the only source.
+        try:
+            df = await fetch_coinbase_candles(pair, timeframe=timeframe, limit=limit)
+        except Exception:
+            df = None
         if df is None or df.empty:
             return pair, {"closes": [], "current": None, "pct_24h": None}
         closes = [float(x) for x in df["close"].tolist()]
@@ -887,7 +793,7 @@ async def sparklines(timeframe: str = "5m", limit: int = 288):
             "limit": limit,
             "timeline_24h": timeline_24h,
         },
-        error=None if has_any else "freqtrade returned no candle data",
+        error=None if has_any else "no candle data returned by coinbase",
     )
 
 
@@ -955,7 +861,7 @@ async def regime_config_post(request: Request):
       2. Validate each value against its sanity range.
       3. Snapshot the old config to ``user_data/data/config-backup-<ts>.json``.
       4. Atomic-write the new config (tmp + rename).
-      5. Best-effort POST freqtrade ``/api/v1/reload_config`` so it picks up.
+      5. Quanta-core / unified_risk re-reads on its next cycle (no reload call needed).
 
     Returns the diff in the envelope so the frontend can confirm.
     """
@@ -1039,24 +945,15 @@ async def regime_config_post(request: Request):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"atomic write failed: {exc}")
 
-    # Best-effort freqtrade reload.
-    reload_status = None
-    try:
-        async with httpx.AsyncClient(timeout=ENDPOINT_TIMEOUT_S) as client:
-            token = await _ensure_jwt(client)
-            if token:
-                r = await client.post(f"{FREQTRADE_API_URL}/api/v1/reload_config",
-                                      headers={"Authorization": f"Bearer {token}"})
-                reload_status = r.status_code
-    except Exception as exc:
-        reload_status = f"error: {exc}"
-
+    # Post-2026-05-14: freqtrade /api/v1/reload_config is gone. Quanta-core
+    # re-reads regime params at the top of each cycle from the same
+    # config.json on disk; no service-side reload call is needed.
     return _envelope("ok", data={
         "changes": diffs,
         "backup": str(backup_path),
-        "freqtrade_reload": reload_status,
-        "note": "Some params (entry/exit deltas) take effect on the next candle. "
-                "Trail distance / take-profit affect new positions only.",
+        "note": "Quanta-core re-reads regime params on its next cycle. "
+                "Some params (entry/exit deltas) take effect on the next "
+                "candle; trail distance / take-profit affect new positions only.",
     })
 
 
@@ -1126,7 +1023,7 @@ async def risk_gates_post(request: Request):
       3. Snapshot the old config to ``user_data/data/config-backup-<ts>.json``.
       4. Atomic-write the new config (tmp + rename) — rolls back to the
          snapshot if validation throws after the snapshot is taken.
-      5. Best-effort POST freqtrade ``/api/v1/reload_config`` so it picks up.
+      5. Quanta-core / unified_risk re-reads on its next cycle (no reload call needed).
 
     Returns the diff in the envelope so the frontend can confirm.
     """
@@ -1199,22 +1096,12 @@ async def risk_gates_post(request: Request):
             pass
         raise HTTPException(status_code=500, detail=f"atomic write failed: {exc}")
 
-    # Best-effort freqtrade reload.
-    reload_status = None
-    try:
-        async with httpx.AsyncClient(timeout=ENDPOINT_TIMEOUT_S) as client:
-            token = await _ensure_jwt(client)
-            if token:
-                r = await client.post(f"{FREQTRADE_API_URL}/api/v1/reload_config",
-                                      headers={"Authorization": f"Bearer {token}"})
-                reload_status = r.status_code
-    except Exception as exc:
-        reload_status = f"error: {exc}"
-
+    # Post-2026-05-14: freqtrade /api/v1/reload_config is gone. unified_risk
+    # reads config.json on each evaluation, so the new values take effect
+    # on the next trading-loop tick without any service-side reload call.
     return _envelope("ok", data={
         "changes": diffs,
         "backup": str(backup_path),
-        "freqtrade_reload": reload_status,
         "note": "Risk gates take effect on the next trading-loop tick — "
                 "unified_risk.py reads config.json on each evaluation, "
                 "no process restart required.",
@@ -1287,7 +1174,7 @@ async def resume(request: Request):
         logger.warning("resume: could not clear risk_governor anchor: %s", exc)
 
     return _envelope("ok", data={
-        "freqtrade_response": payload,
+        "run_state_response": payload,
         "reason": body.get("reason", "ops-tab manual resume"),
         "drawdown_pause_cleared": anchor_cleared,
     })
@@ -1310,8 +1197,8 @@ _VISIBLE_ENV_VARS = (
     "PERPLEXITY_MODEL", "PERPLEXITY_RECENCY",
     # Dashboard
     "DASHBOARD_PAIRS", "DASHBOARD_TIMEFRAME", "DASHBOARD_WS_INTERVAL_SEC",
-    # Freqtrade
-    "FREQTRADE_API_URL", "FREQTRADE_API_USER",
+    # Engine
+    "LIVE_ENGINE_MODE",
     # MCP
     "HERMES_MCP_KEY", "HERMES_MCP_PORT", "HERMES_MCP_TRANSPORT",
     # Postgres
@@ -1861,7 +1748,11 @@ async def timeline(base: str, quote: str, hours: int = 24, timeframe: str = "5m"
     # ── Candles (close-only is enough for the sparkline) ──
     per_hour = {"1m": 60, "5m": 12, "15m": 4, "1h": 1, "6h": 1}.get(timeframe, 12)
     limit = min(500, hours * per_hour + 5)
-    df = await fetch_freqtrade_candles(pair, timeframe=timeframe, limit=limit)
+    # Post-2026-05-14: freqtrade decommissioned; coinbase is the only source.
+    try:
+        df = await fetch_coinbase_candles(pair, timeframe=timeframe, limit=limit)
+    except Exception:
+        df = None
     candles: list[dict] = []
     if df is not None and not df.empty:
         for _, row in df.iterrows():
@@ -2724,7 +2615,7 @@ async def gates():
       9. meta_confidence        >= META_MIN_CONFIDENCE (0.40) when DRL active
      10. account_capacity       open_count < max_open AND breaker clear
     """
-    from .data_sources import fetch_freqtrade_candles, latest_state_from_df
+    from .data_sources import latest_state_from_df
 
     # Strategy constants — read live from config so dashboard mirrors the
     # actual gate the strategy enforces. Falls back to the strategy defaults
@@ -2808,17 +2699,9 @@ async def gates():
     except Exception as exc:
         logger.warning("gates: account-level pg read failed: %s", exc)
 
-    # Legacy freqtrade probe — kept only to surface max_open_trades if the
-    # bot is still alive, otherwise we use the env default. Failures are
-    # silent because the call is expected to short-circuit post-cutover.
-    try:
-        async with httpx.AsyncClient(timeout=ENDPOINT_TIMEOUT_S) as client:
-            r2 = await ft_authed_get(client, "/api/v1/show_config", timeout=ENDPOINT_TIMEOUT_S)
-            if r2 is not None and r2.status_code == 200:
-                cfg = r2.json() or {}
-                max_open = int(cfg.get("max_open_trades") or max_open)
-    except Exception as exc:
-        logger.debug("gates: freqtrade max_open_trades probe failed (expected post-cutover): %s", exc)
+    # Post-2026-05-14: freqtrade max_open_trades probe removed (container
+    # retired). MAX_OPEN_TRADES env var (default 6) is now the source of
+    # truth for the gates display.
 
     # Per-pair gate evaluation
     # Pre-fetch the V4-era canonical regime once (single postgres roundtrip);
@@ -2881,14 +2764,15 @@ async def gates():
     rows = []
     for pair in pairs:
         try:
-            df = await fetch_freqtrade_candles(pair, timeframe, limit=5)
+            df = await fetch_coinbase_candles(pair, timeframe, limit=5)
             state = latest_state_from_df(df, pair) if df is not None else {}
         except Exception as exc:
-            logger.warning("gates: pair_candles failed for %s: %s", pair, exc)
+            logger.warning("gates: coinbase candles failed for %s: %s", pair, exc)
             state = {"_error": str(exc)}
 
-        # Post-cutover: freqtrade df empty → state.regime is None → fall back
-        # to the V4 hourly regime write (single source of truth post-cutover).
+        # Post-cutover: coinbase df has no FreqAI columns → state.regime is
+        # None → fall back to the V4 hourly regime write (single source of
+        # truth post-cutover).
         regime = state.get("regime") or _v4_regime or "unknown"
         delta = REGIME_DELTA.get(regime, 0.0)
         threshold = (BASE_ENTRY + delta) if delta is not None else None
@@ -3792,29 +3676,9 @@ async def live_trades():
     out: list[dict] = []
 
     # ── Crypto open trades ────────────────────────────
-    if _v4_is_active_engine():
-        out.extend(_v4_crypto_open_positions())
-    else:
-        try:
-            async with httpx.AsyncClient(timeout=ENDPOINT_TIMEOUT_S) as client:
-                r = await ft_authed_get(client, "/api/v1/status", timeout=ENDPOINT_TIMEOUT_S)
-                if r is not None and r.status_code == 200:
-                    for t in (r.json() or []):
-                        out.append({
-                            "kind": "crypto",
-                            "subkind": "long" if not t.get("is_short") else "short",
-                            "label": t.get("pair") or "?",
-                            "entry": t.get("open_rate"),
-                            "current": t.get("current_rate"),
-                            "qty": t.get("amount"),
-                            "pnl_pct": (t.get("profit_ratio") or 0) * 100,
-                            "pnl_usd": t.get("profit_abs"),
-                            "duration_s": t.get("trade_duration_s"),
-                            "opened_at": t.get("open_date"),
-                            "extra": f"regime@entry={t.get('regime', '—')}",
-                        })
-        except Exception as exc:
-            logger.warning("live_trades: freqtrade fetch failed: %s", exc)
+    # Post-2026-05-14: V4 (quanta-core) is the only crypto engine; the
+    # freqtrade /api/v1/status fallback is gone with the container.
+    out.extend(_v4_crypto_open_positions())
 
     # ── Wheel positions (puts/calls/shares) ─────────────────────────
     pos_file = STOCKS_ROOT / "wheel" / "state" / "positions.json"

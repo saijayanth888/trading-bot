@@ -35,8 +35,6 @@ from .data_sources import (
     fetch_champion,
     fetch_coinbase_candles,
     fetch_daily_pnl,
-    fetch_freqtrade_candles,
-    fetch_freqtrade_status,
     fetch_recent_trades,
     fetch_trade_markers,
     latest_state_from_df,
@@ -51,11 +49,8 @@ logging.basicConfig(
     level=os.environ.get("DASHBOARD_LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
-# Silence httpx per-request INFO logs. ft_authed_get already handles 401s
-# transparently (invalidate cache → re-auth → retry once) — the httpx
-# library was double-logging both the 401 AND the retry's 200, creating
-# 798 lines/hour of noise during the regime_config + freqtrade reload
-# bursts. We still see WARN/ERROR for genuine connection failures.
+# Silence httpx per-request INFO logs (kept the level pinned post-freqtrade
+# cutover so coinbase REST + ModelForge calls don't flood the dashboard log).
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 HERE = Path(__file__).resolve().parent
@@ -155,13 +150,12 @@ async def api_universe() -> dict[str, Any]:
 async def api_mode() -> dict[str, Any]:
     """Active trading engine + mode for the topbar badge.
 
-    Resolution order (post-cutover):
+    Post-2026-05-14 (freqtrade decommissioned):
       1. If LIVE_ENGINE_MODE env is "live" or "shadow" → V4 (quanta_core)
          is the active engine. Mode is "paper" (paper-fill simulator) or
-         "shadow" (no orders). State is "running" when the quanta-core
-         container is reachable on the compose network.
-      2. Otherwise, fall back to the legacy freqtrade probe.
-      3. If neither responds, mode=unknown.
+         "shadow" (no orders). State is "running" when there's a recent
+         decision row in quanta_schema.decisions.
+      2. Otherwise mode=unknown (no fallback engine to probe).
     """
     out: dict[str, Any] = {
         "mode": "unknown", "state": "unknown", "dry_run": None,
@@ -197,26 +191,9 @@ async def api_mode() -> dict[str, Any]:
             logger.debug("v4 liveness probe failed: %s", exc)
         return out
 
-    # ---- Legacy freqtrade branch ----
-    async with httpx.AsyncClient() as client:
-        from .data_sources import ft_authed_get
-        try:
-            r = await ft_authed_get(client, "/api/v1/show_config", timeout=3.0)
-            if r is not None and r.status_code == 200:
-                cfg = r.json()
-                state = str(cfg.get("state", "unknown")).lower()
-                dry = bool(cfg.get("dry_run", True))
-                out["engine"] = "freqtrade"
-                out["state"] = state
-                out["dry_run"] = dry
-                if state in ("paused", "stopped"):
-                    out["mode"] = "paused"
-                elif dry:
-                    out["mode"] = "paper"
-                else:
-                    out["mode"] = "live"
-        except Exception as exc:
-            logger.debug("mode probe failed: %s", exc)
+    # ---- No engine identified ----
+    # Post-2026-05-14 freqtrade decommissioning: when LIVE_ENGINE_MODE is
+    # unset there is no fallback engine to probe. Defaults stand.
     return out
 
 
@@ -231,11 +208,11 @@ async def api_candles(
     timeframe: str = DEFAULT_TIMEFRAME, limit: int = 500,
 ) -> dict[str, Any]:
     pair = f"{base.upper()}/{quote.upper()}"
-    df = await fetch_freqtrade_candles(pair, timeframe=timeframe, limit=limit)
-    source = "freqtrade"
-    if df is None or df.empty:
-        df = await fetch_coinbase_candles(pair, timeframe=timeframe, limit=limit)
-        source = "coinbase"
+    # Post-2026-05-14 (freqtrade decommissioned): coinbase public REST is
+    # the only candle source. FreqAI columns are no longer in the frame;
+    # _v4_state_fallback() merges regime/sentiment/onchain below.
+    df = await fetch_coinbase_candles(pair, timeframe=timeframe, limit=limit)
+    source = "coinbase"
     if df is None or df.empty:
         raise HTTPException(503, f"no candle source available for {pair}")
 
@@ -384,20 +361,10 @@ def _quanta_open_positions() -> list[dict[str, Any]]:
 async def _build_state_payload() -> dict[str, Any]:
     pair = (DEFAULT_PAIRS[0] if DEFAULT_PAIRS else "BTC/USD").strip()
 
-    # Wave A: freqtrade is no longer the source of truth for any sidebar
-    # field. We still call fetch_freqtrade_candles in case operator
-    # re-enables it for telemetry, but the canonical path is the V4
-    # fallback below — never None on the no-freqtrade case.
-    candles_task = asyncio.create_task(
-        fetch_freqtrade_candles(pair, timeframe=DEFAULT_TIMEFRAME, limit=200),
-    )
-    df = await candles_task
-
+    # Post-2026-05-14 (freqtrade decommissioned): coinbase candles for
+    # price/sparklines, V4 fallback for regime/sentiment/onchain/TFT.
+    df = await fetch_coinbase_candles(pair, timeframe=DEFAULT_TIMEFRAME, limit=200)
     pair_state = latest_state_from_df(df, pair) if df is not None else {}
-
-    # Always merge the V4 fallback. If freqtrade is alive (rare), it
-    # provides the same fields and wins via dict-update precedence; if
-    # not (the common case post-cutover), the fallback fills them in.
     if not pair_state.get("regime"):
         pair_state.update(_v4_state_fallback(pair))
     daily_pnl = fetch_daily_pnl()

@@ -1,5 +1,27 @@
 #!/usr/bin/env python3
 """
+DEPRECATED 2026-05-14 — freqtrade decommissioned.
+
+This script is freqtrade-coupled: it edits freqtrade's config.json
+(``tradable_balance_ratio``) and runs ``docker compose restart freqtrade``.
+With the freqtrade container retired, neither action is meaningful — the
+config knob is no longer read by any live engine, and the restart target
+no longer exists.
+
+The cron entry that fires this script every 5 minutes was disabled the
+same day. The script is kept on disk because the daily-loss / weekly-Sharpe
+guardrail concept is still wanted — but the implementation must be ported
+to quanta-core (read fills from public.trade_journal, write to
+quanta_schema.run_state.paused, restart quanta-core if needed).
+See memory ``freqtrade_decommissioned`` for the cutover context.
+
+Until the port lands this file short-circuits at import: a deprecation
+warning is logged and sys.exit(0) is called so a stray cron firing
+won't error or restart anything.
+
+────────────────────────────────────────────────────────────────────
+Original docstring (kept for the future quanta-core port):
+
 Hourly safety net.
 
 Two checks, in order of severity:
@@ -10,19 +32,6 @@ Two checks, in order of severity:
 
     2. Last-7-day annualised Sharpe < 0  → halve `tradable_balance_ratio`
        in config.json (with a floor of 0.05) and restart the bot.
-
-Designed for cron, e.g.
-
-    0 * * * * $HOME/Documents/trading-bot/scripts/auto_rollback.py \
-        >> $HOME/Documents/trading-bot/user_data/logs/auto_rollback.log 2>&1
-
-The previous shebang pointed at an operator-specific ML env. We've moved to
-``/usr/bin/env python3`` so the script is portable across machines; set
-``ML_ENV_PYTHON=/abs/path`` in the cron environment if you need a specific
-interpreter.
-
-Idempotent: re-running with no new trades closes is a no-op (each action
-records a marker in the state file, so consecutive crons don't double-fire).
 """
 
 from __future__ import annotations
@@ -343,5 +352,18 @@ def main() -> int:
     return 0
 
 
+def _deprecated_short_circuit() -> int:
+    """Hard exit — auto_rollback is freqtrade-coupled; freqtrade was retired
+    on 2026-05-14. See module docstring + memory `freqtrade_decommissioned`.
+    """
+    import logging as _l
+    _l.basicConfig(format="%(asctime)sZ %(levelname)s %(message)s", level=_l.INFO)
+    _l.warning(
+        "auto_rollback.py is deprecated post-2026-05-14 (freqtrade decommissioned). "
+        "Cron entry is disabled; port the safety-net logic to quanta-core.",
+    )
+    return 0
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_deprecated_short_circuit())
