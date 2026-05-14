@@ -491,20 +491,35 @@ class NewsAggregator:
         flooded with unrelated tech headlines. We keep stories that mention
         a watched pair OR have a strong finance keyword in the title.
         """
-        try:
-            from user_data.modules.hackernews import fetch_hn_top
-        except Exception:
-            return []
+        # Sibling-module import — works regardless of how the parent module
+        # is loaded (whether `user_data.modules.news_aggregator` from inside
+        # freqtrade, or `modules.news_aggregator` from the cron wrapper which
+        # only puts user_data/ on sys.path). Absolute `from user_data.modules.X`
+        # would silently fail in the latter case and the source would emit []
+        # for every poll — exactly the bug we hit pre-fix.
+        from .hackernews import fetch_hn_top
 
         try:
             items = await fetch_hn_top(limit=40)
         except Exception as exc:
             raise RuntimeError(f"hackernews: {exc}") from exc
 
+        # Crypto / finance keyword filter on the title. Note: HN's front
+        # page is mostly software / startup news, so on a typical day this
+        # filter rejects 80–100% of items. That's expected — HN is a
+        # supplementary signal, not a primary one. We still emit a
+        # per-poll log line so operators can see whether the filter is
+        # too aggressive on a given day.
         finance_kw = re.compile(
             r"\b(bitcoin|btc|ethereum|eth|crypto|sec |fed |inflation|"
             r"stock|nasdaq|s&p|fomc|interest rate|treasury|earnings|"
-            r"options|defi|rally|crash|bull|bear|liquidity)\b",
+            r"options|defi|rally|crash|bull|bear|liquidity|"
+            r"market|trade|trading|ipo|stocks|equity|equities|"
+            r"recession|tariff|gdp|cpi|jobs|unemployment|"
+            r"yield|bond|bonds|tesla|nvidia|apple|google|microsoft|"
+            r"openai|anthropic|meta|amazon|amd|intel|tsmc|broadcom|palantir|"
+            r"ai|llm|chip|chips|semiconductor|gpu|data center|datacenter|"
+            r"finance|financial|economy|economic)\b",
             re.IGNORECASE,
         )
         out: list[NewsItem] = []
@@ -533,10 +548,12 @@ class NewsAggregator:
         Carries StockTwits' explicit Bull/Bear sentiment tag in
         community_sentiment when present.
         """
-        try:
-            from user_data.modules.stocktwits import fetch_stocktwits_symbol_stream
-        except Exception:
-            return []
+        # Sibling-module import — see comment in _fetch_hackernews above for
+        # why we use relative form. Absolute `from user_data.modules.stocktwits`
+        # silently fails when news_aggregator is loaded as `modules.news_aggregator`
+        # (cron path), making the entire source emit []. Relative form is robust
+        # regardless of the parent package's name.
+        from .stocktwits import fetch_stocktwits_symbol_stream
 
         # Universe: high-attention names from the dashboard config.
         symbols = _config_or_fallback(
@@ -594,6 +611,19 @@ def store_aggregated(result: AggregatedNews) -> None:
     """
     from . import db
     import json
+    from collections import Counter
+
+    # Operator-visible per-poll summary: which sources contributed how many
+    # items + which sources failed. Cheap to compute and invaluable for
+    # spotting silent-empty bugs like the cron-path import failure that
+    # gave HN/StockTwits 0 rows pre-fix (was: silent empty list, looked OK).
+    _src_counts = Counter(i.source.split(":")[0] for i in result.items)
+    logger.info(
+        "[news] store_aggregated: items=%d per_source=%s failed=%s",
+        len(result.items),
+        dict(_src_counts),
+        [s for s, _ in result.sources_failed],
+    )
 
     try:
         with db.cursor() as cur:
