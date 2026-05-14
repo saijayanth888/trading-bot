@@ -182,6 +182,35 @@ def _record_push_failure(reason: str) -> None:
         logger.error("Could not write PUSH-FAILED.flag: %s", exc)
 
 
+def _memory_is_out_of_repo() -> bool:
+    """Return True iff _MEMORY_DIR is a symlink whose target sits outside the
+    trading-bot git repository.
+
+    This is the post-`a2d3979` (2026-05-13) data-out-of-repo layout: the
+    in-repo path `stocks/memory` is a symlink → `~/Documents/.dgx-train/shark/memory`.
+    Git refuses to `add` a pathspec that crosses such a symlink (since the
+    target is outside the working tree AND is .gitignored), so we must NOT
+    pass `memory/` to `git add` in that mode.
+
+    Detection is conservative: any IO error → False (assume in-repo legacy
+    layout and let the caller hit the original code path).
+    """
+    try:
+        if not _MEMORY_DIR.is_symlink():
+            return False
+        target = _MEMORY_DIR.resolve()
+        repo_root = Path(_PROJECT_ROOT).resolve().parent  # trading-bot/
+        # If the resolved target is NOT under the repo root, it's out-of-repo.
+        try:
+            target.relative_to(repo_root)
+        except ValueError:
+            return True
+        return False
+    except Exception as exc:
+        logger.debug("memory-out-of-repo detection failed: %s", exc)
+        return False
+
+
 def commit_memory(message: str) -> bool:
     """
     Stage all files in memory/ and create a git commit, then push.
@@ -194,22 +223,49 @@ def commit_memory(message: str) -> bool:
         memory/PUSH-FAILED.flag (which is committed and pushed on the next
         successful run) and return False so the operator is alerted.
 
+    Data-out-of-repo handling (added 2026-05-14 for C-2 fix):
+        Since `a2d3979` (2026-05-13) `stocks/memory/` is a symlink whose
+        target lives at `~/Documents/.dgx-train/shark/memory/` and is
+        explicitly .gitignored. Git refuses to `add` through that symlink
+        ("fatal: pathspec 'memory/' is beyond a symbolic link"), and even
+        if it didn't the destination is excluded from tracking by design.
+        We detect that layout, skip the impossible `memory/` add, and only
+        stage the still-in-repo `docs/dashboard/` path. Memory persistence
+        already happens at the filesystem level (atomic_write to the
+        symlink target); the git step only ever served the dashboard JSON
+        + the now-removed cloud-routine handoff use case.
+
     Args:
         message: Commit message.
 
     Returns:
-        True only when the commit was successfully pushed to origin/main.
-        False on any failure — the caller must treat this as a hard error.
+        True only when the commit was successfully pushed to origin/main
+        (or when there is nothing in-repo to commit — both are successful
+        no-ops from the caller's perspective). False on any real failure.
     """
     try:
-        add_result = _git("add", "memory/", "docs/dashboard/", timeout=30)
+        memory_out_of_repo = _memory_is_out_of_repo()
+        if memory_out_of_repo:
+            # Stage only the in-repo dashboard path. The symlinked memory dir
+            # is gitignored and persists at the filesystem level already.
+            add_paths: tuple[str, ...] = ("docs/dashboard/",)
+        else:
+            add_paths = ("memory/", "docs/dashboard/")
+
+        add_result = _git("add", *add_paths, timeout=30)
         if add_result.returncode != 0:
             logger.error("git add failed: %s", add_result.stderr)
             return False
 
-        status = _git("status", "--porcelain", "memory/", "docs/dashboard/", timeout=30)
+        status = _git("status", "--porcelain", *add_paths, timeout=30)
         if not status.stdout.strip():
-            logger.info("No changes in memory/ to commit.")
+            if memory_out_of_repo:
+                logger.info(
+                    "commit_memory: no in-repo changes (memory/ is out-of-repo "
+                    "by design since a2d3979; filesystem writes already persisted)."
+                )
+            else:
+                logger.info("No changes in memory/ to commit.")
             return True
 
         commit = _git("commit", "-m", message, timeout=30)
