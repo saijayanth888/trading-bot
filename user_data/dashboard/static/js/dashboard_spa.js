@@ -732,9 +732,13 @@
         cardPill
       )
     },
-      // TFT block — LIVE when a tft_log producer writes; OFFLINE until then.
+      // Classifier block — LIVE when classifier_log producer writes;
+      // OFFLINE until then. Wave D: this is the heuristic momentum
+      // classifier from quanta-core (NOT the old freqtrade TFT). Label
+      // accurately so the operator isn't misled.
       h("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
-        h("div", { className: "metric-label", style: { flex: 1 } }, "TFT CLASSIFIER · 24h horizon"),
+        h("div", { className: "metric-label", style: { flex: 1 } },
+          (tft.classifier || "MOMENTUM CLASSIFIER").toUpperCase().replace(/_/g, " ") + " · 5–30 MIN HORIZON"),
         hasTft
           ? h("span", { className: "pill up", style: { height: 14, fontSize: "var(--t-2xs)" } }, "LIVE")
           : h("span", { className: "pill down", style: { height: 14, fontSize: "var(--t-2xs)" } }, "OFFLINE")
@@ -754,10 +758,16 @@
             ),
             h("div", { className: "metric-label", style: { marginTop: 10 } },
               "CONFIDENCE · " + pct1(tft.confidence)),
-            h(ProgressBar, { value: (tft.confidence || 0) * 100, max: 100, cls: "accent" })
+            h(ProgressBar, { value: (tft.confidence || 0) * 100, max: 100, cls: "accent" }),
+            // Feature inputs (momentum, RSI, regime bias, sentiment) — gives
+            // the operator a transparent view of why the classifier said what.
+            tft.features && Object.keys(tft.features).length > 0
+              ? h("div", { className: "mono dim", style: { fontSize: "var(--t-2xs)", marginTop: 6, lineHeight: 1.5 } },
+                  "inputs: " + Object.entries(tft.features).map(([k, v]) => k + "=" + (typeof v === "number" ? v.toFixed(3) : v)).join(" · "))
+              : null
           )
         : h("div", { className: "dim", style: { fontSize: "var(--t-xs)", lineHeight: 1.55, marginTop: 6, marginBottom: 8 } },
-            "No tft_log producer yet — crypto TFT classifier was a freqtrade FreqAI artifact and was decommissioned with the cutover."
+            "No classifier_log rows yet — waiting for quanta-core's next cycle to write the momentum classifier output."
           ),
 
       h("div", { className: "hr" }),

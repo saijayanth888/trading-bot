@@ -315,6 +315,7 @@ def _v4_state_fallback(pair: str | None = None) -> dict[str, Any]:
     try:
         from .ops_db import (
             regime_latest, sentiment_latest, onchain_latest, meta_signal_latest,
+            classifier_latest,
         )
     except Exception:
         return out
@@ -349,6 +350,19 @@ def _v4_state_fallback(pair: str | None = None) -> dict[str, Any]:
             out["meta_confidence"] = ms["confidence"]
             out["meta_strategies"] = ms.get("strategies") or {}
             out["meta_reasoning"] = ms.get("reasoning")
+    except Exception:
+        pass
+    try:
+        cl = classifier_latest(pair)
+        if cl is not None:
+            # Wave D: card 02 TFT block reads these. UI labels this as
+            # "MOMENTUM CLASSIFIER" (not "TFT") — honest naming.
+            out["tft_up"] = cl["p_up"]
+            out["tft_flat"] = cl["p_flat"]
+            out["tft_down"] = cl["p_down"]
+            out["tft_confidence"] = cl["confidence"]
+            out["classifier_name"] = cl.get("classifier")
+            out["classifier_features"] = cl.get("features") or {}
     except Exception:
         pass
     return out
@@ -414,6 +428,8 @@ async def _build_state_payload() -> dict[str, Any]:
             "flat": pair_state.get("tft_flat"),
             "down": pair_state.get("tft_down"),
             "confidence": pair_state.get("tft_confidence"),
+            "classifier": pair_state.get("classifier_name"),
+            "features": pair_state.get("classifier_features"),
         },
         "meta_signal": pair_state.get("meta_signal"),
         "meta_confidence": pair_state.get("meta_confidence"),

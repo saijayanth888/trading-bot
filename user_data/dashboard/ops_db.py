@@ -177,6 +177,44 @@ def open_positions(limit: int = 50) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------
 
 
+def classifier_latest(pair: str | None) -> dict[str, Any] | None:
+    """Latest momentum-classifier row for ``pair`` from public.classifier_log.
+
+    Wave D of the post-freqtrade rebuild (2026-05-14). The classifier is
+    quanta-core's transparent heuristic that produces p_up/p_flat/p_down/
+    confidence per cycle. Replaces what the freqtrade FreqAI TFT used to
+    publish — and is honestly named "MOMENTUM CLASSIFIER" on the UI so the
+    operator isn't misled into thinking a deep model is running.
+    """
+    if not _HAVE_PG or not pair:
+        return None
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT ts, p_up, p_flat, p_down, confidence, "
+                "       features, classifier, horizon_min "
+                "FROM public.classifier_log "
+                "WHERE symbol=%s ORDER BY ts DESC LIMIT 1",
+                (pair,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return {
+                "ts": row["ts"],
+                "p_up": float(row["p_up"]),
+                "p_flat": float(row["p_flat"]),
+                "p_down": float(row["p_down"]),
+                "confidence": float(row["confidence"]),
+                "features": row.get("features") or {},
+                "classifier": row.get("classifier") or "unknown",
+                "horizon_min": int(row.get("horizon_min") or 0),
+            }
+    except Exception as exc:
+        logger.debug("classifier_latest(%s) failed: %s", pair, exc)
+        return None
+
+
 def meta_signal_latest(pair: str | None) -> dict[str, Any] | None:
     """Latest synthesized meta-signal for ``pair`` from public.meta_signal_log.
 
