@@ -439,16 +439,31 @@ def get_llm_client(
 
 
 def _resolve_ollama_model(role: str, tier: str) -> str:
-    """Pick the Ollama model honouring per-role overrides + legacy var names."""
+    """Pick the Ollama model honouring per-role overrides + legacy var names.
+
+    Role-name normalisation: env var keys cannot contain hyphens, so a role
+    like ``trading-regime-tagger`` must look up ``SHARK_TRADING_REGIME_TAGGER_LLM_MODEL``.
+    Pre-2026-05-14 this function did ``role.upper()`` only — leaving hyphens
+    in — which silently broke EVERY override that ``chat_by_role`` set for
+    routed roles (it normalises to underscores when writing the env key).
+    Result: routed roles (trading-bull, trading-bear, trading-arbiter,
+    trading-regime-tagger, trading-reflector, trading-indicator-selector)
+    quietly fell through to the generic ``hermes3:8b`` / ``hermes3:70b``
+    instead of the role-specific model from model_tiers.json — the tracker
+    then logged a generic model name and the dashboard's per-role courtroom
+    cell never saw role-specific telemetry. Normalising here at the read
+    side keeps both halves of the contract consistent.
+    """
+    env_role = role.upper().replace("-", "_")
     if tier == "fast":
         return (
-            os.environ.get(f"SHARK_{role.upper()}_LLM_MODEL", "")
+            os.environ.get(f"SHARK_{env_role}_LLM_MODEL", "")
             or os.environ.get("OLLAMA_FAST_MODEL", "")
             or os.environ.get("OLLAMA_MODEL_FAST", "")     # legacy/crypto name
             or "hermes3:8b"
         )
     return (
-        os.environ.get(f"SHARK_{role.upper()}_LLM_MODEL", "")
+        os.environ.get(f"SHARK_{env_role}_LLM_MODEL", "")
         or os.environ.get("OLLAMA_MODEL", "")
         or os.environ.get("OLLAMA_MODEL_DEEP", "")         # legacy/crypto name
         or "hermes3:70b"

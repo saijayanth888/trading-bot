@@ -11,10 +11,23 @@ Detection method (no ML required — deterministic + robust):
   1. Trend: SPY price vs 50-day SMA + 20/50 SMA crossover
   2. Volatility: 14-day ATR as percentage of price vs 90-day ATR percentile
   3. Breadth confirmation: ratio of watchlist stocks above their own 20-day SMA
+
+LLM annotation (added 2026-05-14):
+  After the deterministic classifier produces the regime label, a best-effort
+  ``trading-regime-tagger`` LLM call (route in stocks/shark/model_tiers.json,
+  defaults to ``hermes3:8b-trader`` on Ollama) produces a one-line natural-
+  language ``regime_tag`` + ``regime_narrative``. This is the canonical
+  ``regime_tagger`` role the dashboard's AgentFlow courtroom expects to
+  fire on every phase — pre-2026-05-14 the role was configured in JSON
+  but had NO Python caller, so the courtroom showed "idle" forever (60+
+  hours during the 2026-05-12 → 2026-05-14 outage). Failures are silent:
+  if Ollama is down the deterministic regime still flows through; the LLM
+  is a commentator, never a gatekeeper.
 """
 
 import logging
 import os
+import time
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -24,6 +37,13 @@ import pandas as pd
 from shark.data.alpaca_data import get_bars
 
 logger = logging.getLogger(__name__)
+
+# In-process cache for the LLM tag — avoids hammering Ollama if detect_regime
+# is called multiple times per phase (pre_market + market_open + midday can
+# each invoke it). 30-min TTL keeps the tag fresh against the daily cron
+# cadence without burning a call on every Python-level re-import.
+_LLM_TAG_CACHE: dict[str, Any] = {"ts": 0.0, "key": "", "tag": "", "narrative": ""}
+_LLM_TAG_CACHE_TTL_S = 1800.0
 
 
 class MarketRegime(str, Enum):
@@ -249,12 +269,113 @@ def detect_regime() -> dict[str, Any]:
         regime.value, trend_score, atr_pct, atr_percentile, rules["description"],
     )
 
+    # ── LLM regime tagger (best-effort, never gates the deterministic regime) ──
+    # The deterministic classifier above is the source of truth for trading
+    # decisions. The LLM call below is purely a commentator — it produces a
+    # one-line natural-language tag the dashboard's AgentFlow courtroom can
+    # display. Wired here (not in each phase) so EVERY caller of
+    # detect_regime gets the same per-phase LLM heartbeat, keeping the
+    # ``regime_tagger`` role from going stagnant when there are no closed
+    # equity trades or no candidates clear the catalyst gate.
+    llm_tag, llm_narrative = _llm_annotate_regime(regime, details)
+
     return {
         "regime": regime,
         "rules": rules,
         "details": details,
+        "regime_tag": llm_tag,
+        "regime_narrative": llm_narrative,
         "timestamp": datetime.now().isoformat(),
     }
+
+
+def _llm_annotate_regime(regime: MarketRegime, details: dict) -> tuple[str, str]:
+    """Best-effort LLM annotation of the regime.
+
+    Returns ``(tag, narrative)`` strings. On any failure (Ollama down,
+    timeout, JSON parse error) returns ``("", "")`` — the deterministic
+    regime is the source of truth, so the caller's flow is untouched.
+
+    Cached for ``_LLM_TAG_CACHE_TTL_S`` to avoid burning a call on every
+    repeated detect_regime() invocation within a phase. Cache key includes
+    the deterministic regime + trend score + ATR percentile bucket so a
+    legitimate regime flip invalidates the cache immediately.
+    """
+    now = time.time()
+    cache_key = f"{regime.value}|{details.get('trend_score')}|{int(details.get('atr_percentile', 0) // 5)}"
+    if (
+        now - _LLM_TAG_CACHE["ts"] < _LLM_TAG_CACHE_TTL_S
+        and _LLM_TAG_CACHE["key"] == cache_key
+        and _LLM_TAG_CACHE["tag"]
+    ):
+        return _LLM_TAG_CACHE["tag"], _LLM_TAG_CACHE["narrative"]
+
+    # Disable knob — operator can set SHARK_REGIME_TAGGER_DISABLED=1 to skip
+    # the LLM call entirely (e.g. when Ollama is being maintained).
+    if os.environ.get("SHARK_REGIME_TAGGER_DISABLED", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    ):
+        return "", ""
+
+    try:
+        from shark.llm.client import chat_by_role
+        system = (
+            "You are a market-regime tagger. Given a deterministic regime "
+            "label plus underlying metrics, output a one-phrase TAG (2-5 "
+            "words) and a one-sentence NARRATIVE describing what the regime "
+            "MEANS for a momentum-tilted long-only stock book. Return ONLY "
+            "valid JSON with keys 'tag' and 'narrative'. No prose outside JSON."
+        )
+        user = (
+            f"Deterministic regime: {regime.value}\n"
+            f"Trend score (-3 bearish .. +3 bullish): {details.get('trend_score')}\n"
+            f"ATR%: {details.get('atr_pct')} | ATR percentile: {details.get('atr_percentile')}\n"
+            f"Price vs SMA20: {details.get('above_sma20')} | vs SMA50: {details.get('above_sma50')}\n"
+            f"Recent range%: {details.get('recent_range_pct')}\n"
+            f"\n"
+            f"Return JSON: {{\"tag\": \"<2-5 word phrase>\", \"narrative\": \"<one sentence>\"}}"
+        )
+        raw, _usage, _model = chat_by_role(
+            role="trading-regime-tagger",
+            system_prompt=system,
+            user_message=user,
+            max_tokens=150,
+            temperature=0.2,
+            agent="regime_tagger",
+            json_mode=True,
+        )
+        # The router returns whatever the model produced; tolerate code fences.
+        text = (raw or "").strip()
+        if text.startswith("```"):
+            text = "\n".join(
+                ln for ln in text.splitlines() if not ln.startswith("```")
+            ).strip()
+        import json as _json
+        try:
+            obj = _json.loads(text)
+        except _json.JSONDecodeError:
+            # Some models emit a leading sentence before the JSON — last-resort
+            # brace-scan recovery. If even that fails, return empty.
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                try:
+                    obj = _json.loads(text[start : end + 1])
+                except _json.JSONDecodeError:
+                    return "", ""
+            else:
+                return "", ""
+        tag = str(obj.get("tag", "")).strip()[:60]
+        narrative = str(obj.get("narrative", "")).strip()[:240]
+        if tag:
+            _LLM_TAG_CACHE["ts"] = now
+            _LLM_TAG_CACHE["key"] = cache_key
+            _LLM_TAG_CACHE["tag"] = tag
+            _LLM_TAG_CACHE["narrative"] = narrative
+        return tag, narrative
+    except Exception as exc:  # pragma: no cover — best-effort path
+        logger.debug("LLM regime tag failed: %s — continuing without it", exc)
+        return "", ""
 
 
 def get_regime_rules(regime: MarketRegime) -> dict[str, Any]:
