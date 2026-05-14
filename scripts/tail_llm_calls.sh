@@ -31,7 +31,7 @@ if [[ -z "$LOG_PATH" ]]; then
     candidates=(
         "$(cd "$(dirname "$0")/.." && pwd)/stocks/memory/llm-calls.jsonl"
         "$HOME/Documents/trading-bot/stocks/memory/llm-calls.jsonl"
-        "/freqtrade/stocks/memory/llm-calls.jsonl"
+        "/app/stocks/memory/llm-calls.jsonl"
     )
     for c in "${candidates[@]}"; do
         if [[ -f "$c" ]]; then LOG_PATH="$c"; break; fi
@@ -80,7 +80,7 @@ if [[ -z "$LOG_PATH" || ! -f "$LOG_PATH" ]]; then
     echo "  \$SHARK_TRACKER_LOG=${SHARK_TRACKER_LOG:-<unset>}" >&2
     echo "  $(cd "$(dirname "$0")/.." && pwd)/stocks/memory/llm-calls.jsonl" >&2
     echo "  $HOME/Documents/trading-bot/stocks/memory/llm-calls.jsonl" >&2
-    echo "  /freqtrade/stocks/memory/llm-calls.jsonl" >&2
+    echo "  /app/stocks/memory/llm-calls.jsonl" >&2
     exit 1
 fi
 

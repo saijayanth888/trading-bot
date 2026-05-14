@@ -22,18 +22,15 @@ TAG="trading-bot"
 read -r -d '' BOT_LINES <<EOF || true
 # === ${TAG} BEGIN === (managed by install_crontab.sh; do not edit by hand)
 # Every 5 min safety net (P0-F): emergency stop on >3% daily loss, halve
-# ratio on negative weekly Sharpe. Tight loop so a sharp intraday move can
-# trip the kill switch before another candle of damage accumulates.
-*/5 * * * * ${SCRIPTS}/auto_rollback.py >> ${LOG_DIR}/auto_rollback.log 2>&1
+# Post-2026-05-14: auto_rollback (freqtrade-coupled, deprecated) and the
+# weekly DRL retrain (which exec'd into the freqtrade container that is
+# now gone, and called scripts/train_drl.py which has been deleted) are
+# both removed. Only the daily/weekly backups remain. Port the safety-net
+# logic to quanta-core when ready; see memory `freqtrade_decommissioned`.
 # Daily incremental backup at 02:00 UTC
 0 2 * * * ${SCRIPTS}/backup.sh daily >> ${LOG_DIR}/backup.log 2>&1
 # Weekly full backup Sunday 03:00 UTC
 0 3 * * 0 ${SCRIPTS}/backup.sh weekly >> ${LOG_DIR}/backup.log 2>&1
-# Weekly DRL ensemble retrain Sunday 00:00 UTC (no-op if data file missing)
-0 0 * * 0 docker compose -f ${ROOT_DIR}/docker-compose.yml exec -T freqtrade \
-  python /freqtrade/user_data/scripts/train_drl.py \
-    --data /freqtrade/user_data/data/drl_train.parquet --timesteps 200000 \
-    >> ${LOG_DIR}/train_drl.log 2>&1
 # === ${TAG} END ===
 EOF
 

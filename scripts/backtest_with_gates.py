@@ -13,17 +13,15 @@ Why these specific thresholds — see HANDOFF.md in the same commit.
 
 Usage
 -----
-    # Run backtest + gate eval in one shot
+    # NOTE 2026-05-14: this script wraps freqtrade backtesting; the
+    # freqtrade container + FreqAIMeanRevV1 strategy were retired on
+    # 2026-05-14, so live invocation requires a port to quanta-core
+    # backtesting. The script remains on disk for the port reference.
+    # Historical usage:
     python scripts/backtest_with_gates.py \\
         --strategy FreqAIMeanRevV1 \\
         --timerange 20240501-20260501 \\
-        --config /freqtrade/user_data/config.json
-
-    # Skip the freqtrade subprocess and re-evaluate gates against an existing
-    # result json (cron uses this when the previous backtest is fresh enough)
-    python scripts/backtest_with_gates.py \\
-        --strategy FreqAIMeanRevV1 \\
-        --result-json user_data/backtest_results/.last_result.json
+        --config /app/user_data/config.json
 
 Output
 ------

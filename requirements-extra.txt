@@ -1,9 +1,9 @@
 # Extra Python packages required by the modules under user_data/modules/.
-# Install inside the running container:
-#
-#   docker compose exec freqtrade pip install -r /freqtrade/user_data/../requirements-extra.txt
-#
-# Or rebake the image (see Dockerfile in this directory).
+# Post-2026-05-14: the freqtrade container these were originally installed
+# into is gone. The dashboard image bakes these into its own venv via the
+# user_data/dashboard/Dockerfile + requirements.txt path. This file is
+# retained as the source of truth for what user_data/modules/ depends on
+# at the language level (used by tooling that doesn't go through Docker).
 #
 # Pinning policy (2026-05-12 audit):
 #   - Lower bound captures the minimum API we use.
@@ -17,10 +17,9 @@ gymnasium>=0.29,<2
 influxdb-client>=1.40,<2
 requests>=2.31,<3
 psycopg[binary,pool]>=3.2,<4
-psycopg2-binary>=2.9,<3     # for freqtrade's SQLAlchemy driver
+psycopg2-binary>=2.9,<3     # SQLAlchemy driver kept for legacy scripts
 aiohttp>=3.9,<4
-# torch is already in the freqtradeorg/freqtrade:stable_freqaitorch image,
-# pinned for reference only:
+# torch is provided by quanta-core's image; pinned for reference only:
 # torch>=2.4,<3
 
 

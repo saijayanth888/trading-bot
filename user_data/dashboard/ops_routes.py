@@ -820,13 +820,13 @@ _RANGES = {
 
 CONFIG_PATH = Path(os.environ.get(
     "FREQTRADE_CONFIG_PATH",
-    "/freqtrade/user_data/config.json",
+    "/app/user_data/config.json",
 ))
 
 # Same root the strategy uses; we drop config-backup-*.json snapshots here.
 USER_DATA_ROOT_FOR_BACKUPS = Path(os.environ.get(
     "USER_DATA_ROOT",
-    "/freqtrade/user_data",
+    "/app/user_data",
 ))
 
 
@@ -1953,7 +1953,7 @@ async def slack_preview():
 # /api/ops/stocks — unified shark + wheel state
 # --------------------------------------------------------------------------
 
-STOCKS_ROOT = Path(os.environ.get("STOCKS_ROOT", "/freqtrade/stocks"))
+STOCKS_ROOT = Path(os.environ.get("STOCKS_ROOT", "/app/stocks"))
 
 
 def _read_json(path: Path) -> dict | None:
@@ -2660,7 +2660,7 @@ async def gates():
     _pair_dict: dict = {}
     try:
         import json as _json2, time as _time
-        _pd_path = Path(f"/freqtrade/user_data/models/{_identifier}/pair_dictionary.json")
+        _pd_path = Path(f"/app/user_data/models/{_identifier}/pair_dictionary.json")
         if _pd_path.exists():
             _pair_dict = _json2.loads(_pd_path.read_text()) or {}
     except Exception as _exc:
@@ -4267,7 +4267,7 @@ async def stock_regime():
 # works for any user without code edits.
 _OVERRIDE_VERIFY_PATHS = [
     Path(__file__).resolve().parents[2] / "stocks" / "memory" / "override_verify.json",
-    Path("/freqtrade/stocks/memory/override_verify.json"),
+    Path("/app/stocks/memory/override_verify.json"),
     Path(os.environ.get("HOME", "/root")) / "Documents" / "trading-bot" / "stocks" / "memory" / "override_verify.json",
 ]
 
@@ -4363,7 +4363,7 @@ async def shark_override_health() -> dict[str, Any]:
 # (operator does this for local dev).
 BACKTEST_RESULTS_DIR = Path(os.environ.get(
     "BACKTEST_RESULTS_DIR",
-    "/freqtrade/user_data/backtest_results",
+    "/app/user_data/backtest_results",
 ))
 
 
@@ -4519,14 +4519,14 @@ _WEEKLY_TRAINING_TRACKS: tuple[tuple[str, str, str], ...] = (
 _HOME_REPO = Path(os.environ.get("HOME", "/root")) / "Documents" / "trading-bot"
 _DECISIONS_PATHS = [
     Path(__file__).resolve().parents[2] / "stocks" / "memory" / "decisions.md",
-    Path("/freqtrade/stocks/memory/decisions.md"),
+    Path("/app/stocks/memory/decisions.md"),
     _HOME_REPO / "stocks" / "memory" / "decisions.md",
 ]
 
 # Candidate locations for the LLM call log — same pattern.
 _LLM_CALLS_PATHS = [
     Path(__file__).resolve().parents[2] / "stocks" / "memory" / "llm-calls.jsonl",
-    Path("/freqtrade/stocks/memory/llm-calls.jsonl"),
+    Path("/app/stocks/memory/llm-calls.jsonl"),
     _HOME_REPO / "stocks" / "memory" / "llm-calls.jsonl",
 ]
 

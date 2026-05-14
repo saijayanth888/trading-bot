@@ -686,7 +686,7 @@ def query_trade_journal(sql: str) -> dict:
 # instead of empty stubs. The hermes-mcp/server.py copies are authoritative
 # when called via the streamable-http MCP on port 8089.
 
-_STOCKS_ROOT = Path(os.environ.get("STOCKS_ROOT", "/freqtrade/stocks"))
+_STOCKS_ROOT = Path(os.environ.get("STOCKS_ROOT", "/app/stocks"))
 
 
 def _read_stocks_json(rel: str) -> Any:

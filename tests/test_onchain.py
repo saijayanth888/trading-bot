@@ -8,9 +8,11 @@ Run from a host shell with the API-key env vars exported:
     export GLASSNODE_API_KEY=...
     python tests/test_onchain.py
 
-Or, to test the same module that runs inside the container:
+Or, to test the same module that runs inside a container (post-2026-05-14
+the freqtrade container is gone; route through any container that has the
+modules/ tree mounted, e.g. quanta-core):
 
-    docker compose exec freqtrade python /freqtrade/user_data/../tests/test_onchain.py
+    docker compose exec quanta-core python /app/user_data/../tests/test_onchain.py
 
 The script never aborts on missing keys — it skips the live-fetch
 section and still verifies the schema and the get_features contract.

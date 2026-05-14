@@ -57,7 +57,7 @@ def _load_config() -> dict:
     """Read user_data/config.json once per call. Cheap; called per poll."""
     import json
     config_path = os.environ.get(
-        "FREQTRADE_CONFIG_PATH", "/freqtrade/user_data/config.json",
+        "FREQTRADE_CONFIG_PATH", "/app/user_data/config.json",
     )
     try:
         with open(config_path) as f:

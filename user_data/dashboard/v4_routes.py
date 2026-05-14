@@ -58,7 +58,7 @@ V4_DIST = REPO_ROOT / "frontend-v4" / "dist"
 # See docs/V4_SHADOW_MODE_DESIGN.md for the cutover blueprint.
 #
 # Storage path resolution: prefer the existing USER_DATA_ROOT mount
-# (`/freqtrade/user_data` inside the container; `./user_data/` on host),
+# (`/app/user_data` inside the container; `./user_data/` on host),
 # so the buffer files land on the bind-mounted volume — survives container
 # restarts and is visible to off-container tools.
 # ----------------------------------------------------------------------------
@@ -676,7 +676,7 @@ def _read_universe() -> dict[str, list[str]]:
     """
     candidates = [
         REPO_ROOT / "user_data" / "universe.json",
-        Path("/freqtrade/user_data/universe.json"),
+        Path("/app/user_data/universe.json"),
     ]
     for path in candidates:
         try:

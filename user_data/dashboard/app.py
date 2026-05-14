@@ -126,11 +126,11 @@ async def api_universe() -> dict[str, Any]:
     without hardcoded fallback lists drifting out of sync.
 
     Path resolution: tries USER_DATA_ROOT env first (default
-    /freqtrade/user_data inside the container, mounted from host's
+    /app/user_data inside the container, mounted from host's
     user_data/), then falls back to repo-relative for host-side dev.
     """
     candidates = [
-        Path(os.environ.get("USER_DATA_ROOT", "/freqtrade/user_data")) / "universe.json",
+        Path(os.environ.get("USER_DATA_ROOT", "/app/user_data")) / "universe.json",
         HERE.parent.parent / "user_data" / "universe.json",  # repo-relative
         HERE.parent / "universe.json",  # legacy
     ]

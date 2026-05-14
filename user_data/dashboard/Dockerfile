@@ -18,10 +18,10 @@ RUN pip install --no-cache-dir "uv==0.11.11" \
 # real production deployment mounts user_data/ as a volume (see compose).
 COPY . /app/dashboard
 
-# At runtime we expect /freqtrade/user_data to be a bind mount of the
+# At runtime we expect /app/user_data to be a bind mount of the
 # trading-bot's user_data directory (the same one the bot uses), so the
 # dashboard can read trade_journal + evolution.json directly.
-ENV USER_DATA_ROOT=/freqtrade/user_data
+ENV USER_DATA_ROOT=/app/user_data
 ENV DASHBOARD_PAIRS="BTC/USD,ETH/USD,SOL/USD"
 ENV DASHBOARD_TIMEFRAME="5m"
 
