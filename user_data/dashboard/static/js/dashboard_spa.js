@@ -703,76 +703,95 @@
     const tft = (state && state.tft) || {};
     const meta_signal = state && state.meta_signal;
     const meta_conf = state && state.meta_confidence;
+    const meta_strategies = (state && state.meta_strategies) || {};
+    const meta_reasoning = state && state.meta_reasoning;
     // TFT probs are 0..1 — display as percentage. Confidence likewise.
     const pct1 = (v) => v != null ? (Number(v) * 100).toFixed(1) + "%" : "—";
 
-    // Empty-state branch: the TFT + meta-agent producer was on freqtrade,
-    // which has been moved off this stack. No replacement is writing
-    // predictions to the dashboard's data source yet — surface that
-    // honestly instead of rendering a LIVE pill above six dashes.
-    const hasAny = (tft.up != null || tft.flat != null || tft.down != null
-                    || tft.confidence != null
-                    || meta_signal != null || meta_conf != null);
-    if (!hasAny) {
-      return h(Card, {
-        num: "02", title: "Model view", sub: "TFT · meta-agent",
-        right: h(F, null,
-          h(TimeSince, { ts: fetchedAt, className: "mono dim", style: { fontSize: "var(--t-2xs)", marginRight: 8 } }),
-          h("span", { className: "pill down" }, h("span", { className: "dot down" }), " OFFLINE")
-        )
-      },
-        h("div", { className: "metric-label", style: { color: "var(--c-down, #e07070)" } }, "MODEL NOT WIRED"),
-        h("div", { className: "dim", style: { fontSize: "var(--t-xs)", lineHeight: 1.55, marginTop: 8 } },
-          "TFT classifier and meta-agent stopped publishing after freqtrade was moved off this stack."
-        ),
-        h("div", { className: "dim", style: { fontSize: "var(--t-xs)", lineHeight: 1.55, marginTop: 6 } },
-          "No replacement producer is writing predictions to the dashboard's data source yet — no ",
-          h("code", null, "tft_log"), " table, no V4 publisher."
-        ),
-        h("div", { className: "mono dim", style: { fontSize: "var(--t-2xs)", marginTop: 10 } },
-          "→ awaiting quanta-core to persist per-tick TFT + meta_signal"
-        )
-      );
-    }
+    // Wave B (2026-05-14): TFT and META-AGENT are now independent blocks
+    // with their own LIVE/OFFLINE states. quanta-core writes meta_signal
+    // per cycle (LIVE); the TFT classifier has no replacement producer
+    // post-freqtrade-cutover (OFFLINE until Wave D wires it).
+    const hasTft = (tft.up != null || tft.flat != null || tft.down != null
+                    || tft.confidence != null);
+    const hasMeta = (meta_signal != null || meta_conf != null);
 
     const sig = Number(meta_signal || 0);
     const metaCls = sig > 0.05 ? "up" : sig < -0.05 ? "down" : "info";
     const metaLbl = sig > 0.05 ? "LONG" : sig < -0.05 ? "SHORT" : "HOLD";
+
+    // Card-level pill reflects the strongest live signal in the card.
+    const cardPill = hasMeta
+      ? h("span", { className: "pill accent" }, h("span", { className: "dot accent pulse" }), " LIVE")
+      : h("span", { className: "pill down" }, h("span", { className: "dot down" }), " OFFLINE");
+
     return h(Card, {
-      num: "02", title: "Model view", sub: "TFT · meta-agent · live",
+      num: "02", title: "Model view", sub: "TFT · meta-agent",
       right: h(F, null,
         h(TimeSince, { ts: fetchedAt, className: "mono dim", style: { fontSize: "var(--t-2xs)", marginRight: 8 } }),
-        h("span", { className: "pill accent" }, h("span", { className: "dot accent pulse" }), " LIVE")
+        cardPill
       )
     },
-      h("div", { className: "metric-label" }, "TFT CLASSIFIER · 24h horizon"),
-      h("div", { style: { display: "flex", alignItems: "baseline", gap: "var(--s-3)", margin: "8px 0" } },
-        h("div", { style: { flex: 1 } },
-          h("div", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, "P(UP)"),
-          h("div", { className: "up num", style: { fontSize: "var(--t-xl)" } }, pct1(tft.up))),
-        h("div", { style: { flex: 1 } },
-          h("div", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, "P(FLAT)"),
-          h("div", { className: "num", style: { fontSize: "var(--t-xl)" } }, pct1(tft.flat))),
-        h("div", { style: { flex: 1 } },
-          h("div", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, "P(DOWN)"),
-          h("div", { className: "down num", style: { fontSize: "var(--t-xl)" } }, pct1(tft.down)))
+      // TFT block — LIVE when a tft_log producer writes; OFFLINE until then.
+      h("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
+        h("div", { className: "metric-label", style: { flex: 1 } }, "TFT CLASSIFIER · 24h horizon"),
+        hasTft
+          ? h("span", { className: "pill up", style: { height: 14, fontSize: "var(--t-2xs)" } }, "LIVE")
+          : h("span", { className: "pill down", style: { height: 14, fontSize: "var(--t-2xs)" } }, "OFFLINE")
       ),
-      h("div", { className: "metric-label", style: { marginTop: 10 } },
-        "CONFIDENCE · " + pct1(tft.confidence)),
-      h(ProgressBar, { value: (tft.confidence || 0) * 100, max: 100, cls: "accent" }),
+      hasTft
+        ? h(F, null,
+            h("div", { style: { display: "flex", alignItems: "baseline", gap: "var(--s-3)", margin: "8px 0" } },
+              h("div", { style: { flex: 1 } },
+                h("div", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, "P(UP)"),
+                h("div", { className: "up num", style: { fontSize: "var(--t-xl)" } }, pct1(tft.up))),
+              h("div", { style: { flex: 1 } },
+                h("div", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, "P(FLAT)"),
+                h("div", { className: "num", style: { fontSize: "var(--t-xl)" } }, pct1(tft.flat))),
+              h("div", { style: { flex: 1 } },
+                h("div", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } }, "P(DOWN)"),
+                h("div", { className: "down num", style: { fontSize: "var(--t-xl)" } }, pct1(tft.down)))
+            ),
+            h("div", { className: "metric-label", style: { marginTop: 10 } },
+              "CONFIDENCE · " + pct1(tft.confidence)),
+            h(ProgressBar, { value: (tft.confidence || 0) * 100, max: 100, cls: "accent" })
+          )
+        : h("div", { className: "dim", style: { fontSize: "var(--t-xs)", lineHeight: 1.55, marginTop: 6, marginBottom: 8 } },
+            "No tft_log producer yet — crypto TFT classifier was a freqtrade FreqAI artifact and was decommissioned with the cutover."
+          ),
 
       h("div", { className: "hr" }),
 
+      // META-AGENT block — LIVE from quanta-core's meta_signal_log.
       h("div", { style: { display: "flex", alignItems: "center", gap: 8, padding: "6px 0" } },
         h("span", { className: "metric-label" }, "META-AGENT"),
         h("span", { className: "tb-spacer", style: { flex: 1 } }),
-        h("span", { className: "pill " + metaCls },
-          h("span", { className: "dot " + metaCls + " pulse" }), " ", metaLbl)
+        hasMeta
+          ? h("span", { className: "pill " + metaCls },
+              h("span", { className: "dot " + metaCls + (sig !== 0 ? " pulse" : "") }), " ", metaLbl)
+          : h("span", { className: "pill down" }, h("span", { className: "dot down" }), " OFFLINE")
       ),
-      h("div", { className: "dim", style: { fontSize: "var(--t-xs)", lineHeight: 1.55, marginTop: 4 } },
-        "Meta signal: " + (meta_signal != null ? Number(meta_signal).toFixed(3) : "—") +
-        " · meta conf: " + pct1(meta_conf) +
-        " · TFT conf: " + pct1(tft.confidence))
+      hasMeta
+        ? h(F, null,
+            h("div", { className: "dim", style: { fontSize: "var(--t-xs)", lineHeight: 1.55, marginTop: 4 } },
+              "Meta signal: ",
+              h("span", { className: "num " + metaCls }, sig.toFixed(0)),
+              " · meta conf: ",
+              h("span", { className: "num" }, pct1(meta_conf))
+            ),
+            // Per-strategy breakdown — e.g. "mean_rev_bb=FLAT · trend_follow=BUY"
+            Object.keys(meta_strategies).length > 0
+              ? h("div", { className: "mono dim", style: { fontSize: "var(--t-2xs)", marginTop: 4 } },
+                  Object.entries(meta_strategies).map(([s, o]) => s + "=" + o).join(" · "))
+              : null,
+            meta_reasoning
+              ? h("div", { className: "dim", style: { fontSize: "var(--t-2xs)", marginTop: 4, fontStyle: "italic" } },
+                  meta_reasoning.length > 140 ? meta_reasoning.slice(0, 140) + "…" : meta_reasoning)
+              : null
+          )
+        : h("div", { className: "dim", style: { fontSize: "var(--t-xs)", lineHeight: 1.55, marginTop: 4 } },
+            "Waiting for quanta-core's first cycle to populate meta_signal_log."
+          )
     );
   }
 

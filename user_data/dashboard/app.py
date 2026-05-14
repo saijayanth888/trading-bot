@@ -313,7 +313,9 @@ def _v4_state_fallback(pair: str | None = None) -> dict[str, Any]:
     """
     out: dict[str, Any] = {}
     try:
-        from .ops_db import regime_latest, sentiment_latest, onchain_latest
+        from .ops_db import (
+            regime_latest, sentiment_latest, onchain_latest, meta_signal_latest,
+        )
     except Exception:
         return out
     try:
@@ -338,6 +340,15 @@ def _v4_state_fallback(pair: str | None = None) -> dict[str, Any]:
             out["onchain_mvrv"] = oc["mvrv"]
         if oc.get("whale_count_1h") is not None:
             out["onchain_whale_count"] = oc["whale_count_1h"]
+    except Exception:
+        pass
+    try:
+        ms = meta_signal_latest(pair)
+        if ms is not None:
+            out["meta_signal"] = ms["signal"]
+            out["meta_confidence"] = ms["confidence"]
+            out["meta_strategies"] = ms.get("strategies") or {}
+            out["meta_reasoning"] = ms.get("reasoning")
     except Exception:
         pass
     return out
@@ -406,6 +417,8 @@ async def _build_state_payload() -> dict[str, Any]:
         },
         "meta_signal": pair_state.get("meta_signal"),
         "meta_confidence": pair_state.get("meta_confidence"),
+        "meta_strategies": pair_state.get("meta_strategies"),
+        "meta_reasoning": pair_state.get("meta_reasoning"),
         "positions": positions,
         "daily_pnl": today_pnl,
         "daily_pnl_history": daily_pnl,

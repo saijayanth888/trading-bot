@@ -618,6 +618,62 @@ async def write_decision(
     await conn.commit()
 
 
+async def write_meta_signal(
+    conn: psycopg.AsyncConnection,
+    *,
+    symbol: str,
+    strategy_outcomes: dict[str, tuple[str, float]],
+    regime: str,
+) -> None:
+    """Synthesize a single meta-signal for ``symbol`` from this cycle's
+    strategy outcomes and persist to ``public.meta_signal_log``. The
+    dashboard's card 02 reads the latest row per symbol for the
+    META-AGENT block.
+
+    Resolution rule:
+      * any strategy emitted BUY  → meta_signal = +1
+      * any strategy emitted SELL → meta_signal = -1 (BUY beats SELL if
+        both happen — long-only paper engine on Coinbase Spot doesn't
+        short, so a SELL is always closing an open LONG)
+      * otherwise (all FLAT/ERROR/RG_BLOCKED) → meta_signal = 0
+
+    Confidence is the max conviction among voting strategies (those
+    that emitted BUY or SELL), or 0 if none voted.
+
+    Wave B of the post-freqtrade rebuild (2026-05-14). Replaces what
+    FreqAIMeanRevV1._compute_meta_signals used to emit into the
+    in-memory dataframe.
+    """
+    has_buy = any(o == "BUY" for o, _ in strategy_outcomes.values())
+    has_sell = any(o == "SELL" for o, _ in strategy_outcomes.values())
+    signal = 1 if has_buy else (-1 if has_sell else 0)
+    voting_convictions = [
+        c for o, c in strategy_outcomes.values()
+        if o in ("BUY", "SELL") and c is not None
+    ]
+    confidence = max(voting_convictions) if voting_convictions else 0.0
+
+    # Plain-dict for jsonb storage: {strat: outcome}
+    strategies_dict = {k: v[0] for k, v in strategy_outcomes.items()}
+    summary = ", ".join(f"{k}={v[0]}" for k, v in strategy_outcomes.items())
+    reasoning = (
+        f"signal={'LONG' if signal > 0 else 'SHORT' if signal < 0 else 'FLAT'} "
+        f"conf={confidence:.2f} regime={regime} | {summary}"
+    )
+
+    async with conn.cursor() as cur:
+        await cur.execute(
+            """
+            INSERT INTO public.meta_signal_log
+                (ts, symbol, signal, confidence, regime, strategies, reasoning)
+            VALUES (NOW(), %s, %s, %s, %s, %s, %s)
+            """,
+            (symbol, signal, float(confidence), regime,
+             json.dumps(strategies_dict), reasoning),
+        )
+    await conn.commit()
+
+
 # ---------------------------------------------------------------------------
 # Order placement — LIVE mode only (paper-fill simulator)
 # ---------------------------------------------------------------------------
@@ -954,6 +1010,13 @@ async def run_cycle(cfg: Cfg, session: aiohttp.ClientSession, conn: psycopg.Asyn
 
         latest_bar = bars[-1]
 
+        # Wave B: aggregate this cycle's per-strategy outcomes (BUY/SELL/
+        # FLAT/ERROR) so we can synthesize ONE meta-signal row per symbol
+        # at the end of the inner loop. Strategy outcomes default to FLAT
+        # and are overridden by each path below. Conviction is the
+        # strategy's last_conviction attribute when it emitted a proposal.
+        strategy_outcomes: dict[str, tuple[str, float]] = {}
+
         for strat_name, strat in roster:
             try:
                 proposals = strat.on_candle(latest_bar)
@@ -964,6 +1027,7 @@ async def run_cycle(cfg: Cfg, session: aiohttp.ClientSession, conn: psycopg.Asyn
                     debate={"error": repr(exc), "regime": regime_label},
                     outcome="ERROR", rationale=f"strategy raised: {exc!r}",
                 )
+                strategy_outcomes[strat_name] = ("ERROR", 0.0)
                 continue
 
             if not proposals:
@@ -979,7 +1043,16 @@ async def run_cycle(cfg: Cfg, session: aiohttp.ClientSession, conn: psycopg.Asyn
                     rationale=f"no signal; regime={regime_label}",
                 )
                 log.info("%s @ %s [%s]: FLAT", symbol, latest_bar.close, strat_name)
+                strategy_outcomes[strat_name] = ("FLAT", 0.0)
                 continue
+
+            # Strategy emitted ≥1 proposal — use the first one's side as
+            # the strategy's outcome for meta-signal purposes. Conviction
+            # = strategy.last_conviction (0.0 if missing).
+            strategy_outcomes[strat_name] = (
+                str(proposals[0].side).upper(),
+                float(getattr(strat, "last_conviction", 0.0) or 0.0),
+            )
 
             for prop in proposals:
                 # RiskGovernor entry gate (Phase 1) — applies to BUY entries
@@ -1060,6 +1133,22 @@ async def run_cycle(cfg: Cfg, session: aiohttp.ClientSession, conn: psycopg.Asyn
                         "  → paper proposal SKIPPED (run_state.paused; coid=%s)",
                         str(prop.client_order_id)[:16],
                     )
+
+        # Wave B: synthesize ONE meta-signal row per symbol per cycle from
+        # the per-strategy outcomes gathered above. Writes to
+        # public.meta_signal_log → dashboard card 02 META-AGENT block.
+        # Never raises — if the write fails we just log and move on; a
+        # failed meta-signal write must not interrupt trading.
+        if strategy_outcomes:
+            try:
+                await write_meta_signal(
+                    conn,
+                    symbol=symbol,
+                    strategy_outcomes=strategy_outcomes,
+                    regime=regime_label,
+                )
+            except Exception as exc:
+                log.warning("meta_signal write failed for %s: %s", symbol, exc)
 
 
 async def fill_pending_then_collect_closes(

@@ -177,6 +177,41 @@ def open_positions(limit: int = 50) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------
 
 
+def meta_signal_latest(pair: str | None) -> dict[str, Any] | None:
+    """Latest synthesized meta-signal for ``pair`` from public.meta_signal_log.
+
+    quanta-core writes ONE row per (symbol, cycle) — see run_v4_shadow
+    write_meta_signal(). Returns None if no row exists yet for the pair.
+
+    Wave B of the post-freqtrade rebuild (2026-05-14). The dashboard's
+    card 02 META-AGENT block reads this; the TFT block remains OFFLINE
+    until Wave D wires a per-tick TFT producer.
+    """
+    if not _HAVE_PG or not pair:
+        return None
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT ts, symbol, signal, confidence, regime, "
+                "       strategies, reasoning "
+                "FROM public.meta_signal_log "
+                "WHERE symbol=%s ORDER BY ts DESC LIMIT 1",
+                (pair,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            # psycopg returns jsonb already-decoded for psycopg3 + dict_row.
+            # signal is smallint → int; confidence may be Decimal.
+            d["signal"] = int(d["signal"]) if d["signal"] is not None else 0
+            d["confidence"] = float(d["confidence"]) if d["confidence"] is not None else 0.0
+            return d
+    except Exception as exc:
+        logger.debug("meta_signal_latest(%s) failed: %s", pair, exc)
+        return None
+
+
 def onchain_latest(pair: str | None) -> dict[str, Any]:
     """Latest on-chain values for the dashboard's Market context card.
 
