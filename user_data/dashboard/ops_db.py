@@ -408,26 +408,79 @@ def trades_risk_summary() -> dict[str, Any]:
             d["exit_time"] = d.pop("closed_at", None)
             out["live_tape"].append(d)
 
-        # 30-day max drawdown approximation: peak-to-trough on cumulative P&L%.
-        cur.execute(
-            """
-            WITH cum AS (
-                SELECT closed_at,
-                       SUM(pnl_pct) OVER (ORDER BY closed_at) AS cum_pct
-                FROM trade_journal
-                WHERE closed_at IS NOT NULL
-                  AND closed_at > NOW() - INTERVAL '30 days'
+        # 30-day max drawdown — peak-to-trough on cumulative USD P&L,
+        # expressed as a FRACTION of a baseline equity. Per the module-
+        # level convention (line 11-14), every ``_pct`` field returned by
+        # this module is a fraction — the display layer multiplies by 100.
+        #
+        # Why not SUM(pnl_pct)? Each trade's pnl_pct is its OWN stake-
+        # relative return, not portfolio-relative. Summing 50 fractional
+        # returns produces nonsense (the original implementation produced
+        # -3.60 → UI multiplied by 100 → -360% nonsense, exact same class
+        # of bug as the H-1 slack_preview SUM(pnl_pct) fix).
+        #
+        # Preference order for the baseline equity (denominator):
+        #   1. quanta_schema.equity_snapshots — the canonical equity curve
+        #      (when the table is populated, this is exact: dd = (min(eq)
+        #      − max_running(eq)) / max_running(eq))
+        #   2. PAPER_ENGINE_START_EQUITY env var (operator's documented
+        #      paper-engine baseline, defaults to 100_000.0)
+        dd_fraction: float | None = None
+
+        # Path 1: equity_snapshots when populated
+        try:
+            cur.execute(
+                """
+                WITH curve AS (
+                    SELECT ts, equity,
+                           MAX(equity) OVER (ORDER BY ts) AS peak
+                    FROM quanta_schema.equity_snapshots
+                    WHERE ts > NOW() - INTERVAL '30 days'
+                )
+                SELECT MIN((equity - peak) / NULLIF(peak, 0)) AS dd
+                FROM curve
+                """
             )
-            SELECT MIN(cum_pct - max_cum) AS max_drawdown
-            FROM (
-                SELECT cum_pct,
-                       MAX(cum_pct) OVER (ORDER BY closed_at) AS max_cum
-                FROM cum
-            ) t
-            """
-        )
-        row = cur.fetchone() or {}
-        dd = row.get("max_drawdown")
-        out["drawdown_pct_30d"] = float(dd) if dd is not None else 0.0
+            _row = cur.fetchone() or {}
+            _dd = _row.get("dd")
+            if _dd is not None:
+                dd_fraction = float(_dd)
+        except Exception as exc:
+            # Table may be absent on some deployments — fall through silently.
+            logger.debug("equity_snapshots drawdown probe failed: %s", exc)
+
+        # Path 2: synthesize an equity curve from cumulative USD P&L over
+        # a baseline equity. This is approximate (it ignores intrabar
+        # mark-to-market and counts only closed trades) but it's honest:
+        # every input is a USD figure, output is a fraction, no unit drift.
+        if dd_fraction is None:
+            try:
+                baseline = float(os.environ.get("PAPER_ENGINE_START_EQUITY", "100000"))
+            except (TypeError, ValueError):
+                baseline = 100000.0
+            if baseline > 0:
+                cur.execute(
+                    """
+                    WITH cum AS (
+                        SELECT closed_at,
+                               SUM(pnl) OVER (ORDER BY closed_at) AS cum_pnl
+                        FROM trade_journal
+                        WHERE closed_at IS NOT NULL
+                          AND closed_at > NOW() - INTERVAL '30 days'
+                    )
+                    SELECT MIN(cum_pnl - peak_pnl) AS max_dd_usd
+                    FROM (
+                        SELECT cum_pnl,
+                               GREATEST(MAX(cum_pnl) OVER (ORDER BY closed_at), 0) AS peak_pnl
+                        FROM cum
+                    ) t
+                    """
+                )
+                _row = cur.fetchone() or {}
+                _dd_usd = _row.get("max_dd_usd")
+                if _dd_usd is not None:
+                    dd_fraction = float(_dd_usd) / baseline
+
+        out["drawdown_pct_30d"] = float(dd_fraction) if dd_fraction is not None else 0.0
 
     return out

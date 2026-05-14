@@ -2105,6 +2105,162 @@ def _file_age_seconds(path: Path) -> int | None:
         return None
 
 
+def _parse_shark_phase_decisions(handoff_file: Path) -> dict:
+    """Parse `stocks/memory/DAILY-HANDOFF.md` into per-symbol shark decisions.
+
+    The file is the source of truth for what every shark phase decided
+    today — pre-market scan, pre-execute validation, market-open trades,
+    midday/EOD reviews. Each phase emits a small set of comma-separated
+    symbol lists keyed by status (``confirmed:``, ``skipped:``,
+    ``validated:``, ``rejected:``, ``traded:``, ``cuts:``).
+
+    Returns::
+
+        {
+            "briefing_date": "2026-05-14" | None,
+            "missing":     bool,        # file not found
+            "stale_date":  None | "YYYY-MM-DD",  # file is for a prior day
+            "by_symbol": {
+                "NVDA": {
+                    "pass": True | False | None,
+                    "detail": "confirmed by pre-market; validated by pre-execute",
+                    "phases": ["confirmed@pre-market", "validated@pre-execute"],
+                },
+                ...
+            },
+        }
+
+    Decision rules (most positive wins, then most negative, then neutral):
+      * pass=True   → symbol appears in ``confirmed``, ``validated``,
+                      or ``traded`` of any phase today.
+      * pass=False  → only in ``skipped``, ``rejected``, or ``cuts``.
+      * pass=None   → mentioned only in ambiguous context, or not at all.
+
+    The function is defensive: any parse error returns a useful default
+    instead of raising, so a malformed handoff doesn't 500 the endpoint.
+    """
+    import re
+    today_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    result: dict = {
+        "briefing_date": None,
+        "missing": True,
+        "stale_date": None,
+        "by_symbol": {},
+    }
+    try:
+        if not handoff_file.is_file():
+            return result
+        text = handoff_file.read_text()
+    except OSError as exc:
+        logger.warning("shark decisions: read failed %s: %s", handoff_file, exc)
+        return result
+    result["missing"] = False
+
+    # Title line: ``# Daily Handoff — 2026-05-14``
+    title_match = re.search(r"#\s*Daily Handoff[^0-9]*(\d{4}-\d{2}-\d{2})", text)
+    if title_match:
+        result["briefing_date"] = title_match.group(1)
+        if result["briefing_date"] != today_iso:
+            result["stale_date"] = result["briefing_date"]
+            # Still parse it — operator may want yesterday's decision as a hint
+            # when today's phase hasn't run yet — but the gate detail will
+            # flag the date so it's not mistaken for fresh info.
+
+    # Split into phase sections — each starts with a "## <name> | HH:MM" line.
+    phase_pattern = re.compile(r"^##\s+([\w\-]+)\b", re.MULTILINE)
+    phase_starts = [(m.start(), m.group(1)) for m in phase_pattern.finditer(text)]
+    if not phase_starts:
+        return result
+    phase_starts.append((len(text), None))
+
+    # Status → polarity. Keys are case-insensitive.
+    pos_keys = {"confirmed", "validated", "traded"}
+    neg_keys = {"skipped", "rejected", "cuts"}
+    all_keys = pos_keys | neg_keys
+
+    # Aggregate per-symbol decisions.
+    by_symbol: dict[str, dict] = {}
+    for i in range(len(phase_starts) - 1):
+        start, phase_name = phase_starts[i]
+        end, _ = phase_starts[i + 1]
+        chunk = text[start:end]
+        for line in chunk.splitlines():
+            line = line.strip()
+            if ":" not in line:
+                continue
+            key, _, payload = line.partition(":")
+            key = key.strip().lower()
+            if key not in all_keys:
+                continue
+            payload = payload.strip()
+            if not payload or payload.lower() in {"none", "n/a", "-", "—"}:
+                continue
+            # Symbols are comma-separated tickers. Drop tokens that don't
+            # look like a stock symbol (1-5 alnum upper) to avoid picking
+            # up free-form text after a colon.
+            for token in payload.split(","):
+                sym = token.strip().upper()
+                if not re.fullmatch(r"[A-Z]{1,5}", sym):
+                    continue
+                entry = by_symbol.setdefault(sym, {"pos": [], "neg": []})
+                tag = f"{key}@{phase_name}"
+                if key in pos_keys:
+                    entry["pos"].append(tag)
+                else:
+                    entry["neg"].append(tag)
+
+    # Collapse pos/neg into a single decision per symbol.
+    decided: dict[str, dict] = {}
+    for sym, e in by_symbol.items():
+        pos = e["pos"]
+        neg = e["neg"]
+        if pos and not neg:
+            decided[sym] = {
+                "pass": True,
+                "detail": "; ".join(pos),
+                "phases": pos,
+            }
+        elif neg and not pos:
+            decided[sym] = {
+                "pass": False,
+                "detail": "; ".join(neg),
+                "phases": neg,
+            }
+        elif pos and neg:
+            # Most recent phase wins (phases appear in file order top→down).
+            # The last tag in either list is from the latest phase that
+            # mentioned the symbol.
+            last_pos_idx = max(_idx_of(by_symbol[sym]["pos"][-1], phase_starts), -1)
+            last_neg_idx = max(_idx_of(by_symbol[sym]["neg"][-1], phase_starts), -1)
+            if last_pos_idx >= last_neg_idx:
+                decided[sym] = {
+                    "pass": True,
+                    "detail": "; ".join(pos + neg),
+                    "phases": pos + neg,
+                }
+            else:
+                decided[sym] = {
+                    "pass": False,
+                    "detail": "; ".join(pos + neg),
+                    "phases": pos + neg,
+                }
+    result["by_symbol"] = decided
+    return result
+
+
+def _idx_of(tag: str, phase_starts) -> int:
+    """Return the file-order index of the phase referenced by ``tag``.
+
+    Helper for `_parse_shark_phase_decisions`. ``tag`` is ``"<status>@<phase>"``;
+    we want the position of ``<phase>`` in ``phase_starts``.
+    """
+    phase_name = tag.split("@", 1)[1] if "@" in tag else tag
+    for idx, (_, name) in enumerate(phase_starts):
+        if name == phase_name:
+            return idx
+    return -1
+
+
 def _wheel_cumulative_pnl(trades_file: Path) -> tuple[float, str | None]:
     """Sum pnl across the JSONL ledger; also return the latest trade ts."""
     if not trades_file.is_file():
@@ -2175,8 +2331,39 @@ async def stocks_status():
     ]
     trades_file = STOCKS_ROOT / "wheel" / "state" / "trades.jsonl"
     cumulative_pnl, last_trade_ts = _wheel_cumulative_pnl(trades_file)
+
+    # ── Wheel position roll-ups (FIX-I bug 3 — 2026-05-14) ──────────────
+    # Earlier the wheel block only exposed `open_positions` (the per-row
+    # list) and `cumulative_pnl_usd` (a sum across the ledger). Several
+    # dashboard cards consume rolled-up KPIs (open CSP count, total
+    # collateral parked, premium booked from open positions) and were
+    # falling back to zeros because they had no field to read. These
+    # roll-ups are derived purely from positions.json — same source of
+    # truth as `open_positions` — so adding them here keeps the API
+    # consistent rather than forcing every consumer to re-aggregate.
+    open_csps = sum(1 for p in raw_positions if p.get("kind") == "short_put")
+    open_ccs = sum(1 for p in raw_positions if p.get("kind") == "short_call")
+    # Cash-secured-put collateral = strike × 100 × |qty|. Alpaca enforces
+    # this against options_buying_power on CSP submits — exact same math
+    # as wheel/runner.py's pre-flight collateral check.
+    open_collateral_usd = round(sum(
+        float(p.get("strike") or 0.0) * 100.0 * abs(int(p.get("qty") or 0))
+        for p in raw_positions
+        if p.get("kind") == "short_put"
+    ), 2)
+    # Premium collected on currently-open positions (NOT lifetime P&L —
+    # that's `cumulative_pnl_usd` which sums the closed-trade ledger).
+    premium_collected_usd = round(sum(
+        float(p.get("entry_credit") or 0.0)
+        for p in raw_positions
+    ), 2)
+
     wheel = {
         "open_positions": wheel_positions,
+        "open_csps": open_csps,
+        "open_ccs": open_ccs,
+        "open_collateral_usd": open_collateral_usd,
+        "premium_collected_usd": premium_collected_usd,
         "cumulative_pnl_usd": cumulative_pnl,
         "last_trade_ts": last_trade_ts,
     }
@@ -3047,19 +3234,58 @@ async def gates():
             },
         })
 
-    # Watchlist symbols (non-wheel): emit a minimal passive row so the
-    # dashboard's pair telemetry strip can render "regime · X" instead of
-    # the bare "regime · —" placeholder for every chart-only ticker.
+    # Watchlist symbols (non-wheel): emit a single shark_phase_decision
+    # gate per ticker so the UI shows real status instead of n_gates=0
+    # (which the dashboard reads as "all permitted" — a confidently-
+    # displayed lie when no shark phase ran today).
+    #
+    # FIX-I bug 1 (2026-05-14): historically every watchlist row carried
+    # `n_gates=0` regardless of whether the shark briefing knew anything
+    # about the symbol. Now we surface the most-recent shark phase
+    # decision per ticker, parsed from stocks/memory/DAILY-HANDOFF.md
+    # (the same file the rest of the dashboard reads for the briefing
+    # card). If the file is missing/stale or the symbol isn't mentioned
+    # in today's phases at all, the gate reports that explicitly —
+    # `pass=None` + a "no shark phase ran today" detail — which is
+    # honest and renders distinctly from a true block.
+    shark_decisions = _parse_shark_phase_decisions(
+        STOCKS_ROOT / "memory" / "DAILY-HANDOFF.md"
+    )
     for sym in watchlist_symbols:
+        decision = shark_decisions.get("by_symbol", {}).get(sym)
+        if decision is None:
+            if shark_decisions.get("missing"):
+                gate_detail = "no shark DAILY-HANDOFF.md found"
+                gate_pass: bool | None = None
+            elif shark_decisions.get("stale_date"):
+                gate_detail = (
+                    f"shark briefing is for {shark_decisions['stale_date']} "
+                    f"(not today)"
+                )
+                gate_pass = None
+            else:
+                gate_detail = "no shark phase decision for this symbol today"
+                gate_pass = None
+        else:
+            gate_pass = decision["pass"]
+            gate_detail = decision["detail"]
+        shark_gate = {
+            "gate": "shark_phase_decision",
+            "pass": gate_pass,
+            "detail": gate_detail,
+        }
+        blocking = [shark_gate] if gate_pass is False else []
         stock_rows.append({
             "pair": sym,
             "regime": stock_regime or "—",
-            "n_gates": 0,
-            "n_blocking": 0,
-            "first_blocker": None,
-            "gates": [],
+            "n_gates": 1,
+            "n_blocking": len(blocking),
+            "first_blocker": "shark_phase_decision" if blocking else None,
+            "gates": [shark_gate],
             "venue_type": "watchlist",
-            "snapshot": None,
+            "snapshot": {
+                "shark_briefing_date": shark_decisions.get("briefing_date"),
+            },
         })
 
     return _envelope("ok", data={
