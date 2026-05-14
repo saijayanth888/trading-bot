@@ -672,6 +672,36 @@
     const meta_conf = state && state.meta_confidence;
     // TFT probs are 0..1 — display as percentage. Confidence likewise.
     const pct1 = (v) => v != null ? (Number(v) * 100).toFixed(1) + "%" : "—";
+
+    // Empty-state branch: the TFT + meta-agent producer was on freqtrade,
+    // which has been moved off this stack. No replacement is writing
+    // predictions to the dashboard's data source yet — surface that
+    // honestly instead of rendering a LIVE pill above six dashes.
+    const hasAny = (tft.up != null || tft.flat != null || tft.down != null
+                    || tft.confidence != null
+                    || meta_signal != null || meta_conf != null);
+    if (!hasAny) {
+      return h(Card, {
+        num: "02", title: "Model view", sub: "TFT · meta-agent",
+        right: h(F, null,
+          h(TimeSince, { ts: fetchedAt, className: "mono dim", style: { fontSize: "var(--t-2xs)", marginRight: 8 } }),
+          h("span", { className: "pill down" }, h("span", { className: "dot down" }), " OFFLINE")
+        )
+      },
+        h("div", { className: "metric-label", style: { color: "var(--c-down, #e07070)" } }, "MODEL NOT WIRED"),
+        h("div", { className: "dim", style: { fontSize: "var(--t-xs)", lineHeight: 1.55, marginTop: 8 } },
+          "TFT classifier and meta-agent stopped publishing after freqtrade was moved off this stack."
+        ),
+        h("div", { className: "dim", style: { fontSize: "var(--t-xs)", lineHeight: 1.55, marginTop: 6 } },
+          "No replacement producer is writing predictions to the dashboard's data source yet — no ",
+          h("code", null, "tft_log"), " table, no V4 publisher."
+        ),
+        h("div", { className: "mono dim", style: { fontSize: "var(--t-2xs)", marginTop: 10 } },
+          "→ awaiting quanta-core to persist per-tick TFT + meta_signal"
+        )
+      );
+    }
+
     const sig = Number(meta_signal || 0);
     const metaCls = sig > 0.05 ? "up" : sig < -0.05 ? "down" : "info";
     const metaLbl = sig > 0.05 ? "LONG" : sig < -0.05 ? "SHORT" : "HOLD";
