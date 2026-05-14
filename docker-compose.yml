@@ -30,176 +30,14 @@ services:
       retries: 10
       start_period: 20s
 
-  freqtrade:
-    build:
-      context: .
-      dockerfile: Dockerfile.freqtrade
-    image: trading-bot/freqtrade:local
-    container_name: freqtrade
-    restart: unless-stopped
-    mem_limit: 32g
-    memswap_limit: 32g
-    shm_size: 2g
-    depends_on:
-      postgres:
-        condition: service_healthy
-    volumes:
-      - ./user_data:/freqtrade/user_data
-      # Operator scripts (entrypoint loader, etc) — read-only.
-      - ./scripts:/freqtrade/scripts:ro
-      # Drop your Coinbase JSON key here (e.g. ./secrets/coinbase.json).
-      # Read-only so the container cannot rewrite it.
-      - ./secrets:/run/secrets/trading-bot:ro
-    # P0-V: freqtrade REST API + websocket on loopback only.
-    ports:
-      - "127.0.0.1:8080:8080"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-      - CRYPTOQUANT_API_KEY=${CRYPTOQUANT_API_KEY:-}
-      - WHALE_ALERT_API_KEY=${WHALE_ALERT_API_KEY:-}
-      - GLASSNODE_API_KEY=${GLASSNODE_API_KEY:-}
-      - BITCOIN_DATA_API_KEY=${BITCOIN_DATA_API_KEY:-}
-      # All AI sentiment scoring runs locally via Ollama — no external API costs.
-      # The dual-Hermes-3 trust-the-majority pattern uses both models in parallel.
-      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
-      - OLLAMA_MODEL_FAST=${OLLAMA_MODEL_FAST:-hermes3:8b}
-      - OLLAMA_MODEL_DEEP=${OLLAMA_MODEL_DEEP:-hermes3:70b}
-      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
-      - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY:-}
-      - PERPLEXITY_MODEL=${PERPLEXITY_MODEL:-sonar}
-      - PERPLEXITY_RECENCY=${PERPLEXITY_RECENCY:-hour}
-      # NOTE: DATABASE_URL + FREQTRADE_DB_URL are intentionally NOT inlined
-      # here — passwords with special chars (e.g. '@') break URL parsing.
-      # freqtrade_entrypoint.py builds them from POSTGRES_* below using
-      # urllib.parse.quote_plus on the password.
-      # InfluxDB writer was retired 2026-05-12 (no consumer; Grafana removed).
-      # The metrics_writer still imports influxdb_client opportunistically;
-      # INFLUX_ENABLED=0 keeps it strictly no-op.
-      - INFLUX_ENABLED=0
-      # Recommended: drop the JSON key Coinbase emits at ./secrets/coinbase.json.
-      # The freqtrade_entrypoint.py script reads it on container start and
-      # exports FREQTRADE__EXCHANGE__KEY / FREQTRADE__EXCHANGE__SECRET so the
-      # placeholders in config.json get overridden at runtime.
-      - COINBASE_KEY_FILE=${COINBASE_KEY_FILE:-/run/secrets/trading-bot/coinbase.json}
-      # Fallback for the legacy env-var auth path (skipped when the JSON file is present).
-      - COINBASE_API_KEY=${COINBASE_API_KEY:-}
-      - COINBASE_API_SECRET=${COINBASE_API_SECRET:-}
-      # FREQTRADE__SECTION__KEY env vars override config.json at startup.
-      # All secrets live in .env; config.json stays commit-safe with sentinels.
-      - FREQTRADE__API_SERVER__USERNAME=${FREQTRADE_API_USER:-freqtrader}
-      - FREQTRADE__API_SERVER__PASSWORD=${FREQTRADE_API_PASS:?FREQTRADE_API_PASS required}
-      - FREQTRADE__API_SERVER__JWT_SECRET_KEY=${FREQTRADE_JWT_SECRET:?FREQTRADE_JWT_SECRET required}
-      - FREQTRADE__API_SERVER__WS_TOKEN=${FREQTRADE_WS_TOKEN:?FREQTRADE_WS_TOKEN required}
-      # FREQTRADE__DB_URL + DATABASE_URL are built by freqtrade_entrypoint.py
-      # from POSTGRES_USER/PASSWORD/DB with URL-encoding, so special chars
-      # like '@' in the password don't corrupt the DSN.
-      - POSTGRES_USER=${POSTGRES_USER:-tradebot}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
-      - POSTGRES_DB=${POSTGRES_DB:-tradebot}
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PORT=5432
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:8080/api/v1/ping || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
-    # Override the image's default entrypoint (which is the freqtrade binary)
-    # so we can inject Coinbase credentials from secrets/coinbase.json into
-    # FREQTRADE__EXCHANGE__KEY / __SECRET env vars before exec'ing freqtrade.
-    entrypoint: ["python3", "/freqtrade/scripts/freqtrade_entrypoint.py"]
-    command: >
-      trade
-      --logfile /freqtrade/user_data/logs/freqtrade.log
-      --config /freqtrade/user_data/config.json
-      --config /freqtrade/user_data/config-private.json
-      --strategy FreqAIMeanRevV1
-
-  # ── NostalgiaForInfinity X6 (PROFILED OFF) ────────────────────────────
-  # Second freqtrade container running NFI X6 alongside the main strategy.
-  # OFF by default — `docker compose up` will NOT start this. Activate
-  # with:
-  #     docker compose --profile nfi up -d freqtrade-nfi
-  #
-  # Activation gates (see docs/NFI_X6_ACTIVATION_2026-05-11.md):
-  #   1. Strategy file byte-identical to upstream iterativv/NostalgiaForInfinity
-  #   2. rapidjson + pandas_ta importable in the freqtrade image
-  #   3. 2-year backtest passes Sharpe > 1.4 / DD < 12% / PF > 1.4
-  #   4. Paper-soak 7 days with ≥1 trade/day
-  #   5. Operator verbal "GO" → flip dry_run=false and remove profile gate
-  #
-  # Shares the same Dockerfile.freqtrade as the main service. Uses a
-  # separate sqlite trade DB (tradesv3_nfi.sqlite) and a separate
-  # dry_run_wallet so paper P&L stays isolated. Listens on host 8090
-  # to avoid colliding with the main freqtrade REST API on 8080.
+  # ── freqtrade decommissioned 2026-05-14 ──────────────────────────────
+  # The `freqtrade` and `freqtrade-nfi` services were removed from this
+  # compose file as part of the post-cutover cleanup. Quanta-core is the
+  # live engine. See memory `freqtrade_decommissioned` and
+  # `vllm_machine_crash_2026_05_14` for context. Strategy files,
+  # entrypoint script, and Dockerfile.freqtrade are queued for deletion
+  # in a follow-up phase but kept on disk in case any rollback is needed.
   # ──────────────────────────────────────────────────────────────────────
-  freqtrade-nfi:
-    profiles: ["nfi"]
-    build:
-      context: .
-      dockerfile: Dockerfile.freqtrade
-    image: trading-bot/freqtrade:local
-    container_name: freqtrade-nfi
-    restart: unless-stopped
-    mem_limit: 8g
-    memswap_limit: 8g
-    shm_size: 512m
-    depends_on:
-      postgres:
-        condition: service_healthy
-    volumes:
-      - ./user_data:/freqtrade/user_data
-      - ./scripts:/freqtrade/scripts:ro
-      - ./secrets:/run/secrets/trading-bot:ro
-    # Loopback only — same convention as the main freqtrade.
-    ports:
-      - "127.0.0.1:8090:8080"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    environment:
-      # NFI X6 is CPU-bound (pandas_ta / talib); GPU not required.
-      - COINBASE_KEY_FILE=${COINBASE_KEY_FILE:-/run/secrets/trading-bot/coinbase.json}
-      - COINBASE_API_KEY=${COINBASE_API_KEY:-}
-      - COINBASE_API_SECRET=${COINBASE_API_SECRET:-}
-      - FREQTRADE__API_SERVER__USERNAME=${FREQTRADE_API_USER:-freqtrader}
-      - FREQTRADE__API_SERVER__PASSWORD=${FREQTRADE_API_PASS:?FREQTRADE_API_PASS required}
-      - FREQTRADE__API_SERVER__JWT_SECRET_KEY=${FREQTRADE_JWT_SECRET:?FREQTRADE_JWT_SECRET required}
-      - FREQTRADE__API_SERVER__WS_TOKEN=${FREQTRADE_WS_TOKEN:?FREQTRADE_WS_TOKEN required}
-      # CRITICAL: pin NFI's trade DB to its own sqlite file so it does NOT
-      # share the main bot's `freqtrade` Postgres schema. The entrypoint
-      # only builds a Postgres FREQTRADE__DB_URL when this env var is unset,
-      # so this line is what keeps NFI isolated. Runbook §6.3.
-      - FREQTRADE__DB_URL=sqlite:////freqtrade/user_data/tradesv3_nfi.sqlite
-      # POSTGRES_* still required because the entrypoint references them
-      # before honoring FREQTRADE__DB_URL — pass them through harmlessly.
-      - POSTGRES_USER=${POSTGRES_USER:-tradebot}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
-      - POSTGRES_DB=${POSTGRES_DB:-tradebot}
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PORT=5432
-      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:8080/api/v1/ping || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
-    entrypoint: ["python3", "/freqtrade/scripts/freqtrade_entrypoint.py"]
-    command: >
-      trade
-      --logfile /freqtrade/user_data/logs/freqtrade-nfi.log
-      --config /freqtrade/user_data/strategies/nfi_x6_config.json
-      --strategy NostalgiaForInfinityX6
 
   # ── vLLM with hot-swappable LoRA adapters (PROFILED OFF) ──────────────
   # Serves qwen3:30b as a base + 4 prose-role LoRAs (reflector / bull /
@@ -211,14 +49,10 @@ services:
   #     bash scripts/bootstrap_vllm.sh
   # (or directly: `docker compose --profile vllm up -d vllm`)
   #
-  # NOTE: the spec called for host port 8090, but freqtrade-nfi already
-  # claims 8090 on loopback. Because both services are profile-gated
-  # (`nfi` vs `vllm`) and only one runs at a time in normal operation,
-  # we can keep 8090 here too — but documenting the collision in
-  # docs/VLLM_SERVING.md so the operator doesn't run both profiles at
-  # once without thinking. The container also exposes 8000 internally
-  # (vLLM's OpenAI server default), so other compose services reach
-  # vLLM at `http://vllm:8000`.
+  # Host port 8090 is now exclusively vLLM's (freqtrade-nfi removed
+  # 2026-05-14). The container also exposes 8000 internally (vLLM's
+  # OpenAI server default), so other compose services reach vLLM at
+  # `http://vllm:8000`.
   #
   # IMPORTANT: vLLM/OpenAI image expects HF model ids, not Ollama tags.
   # We pull `Qwen/Qwen3-30B-A3B-Instruct-2507` into the HF cache below;
@@ -228,7 +62,13 @@ services:
     profiles: ["vllm"]
     image: vllm/vllm-openai:latest
     container_name: vllm
-    restart: unless-stopped
+    # 2026-05-14: was `unless-stopped`. The bring-up at 14:46 hit
+    # NV_ERR_NO_MEMORY during CUDA-graph profiling and the auto-restart
+    # loop dragged the host into unified-memory exhaustion → power-cycle
+    # at 14:50. See memory `vllm_machine_crash_2026_05_14`. Until the
+    # ollama-coexistence question is settled, vLLM only starts when
+    # `bootstrap_vllm.sh` is run manually.
+    restart: "no"
     runtime: nvidia
     shm_size: 16g
     mem_limit: 64g
@@ -245,6 +85,13 @@ services:
       # we don't redownload 30 GB on every container restart.
       - HF_HOME=/cache/huggingface
       - HUGGINGFACE_HUB_CACHE=/cache/huggingface/hub
+      # 2026-05-14: disable CUDA-graph memory profiling. With profiling
+      # ON (vLLM 0.21 default), the engine reserves 2.16 GiB up-front
+      # from the KV-cache budget — on a GB10 unified-memory system this
+      # left ZERO room for KV cache at gpu_memory_utilization=0.45 and
+      # the engine refused to start. Disable per vLLM's own suggestion
+      # in the failure message.
+      - VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0
     volumes:
       - vllm_cache:/cache/huggingface
       # Adapter store on the host — ModelForge writes promoted champions
@@ -269,17 +116,31 @@ services:
       - --model=${VLLM_HF_MODEL:-Qwen/Qwen3-30B-A3B-Instruct-2507}
       - --served-model-name=${VLLM_BASE_MODEL:-qwen3:30b}
       - --quantization=${VLLM_QUANTIZATION:-fp8}
-      - --gpu-memory-utilization=${VLLM_GPU_MEM_UTIL:-0.45}
-      - --max-model-len=${VLLM_MAX_MODEL_LEN:-8192}
+      # 2026-05-14: rolled back from the 0.65 that crashed the host to
+      # 0.30. On GB10 unified memory (121 GiB shared between RAM + GPU),
+      # 0.65 == ~78 GiB which collides with ollama's resident models
+      # (hermes3:8b + 70B ≈ 45 GiB) and kernel slab. 0.30 ≈ 36 GiB is
+      # the safe ceiling while ollama is co-resident. Bump only after
+      # picking a hosting model (see vllm_machine_crash_2026_05_14 →
+      # "Open structural decisions"). Override per-boot with
+      # VLLM_GPU_MEM_UTIL env var if you intentionally want more.
+      - --gpu-memory-utilization=${VLLM_GPU_MEM_UTIL:-0.30}
+      # 2026-05-14: 8192 → 4096. Trading prose roles (bull/bear/arbiter/
+      # reflector) emit 200-500 token responses; 4K context handles the
+      # full prompt + features + multi-message debate scrollback with
+      # headroom. Halves the per-request KV cache footprint.
+      - --max-model-len=${VLLM_MAX_MODEL_LEN:-4096}
       - --enable-lora
       - --max-loras=6
       - --max-lora-rank=32
       - --max-cpu-loras=12
-      - --lora-modules
-      - reflector=/lora/reflector-current
-      - bull=/lora/bull-current
-      - bear=/lora/bear-current
-      - arbiter=/lora/arbiter-current
+      # NOTE 2026-05-14: --lora-modules removed for first boot. The 4
+      # adapter dirs (/lora/{reflector,bull,bear,arbiter}-current) don't
+      # exist yet — Sunday's ModelForge training is the first run that
+      # produces them. After Sunday, the publish_adapter_to_ollama
+      # workflow loads each adapter via POST /v1/load_lora_adapter
+      # without restarting vLLM. Re-add the static --lora-modules lines
+      # if/when you want adapter preloading at boot time.
 
   # InfluxDB removed 2026-05-12: only consumer was Grafana, which was also
   # removed. Trade telemetry lives in TimescaleDB; circuit-breaker + LLM
@@ -294,8 +155,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      freqtrade:
-        condition: service_started
     # Bind all interfaces — operator wants LAN (192.168.x) and Tailscale
     # (100.x CGNAT) access from other devices on their tailnet. The
     # require_mcp_key auth dependency still gates mutating endpoints
@@ -372,10 +231,11 @@ services:
       - POSTGRES_DB=${POSTGRES_DB:-tradebot}
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
-      # Reach freqtrade by service name on the compose network
-      - FREQTRADE_API_URL=http://freqtrade:8080
-      - FREQTRADE_API_USER=${FREQTRADE_API_USER:-freqtrader}
-      - FREQTRADE_API_PASS=${FREQTRADE_API_PASS:-}
+      # FREQTRADE_API_URL/USER/PASS removed 2026-05-14 (freqtrade
+      # decommissioned). The `data_sources.fetch_freqtrade_*` calls
+      # in dashboard code are slated for removal in Phase 2. Until
+      # then, those routes will return errors after the next dashboard
+      # restart.
       # Hermes MCP key — gates mutating tools (pause/resume/trigger_evolution)
       # via the /api/ops/mcp/* shim. Read-only tools work without it.
       - HERMES_MCP_KEY=${HERMES_MCP_KEY:-}
