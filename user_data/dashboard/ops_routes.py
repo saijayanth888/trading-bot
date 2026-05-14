@@ -4046,8 +4046,17 @@ async def shark_override_health() -> dict[str, Any]:
     stalled_runs = int(payload.get("stalled_runs") or 0)
 
     # Map verifier status → HTTP envelope status
+    #
+    # 2026-05-14 fix: stalled / 3+-stalled cases used to map to "down" which
+    # the dashboard's slotState renders as "ENDPOINT UNAVAILABLE". But the
+    # endpoint isn't down — the SHARK process is stalled. Conflating the two
+    # made card 00b lie about a healthy data source. We now reserve "down"
+    # for genuinely-broken cases (file missing — see _read_override_verify_file
+    # above) and map stalled state to "degraded" instead. The SharkOverrideHealthLive
+    # component (ops_spa.js) already renders the stalled label correctly once
+    # it gets past the EmptyState short-circuit.
     if verifier_status == "stalled" or stalled_runs >= 3:
-        env_status = "down"
+        env_status = "degraded"
         env_error = (
             f"override stalled — {stalled_runs} consecutive run(s) with "
             f"candidates but no trades. See HANDOFF.md triage section."

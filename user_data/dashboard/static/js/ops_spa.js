@@ -83,6 +83,14 @@
     if (s === "down") {
       return { phase: "down", reason: envelopeError(env) || "endpoint reported down", env, fetchedAt };
     }
+    // 2026-05-14: degraded phase added — endpoint is alive but the upstream
+    // data source is in a partial / stalled state. Cards may treat this as
+    // "ok with a warn chip" (their internal logic renders the stalled state)
+    // OR explicitly handle the degraded phase. Either way, this prevents
+    // the EmptyState "ENDPOINT UNAVAILABLE" lie for cases like shark stalled.
+    if (s === "degraded") {
+      return { phase: "degraded", reason: envelopeError(env) || "endpoint reported degraded", env, fetchedAt };
+    }
     return { phase: "ok", reason: null, env, fetchedAt };
   }
 
