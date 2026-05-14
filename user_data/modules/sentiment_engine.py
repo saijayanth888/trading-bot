@@ -535,21 +535,39 @@ def _trust_the_majority(fast: dict | None, deep: dict | None) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _coerce_result(data: dict) -> dict:
-    """Clamp ranges and normalise market_impact spelling."""
+def _coerce_result(data: dict) -> dict | None:
+    """Clamp ranges and normalise market_impact spelling.
+
+    Returns None if the payload represents a "model gave up" signal:
+    sentiment_score=0 AND confidence=0 AND market_impact=neutral. That triple
+    means the LLM produced syntactically-valid JSON but no usable judgement,
+    which used to land in the DB as llama_score=0 (looks like a real "neutral
+    vote") and drag `_trust_the_majority`'s min-of-confidences to 0 — masking
+    the deep model's actual signal. Caller treats None as a failed call and
+    falls back to single-model mode. Real low-confidence calls (e.g. score=0.1
+    conf=0.05) still pass through.
+    """
     impact = str(data.get("market_impact", "neutral")).lower().strip()
     if impact not in ("bullish", "bearish", "neutral"):
         impact = "neutral"
+    raw_score = data.get("sentiment_score")
+    if raw_score is None:
+        # Missing key — model didn't even attempt; treat as failed call.
+        return None
     try:
-        score = float(data.get("sentiment_score") or 0.0)
+        score = float(raw_score)
     except (TypeError, ValueError):
-        score = 0.0
+        return None
     try:
         conf = float(data.get("confidence") or 0.0)
     except (TypeError, ValueError):
         conf = 0.0
     score = max(-1.0, min(1.0, score))
     conf = max(0.0, min(1.0, conf))
+    # "Gave-up" pattern: flat-zero across all three signal fields. Distinct
+    # from a deliberate "tilting-bullish-with-low-confidence" call.
+    if score == 0.0 and conf == 0.0 and impact == "neutral":
+        return None
     events = data.get("key_events") or []
     if not isinstance(events, list):
         events = []

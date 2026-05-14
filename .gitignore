@@ -166,3 +166,8 @@ stocks/memory
 stocks/memory/
 stocks/wheel/state
 stocks/wheel/state/
+
+# V4 runtime state files — produced by parity_oracle_tick.py + (future)
+# in-process appenders. Per-deployment, not versioned.
+user_data/v4_runtime/parity.jsonl
+user_data/v4_runtime/.parity_seen_ids.json

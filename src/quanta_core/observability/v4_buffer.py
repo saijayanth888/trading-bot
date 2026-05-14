@@ -46,8 +46,50 @@ class V4Buffer:
                 f.write(json.dumps(event, default=str) + "\n")
 
     def read_recent(self, limit: int = 64) -> list[dict[str, Any]]:
-        with self._lock:
-            items = list(self._ring)
         if limit <= 0:
             return []
-        return items[-limit:]
+        with self._lock:
+            items = list(self._ring)
+        if items:
+            return items[-limit:]
+        # In-memory ring empty — fall back to the durable JSONL tail. This
+        # is what makes out-of-process writers (e.g. host-side
+        # ``scripts/parity_oracle_tick.py``) visible to the dashboard's
+        # /api/v4/* handlers without coupling the writer to the dashboard's
+        # in-process buffer instance. The tail is read at most once per
+        # call and is bounded by ``limit`` so memory stays small even if
+        # the JSONL has grown large between rotations.
+        return self._tail_jsonl(limit)
+
+    def _tail_jsonl(self, limit: int) -> list[dict[str, Any]]:
+        """Return the last ``limit`` parseable rows from the JSONL file.
+
+        Stdlib-only; reads the whole file but bounds the result to ``limit``.
+        At 256-row capacity * O(200B) per row the file is ~50 KB before
+        rotation, so a full read is cheap. Malformed lines are skipped.
+        """
+        try:
+            if not self._path.is_file():
+                return []
+            # Read newest-first by walking lines from the end. We collect
+            # at most `limit` valid rows, then reverse to oldest-first to
+            # match the in-memory ring's natural order.
+            collected: list[dict[str, Any]] = []
+            with self._path.open("r", encoding="utf-8") as f:
+                lines = f.readlines()
+            for line in reversed(lines):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    collected.append(json.loads(line))
+                except Exception:
+                    continue
+                if len(collected) >= limit:
+                    break
+            collected.reverse()
+            return collected
+        except Exception:
+            # Buffer reads must never raise into the request path; an empty
+            # list lets the dashboard's mock fallback take over.
+            return []

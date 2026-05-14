@@ -74,6 +74,21 @@ except Exception:  # pragma: no cover — bootstrapping path
     TrendFollow = None  # type: ignore[assignment]
     _TRENDFOLLOW_AVAILABLE = False
 
+# RiskGovernor — gates new BUY entries in live mode. Added 2026-05-14 after
+# audit found V4 production path had ZERO risk approval (no drawdown pause,
+# no daily-loss limit, no concurrent-position cap, no correlation gate, no
+# Kelly sizing). Lazy import so the runner still boots if the risk module
+# fails — better than failing-closed in a way that takes the bot dark.
+try:
+    from quanta_core.risk.governor import RiskGovernor, RiskConfig, RiskDecision
+    _RISK_GOVERNOR_AVAILABLE = True
+except Exception as _rg_exc:  # pragma: no cover
+    RiskGovernor = None  # type: ignore[assignment]
+    RiskConfig = None  # type: ignore[assignment]
+    RiskDecision = None  # type: ignore[assignment]
+    _RISK_GOVERNOR_AVAILABLE = False
+    _RG_IMPORT_ERROR = repr(_rg_exc)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -434,6 +449,94 @@ async def _read_run_state(conn: psycopg.AsyncConnection) -> tuple[bool, str | No
         return False, None
 
 
+# ---------------------------------------------------------------------------
+# RiskGovernor — singleton + gate helper. See top-of-file import block for
+# rationale. Phase 1 wiring: gate BUY entries in live mode against the
+# drawdown / daily-loss / concurrent-positions / circuit-breaker rails.
+# Phase 2 follow-ups (not done in this commit): pair_returns for correlation
+# gate, governor.record_trade_close() on fill, real-time equity tracking.
+# ---------------------------------------------------------------------------
+
+_GOVERNOR: "RiskGovernor | None" = None
+
+
+def _get_governor() -> "RiskGovernor | None":
+    """Lazy-init the process-wide RiskGovernor. Returns None if the risk
+    module wasn't importable — callers must treat None as 'fail-open'."""
+    global _GOVERNOR
+    if _GOVERNOR is not None:
+        return _GOVERNOR
+    if not _RISK_GOVERNOR_AVAILABLE:
+        return None
+    try:
+        # Defaults in RiskConfig() mirror user_data/config.json[risk_management]
+        # verbatim; explicit env override (RISK_CONFIG_PATH) lets operators
+        # tune limits without rebuilding the image.
+        cfg_path = os.environ.get("RISK_CONFIG_PATH", "/app/risk_config.json")
+        if Path(cfg_path).exists():
+            _GOVERNOR = RiskGovernor.from_config_file(cfg_path)
+            log.info("RiskGovernor loaded from %s", cfg_path)
+        else:
+            _GOVERNOR = RiskGovernor(RiskConfig())
+            log.info("RiskGovernor initialised with defaults (no %s on disk)", cfg_path)
+    except Exception as exc:
+        log.exception("RiskGovernor init failed (fail-OPEN — proposals will NOT be gated): %s", exc)
+        _GOVERNOR = None
+    return _GOVERNOR
+
+
+def _rg_gate_buy(
+    symbol: str,
+    qty: Decimal | float,
+    signal_price: float,
+    conviction: float | None,
+    open_positions_all: dict[str, dict[str, dict[str, Any]]],
+) -> tuple[bool, str | None, dict[str, Any]]:
+    """Run the RiskGovernor entry gate for a single BUY proposal.
+
+    Returns ``(approved, block_reason, extra)``. ``extra`` is the governor's
+    structured decision dict (for the debate JSONB) or empty on fail-open.
+    Fail-OPEN on any exception — better than taking the bot dark when the
+    governor itself is misbehaving.
+    """
+    gov = _get_governor()
+    if gov is None:
+        return True, None, {}
+    try:
+        base_stake = float(abs(Decimal(str(qty)))) * float(signal_price)
+        # Flatten per-strategy positions to (sym, stake_quote_ccy) tuples.
+        open_positions: list[tuple[str, float]] = []
+        for _strat, sym_map in (open_positions_all or {}).items():
+            for sym, p in (sym_map or {}).items():
+                pos_qty = float(p.get("qty") or 0.0)
+                pos_avg = float(p.get("avg_px") or 0.0)
+                if pos_qty > 0 and pos_avg > 0:
+                    open_positions.append((sym, pos_qty * pos_avg))
+        # Equity: prefer config-pinned starting equity (paper mode); fall back
+        # to the governor's running peak (live mode would update it itself).
+        equity = float(
+            os.environ.get("V4_EQUITY_USD")
+            or gov.config.starting_equity_for_pct_limits
+            or 20000.0
+        )
+        rd = gov.approve_entry(
+            pair=symbol,
+            signal_price=float(signal_price),
+            base_stake=base_stake,
+            equity=equity,
+            model_confidence=float(conviction) if conviction is not None else None,
+            open_positions=open_positions,
+            pair_returns=None,  # Phase 2: wire correlation gate
+            open_unrealised_pnl=0.0,  # Phase 2: compute from live MTM
+        )
+        if not rd.approved:
+            return False, f"{rd.blocking_constraint}: {rd.reason}", rd.to_dict()
+        return True, None, rd.to_dict()
+    except Exception as exc:
+        log.exception("RG gate raised (failing OPEN for %s): %s", symbol, exc)
+        return True, None, {"rg_error": repr(exc)}
+
+
 async def fetch_regime(session: aiohttp.ClientSession, url: str) -> dict[str, Any]:
     """Pull current regime from the dashboard. Returns {} on failure.
 
@@ -444,8 +547,41 @@ async def fetch_regime(session: aiohttp.ClientSession, url: str) -> dict[str, An
     """
     override = (os.environ.get("REGIME_OVERRIDE") or "").lower()
     if override in {"trending_up", "trending_down", "mean_reverting", "high_volatility"}:
-        log.warning("REGIME_OVERRIDE active: returning %r (live regime ignored)", override)
-        return {"current": override, "probability": 1.0, "override": True}
+        # Safety: REGIME_OVERRIDE without a paired REGIME_OVERRIDE_UNTIL is a
+        # foot-gun in live mode — operator can set it once and forget. Require
+        # an ISO8601 expiry; treat expired overrides as cleared.
+        until_raw = (os.environ.get("REGIME_OVERRIDE_UNTIL") or "").strip()
+        live_mode = (os.environ.get("LIVE_ENGINE_MODE", "shadow").lower() == "live")
+        if not until_raw and live_mode:
+            log.error(
+                "REGIME_OVERRIDE=%r ignored in live mode: REGIME_OVERRIDE_UNTIL "
+                "(ISO8601 expiry) is required. Use shadow mode to override "
+                "without expiry, OR set REGIME_OVERRIDE_UNTIL=<iso8601>.",
+                override,
+            )
+        else:
+            expired = False
+            if until_raw:
+                try:
+                    # Accept naive + tz-aware; treat naive as UTC.
+                    expiry = datetime.fromisoformat(until_raw.replace("Z", "+00:00"))
+                    if expiry.tzinfo is None:
+                        expiry = expiry.replace(tzinfo=timezone.utc)
+                    expired = datetime.now(timezone.utc) >= expiry
+                except Exception as exc:
+                    log.error(
+                        "REGIME_OVERRIDE_UNTIL=%r invalid (%s) — refusing override; "
+                        "set ISO8601 like 2026-05-14T18:00:00Z",
+                        until_raw, exc,
+                    )
+                    expired = True  # fail-closed: ignore override if expiry invalid
+            if not expired:
+                log.critical(
+                    "REGIME_OVERRIDE active: returning %r (live regime ignored, expires %s)",
+                    override, until_raw or "NEVER (shadow-mode only)",
+                )
+                return {"current": override, "probability": 1.0, "override": True}
+            log.warning("REGIME_OVERRIDE %r expired at %s — using live regime", override, until_raw)
 
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as r:
@@ -846,6 +982,22 @@ async def run_cycle(cfg: Cfg, session: aiohttp.ClientSession, conn: psycopg.Asyn
                 continue
 
             for prop in proposals:
+                # RiskGovernor entry gate (Phase 1) — applies to BUY entries
+                # in live mode only. SELL = exit, not approve_entry territory.
+                # Shadow mode is observability-only; no gate needed there.
+                rg_block_reason: str | None = None
+                rg_extra: dict[str, Any] = {}
+                if cfg.mode == "live" and str(prop.side).upper() == "BUY":
+                    _approved, rg_block_reason, rg_extra = _rg_gate_buy(
+                        symbol=symbol,
+                        qty=prop.qty,
+                        signal_price=float(latest_bar.close),
+                        conviction=getattr(strat, "last_conviction", None),
+                        open_positions_all=positions_by_strategy,
+                    )
+
+                decision_outcome = "RG_BLOCKED" if rg_block_reason else str(prop.side)
+                decision_rationale = rg_block_reason or prop.rationale
                 await write_decision(
                     conn, symbol=symbol, strategy=strat_name,
                     debate={
@@ -856,10 +1008,20 @@ async def run_cycle(cfg: Cfg, session: aiohttp.ClientSession, conn: psycopg.Asyn
                         "qty": str(prop.qty),
                         "rationale": prop.rationale,
                         "conviction": getattr(strat, "last_conviction", 0.0),
+                        "rg": rg_extra,
                     },
-                    outcome=str(prop.side),
-                    rationale=prop.rationale,
+                    outcome=decision_outcome,
+                    rationale=decision_rationale,
                 )
+
+                if rg_block_reason:
+                    log.warning(
+                        "%s @ %s [%s]: %s qty=%s → RG_BLOCKED: %s",
+                        symbol, latest_bar.close, strat_name, prop.side, prop.qty,
+                        rg_block_reason,
+                    )
+                    continue  # skip the proposal/order write for this prop
+
                 log.info(
                     "%s @ %s [%s]: %s qty=%s (conviction=%.2f)",
                     symbol, latest_bar.close, strat_name, prop.side, prop.qty,

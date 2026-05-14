@@ -150,6 +150,7 @@ class TrendFollow(Strategy):
                         close=close,
                         short_ma=short_ma,
                         long_ma=long_ma,
+                        bar=bar,
                     ),
                 )
             return ()
@@ -173,6 +174,7 @@ class TrendFollow(Strategy):
                 close=close,
                 short_ma=short_ma,
                 long_ma=long_ma,
+                bar=bar,
             ),
         )
 
@@ -200,6 +202,11 @@ class TrendFollow(Strategy):
         # Round to 8dp to keep the wire format predictable for crypto.
         return raw.quantize(Decimal("0.00000001"))
 
+    # Fixed namespace UUID for deterministic client_order_id derivation.
+    # MUST match MeanRevBB._COID_NAMESPACE so the (strategy, symbol, side, ts)
+    # tuple gives a globally-unique-but-stable id across the V4 stack.
+    _COID_NAMESPACE = uuid.UUID("a8e9c46f-0e2e-4b4a-9d1a-3f5e6c0b4a7e")
+
     def _build_proposal(
         self,
         symbol: Symbol,
@@ -209,20 +216,30 @@ class TrendFollow(Strategy):
         close: float,
         short_ma: float,
         long_ma: float,
+        bar: Bar,
     ) -> OrderProposal:
-        """Construct an OrderProposal with a JSON-friendly rationale."""
+        """Construct an OrderProposal with a JSON-friendly rationale.
+
+        ``client_order_id`` is deterministically derived from
+        (strategy, symbol, side, bar timestamp). A crashed-mid-cycle restart
+        that re-evaluates the same bar produces the same id, which the
+        ``execution_idempotency`` unique constraint then rejects — preventing
+        duplicate proposals and double-counted paper fills.
+        """
         rationale = (
             f"trend_follow side={side} close={close:.6f} "
             f"short_ma={short_ma:.6f} long_ma={long_ma:.6f} "
             f"conviction={self.last_conviction:.4f} "
             f"regime={self.state.get('regime', 'unknown')}"
         )
+        coid_seed = f"trend_follow|{symbol}|{side}|{bar.timestamp_utc.isoformat()}"
+        coid = uuid.uuid5(self._COID_NAMESPACE, coid_seed)
         return OrderProposal(
             symbol=symbol,
             side=side,  # type: ignore[arg-type]  # Literal["BUY","SELL"]
             qty=qty,
             order_type="market",
-            client_order_id=ClientOrderId(str(uuid.uuid4())),
+            client_order_id=ClientOrderId(str(coid)),
             rationale=rationale,
             asset_class=self.asset_class,  # type: ignore[arg-type]
         )

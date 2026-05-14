@@ -126,7 +126,7 @@ class MeanRevBB(Strategy):
         # close the position regardless of regime (risk-managed exit).
         if position is not None and position.side == "BUY" and position.qty > 0:
             if close > middle:
-                return (self._build_proposal(symbol, "SELL", position.qty, close, mean, lower),)
+                return (self._build_proposal(symbol, "SELL", position.qty, close, mean, lower, bar),)
             return ()
 
         # ----- Entry: long only, regime-gated.
@@ -139,7 +139,7 @@ class MeanRevBB(Strategy):
             qty = self._size(conviction)
             if qty <= 0:
                 return ()
-            return (self._build_proposal(symbol, "BUY", qty, close, mean, lower),)
+            return (self._build_proposal(symbol, "BUY", qty, close, mean, lower, bar),)
 
         return ()
 
@@ -170,6 +170,12 @@ class MeanRevBB(Strategy):
         # Round to 8dp to keep the wire format predictable for crypto.
         return raw.quantize(Decimal("0.00000001"))
 
+    # Fixed namespace UUID for deterministic client_order_id derivation.
+    # If this constant changes, prior idempotency reservations will not
+    # collide with new proposals — only change it during a deliberate
+    # ledger migration. See task: "Stable client_order_id for V4 idempotency".
+    _COID_NAMESPACE = uuid.UUID("a8e9c46f-0e2e-4b4a-9d1a-3f5e6c0b4a7e")
+
     def _build_proposal(
         self,
         symbol: Symbol,
@@ -178,19 +184,30 @@ class MeanRevBB(Strategy):
         close: float,
         mean: float,
         lower: float,
+        bar: Bar,
     ) -> OrderProposal:
-        """Construct an OrderProposal with a JSON-friendly rationale."""
+        """Construct an OrderProposal with a JSON-friendly rationale.
+
+        ``client_order_id`` is deterministically derived from
+        (strategy, symbol, side, bar timestamp). A crashed-mid-cycle restart
+        that re-evaluates the same bar will produce the same id, which the
+        ``execution_idempotency`` unique constraint then rejects — preventing
+        duplicate proposals and double-counted paper fills. Replaces the
+        previous ``uuid.uuid4()`` per-call randomness.
+        """
         rationale = (
             f"mean_rev_bb side={side} close={close:.6f} mean={mean:.6f} "
             f"lower={lower:.6f} conviction={self.last_conviction:.4f} "
             f"regime={self.state.get('regime', 'unknown')}"
         )
+        coid_seed = f"mean_rev_bb|{symbol}|{side}|{bar.timestamp_utc.isoformat()}"
+        coid = uuid.uuid5(self._COID_NAMESPACE, coid_seed)
         return OrderProposal(
             symbol=symbol,
             side=side,  # type: ignore[arg-type]  # Literal["BUY","SELL"]
             qty=qty,
             order_type="market",
-            client_order_id=ClientOrderId(str(uuid.uuid4())),
+            client_order_id=ClientOrderId(str(coid)),
             rationale=rationale,
             asset_class=self.asset_class,  # type: ignore[arg-type]
         )

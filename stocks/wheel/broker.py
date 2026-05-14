@@ -62,6 +62,11 @@ class AccountSnapshot:
     buying_power: float
     portfolio_value: float
     paper: bool
+    # Alpaca enforces CSP submits against `options_buying_power`, NOT
+    # `buying_power` (which is Reg-T margin BP, ~2× cash). They diverge
+    # significantly once any orders are pending or any margin is in use —
+    # the 2026-05-13 wheel_sell_csps failures hit this exactly.
+    options_buying_power: float = 0.0
 
 
 class Broker:
@@ -82,6 +87,7 @@ class Broker:
             buying_power=float(a.buying_power),
             portfolio_value=float(a.portfolio_value),
             paper=self.paper,
+            options_buying_power=float(getattr(a, "options_buying_power", None) or 0.0),
         )
 
     # ── Stock data ─────────────────────────────────────────────────────────

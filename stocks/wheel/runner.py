@@ -169,8 +169,8 @@ def sell_csps(symbols_override: Optional[List[str]] = None) -> dict:
     broker = from_env()
     acct = broker.get_account()
     logger.info(
-        "account: cash=$%.2f buying_power=$%.2f portfolio=$%.2f paper=%s",
-        acct.cash, acct.buying_power, acct.portfolio_value, acct.paper,
+        "account: cash=$%.2f buying_power=$%.2f options_buying_power=$%.2f portfolio=$%.2f paper=%s",
+        acct.cash, acct.buying_power, acct.options_buying_power, acct.portfolio_value, acct.paper,
     )
 
     symbols = symbols_override or list(cfg.symbols)
@@ -276,9 +276,14 @@ def _try_sell_csp(
             f"{sym}: collateral ${collateral:.0f} > max_risk_per_ticker ${cfg.max_risk_per_ticker_usd:.0f}"
         )
         return
-    if collateral > acct.buying_power:
+    # Alpaca enforces CSP submits against `options_buying_power`, NOT
+    # `buying_power` (which is Reg-T margin BP, ~2× cash, much larger).
+    # Pre-2026-05-14 this checked buying_power and got 403'd at submit
+    # whenever pending orders had drawn options_buying_power below the
+    # margin-doubled headroom — see wheel_sell_csps logs 2026-05-13.
+    if collateral > acct.options_buying_power:
         summary["skipped"].append(
-            f"{sym}: collateral ${collateral:.0f} > buying_power ${acct.buying_power:.0f}"
+            f"{sym}: collateral ${collateral:.0f} > options_buying_power ${acct.options_buying_power:.0f}"
         )
         return
     # P1-S4: pilot-wide total-collateral ceiling.
@@ -295,7 +300,22 @@ def _try_sell_csp(
         summary["skipped"].append(f"{sym}: zero quote (illiquid)")
         return
 
-    order = broker.sell_to_open(best.symbol, qty=1, limit_price=limit_price)
+    try:
+        order = broker.sell_to_open(best.symbol, qty=1, limit_price=limit_price)
+    except Exception as exc:
+        # Alpaca code 40310000 = "insufficient options buying power for cash-secured put".
+        # Pre-flight `options_buying_power` gate above should catch this, but a race
+        # window remains: between our last broker.get_account() and Alpaca's debiting
+        # for previously-submitted pending orders within the same cycle. Demote to
+        # skipped[] so the cron exits 0 (not the prior "errors[]" → exit 1 path).
+        msg = str(exc)
+        if "40310000" in msg or "insufficient options buying power" in msg.lower():
+            summary["skipped"].append(
+                f"{sym}: alpaca options BP insufficient mid-cycle "
+                f"(collateral ${collateral:.0f}, race against pending orders)"
+            )
+            return
+        raise
 
     # 2026-05-13 fix: poll for fill before committing the position to
     # positions.json. The pre-fix path called add_position() unconditionally
