@@ -301,6 +301,12 @@ def _v4_state_fallback(pair: str | None = None) -> dict[str, Any]:
         if rl.get("regime"):
             out["regime"] = rl["regime"]
             out["regime_confidence"] = float(rl.get("probability") or 0.0)
+            # Surface regime_duration_hours so the pair-dashboard RegimeGuide
+            # can render "Xh in regime" without a second roundtrip. Field
+            # was previously kept server-side only — the regime_log writer
+            # already populates it on every cycle.
+            if rl.get("regime_duration_hours") is not None:
+                out["regime_duration_hours"] = float(rl["regime_duration_hours"])
     except Exception:
         pass
     try:
@@ -383,6 +389,7 @@ async def _build_state_payload() -> dict[str, Any]:
         "pair": pair,
         "regime": pair_state.get("regime"),
         "regime_confidence": pair_state.get("regime_confidence"),
+        "regime_duration_hours": pair_state.get("regime_duration_hours"),
         "sentiment_score": pair_state.get("sentiment_score"),
         "sentiment_confidence": pair_state.get("sentiment_confidence"),
         "onchain": {

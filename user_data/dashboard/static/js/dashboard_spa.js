@@ -862,21 +862,147 @@
     );
   }
 
+  // RegimeGuide — operator-readable cheat sheet showing all four HMM
+  // regimes side-by-side with hand-drawn SVG sparkline shapes and per-
+  // strategy gate chips (mr / tf). The currently-active regime is
+  // highlighted with an accent border + pulse; siblings dim to 0.55.
+  //
+  // The strategy chip values must stay in sync with the permissive sets
+  // in src/quanta_core/strategy/{mean_rev_bb,trend_follow}.py (mirrored
+  // server-side in ops_routes.py _MR_PERMISSIVE_REGIMES /
+  // _TF_PERMISSIVE_REGIMES). If those gating sets change, update this
+  // const in the same commit.
+  const REGIME_ROWS = [
+    {
+      key: "trending_up",
+      glyph: "▲",
+      cls: "up",
+      // monotonically-rising zig-zag inside a 0..1 box
+      path: "M0 14 L8 11 L14 13 L22 9 L28 11 L36 6 L44 8 L52 3 L60 5",
+      mr: "✓",
+      tf: "✓",
+      blurb: "positive drift · both strategies fire",
+    },
+    {
+      key: "mean_reverting",
+      glyph: "●",
+      cls: "warn",
+      // symmetric oscillation about the midline — what BTC is doing now
+      path: "M0 8 L8 4 L14 12 L22 5 L28 11 L36 4 L44 12 L52 5 L60 8",
+      mr: "✓",
+      tf: "✕",
+      blurb: "chop · only MeanRevBB on BB-lower-band touches",
+    },
+    {
+      key: "trending_down",
+      glyph: "▼",
+      cls: "down",
+      // monotonically-falling zig-zag
+      path: "M0 3 L8 5 L14 4 L22 8 L28 6 L36 11 L44 9 L52 13 L60 12",
+      mr: "✕",
+      tf: "✕",
+      blurb: "negative drift · everything blocked, sit in cash",
+    },
+    {
+      key: "high_volatility",
+      glyph: "⚡",
+      cls: "accent",
+      // wide chaotic swings
+      path: "M0 8 L8 2 L14 14 L22 3 L28 13 L36 1 L44 15 L52 4 L60 11",
+      mr: "✕",
+      tf: "✕",
+      blurb: "wide swings · entries blocked, noise floor too high",
+    },
+  ];
+
+  function RegimeGuide({ regime, conf, durHours }) {
+    const active = String(regime || "");
+    return h("div", null,
+      h("div", { style: { display: "flex", alignItems: "center", marginBottom: 6 } },
+        h("span", { className: "metric-label" }, "REGIME GUIDE"),
+        h("span", { className: "tb-spacer", style: { flex: 1 } }),
+        h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)" } },
+          "what the bot does in each market state")
+      ),
+      h("div", {
+        style: {
+          display: "grid",
+          gridTemplateColumns: "auto 1fr 64px auto",
+          gap: "6px 10px",
+          alignItems: "center",
+          fontSize: "var(--t-xs)",
+          padding: "6px 0",
+        },
+      },
+        REGIME_ROWS.flatMap((r) => {
+          const isActive = r.key === active;
+          const dim = !isActive && active ? { opacity: 0.55 } : null;
+          const rowBg = isActive ? {
+            background: "color-mix(in srgb, var(--accent) 8%, transparent)",
+            border: "1px solid var(--accent)",
+            borderRadius: 4,
+            margin: "-3px -6px",
+            padding: "3px 6px",
+          } : { padding: "3px 0" };
+          // Each row spans all 4 columns via a wrapper div positioned
+          // by gridColumn: span 4 — keeps the active-row border tight.
+          return [h("div", {
+            key: r.key,
+            style: Object.assign({
+              gridColumn: "span 4",
+              display: "grid",
+              gridTemplateColumns: "auto 1fr 64px auto",
+              gap: "10px",
+              alignItems: "center",
+            }, rowBg, dim || {}),
+          },
+            h("span", { className: r.cls, style: { fontFamily: "var(--mono)", fontSize: "var(--t-sm)", width: 14, textAlign: "center" } },
+              isActive ? h("span", { className: "pulse", style: { display: "inline-block" } }, r.glyph) : r.glyph),
+            h("span", { className: "mono", style: { letterSpacing: ".02em" } }, r.key),
+            h("svg", { width: 60, height: 16, viewBox: "0 0 60 16", style: { display: "block" } },
+              h("path", { d: r.path, fill: "none",
+                stroke: isActive ? "var(--accent)" : `var(--${r.cls === "accent" ? "fg-2" : r.cls})`,
+                strokeWidth: isActive ? 1.6 : 1.2,
+                strokeLinecap: "round", strokeLinejoin: "round" })),
+            h("span", { className: "mono", style: { fontSize: "var(--t-2xs)", whiteSpace: "nowrap" } },
+              "mr ", h("span", { className: r.mr === "✓" ? "up" : "down" }, r.mr),
+              " · tf ", h("span", { className: r.tf === "✓" ? "up" : "down" }, r.tf))
+          )];
+        })
+      ),
+      // Live state line under the guide.
+      h("div", {
+        className: "dim mono",
+        style: { fontSize: "var(--t-2xs)", marginTop: 6, lineHeight: 1.5, letterSpacing: ".02em" },
+      },
+        active
+          ? (function() {
+              const row = REGIME_ROWS.find(r => r.key === active);
+              const parts = [
+                "live · " + active,
+                conf != null ? (Number(conf) * 100).toFixed(1) + "% conf" : null,
+                durHours != null ? durHours.toFixed(1) + "h in regime" : null,
+                row ? row.blurb : null,
+              ].filter(Boolean);
+              return parts.join(" · ");
+            })()
+          : "live · regime not yet classified"
+      )
+    );
+  }
+
   function MarketContextLive({ state, fetchedAt }) {
     const onchain = (state && state.onchain) || {};
+    const durHours = state && state.regime_duration_hours;
     return h(Card, {
-      num: "03", title: "Market context", sub: "regime · sentiment · on-chain",
+      num: "03", title: "Market context", sub: "regime guide · sentiment · on-chain",
       right: h(TimeSince, { ts: fetchedAt, className: "mono dim", style: { fontSize: "var(--t-2xs)" } })
     },
-      h("div", { className: "metric-label" }, "REGIME"),
-      h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginTop: 6, fontSize: "var(--t-xs)" } },
-        h("span", { className: "dim" }, "Current"),
-        h("span", { className: "num " + ((state && state.regime) === "trending_up" ? "up" : (state && state.regime) === "trending_down" ? "down" : "info"), style: { textAlign: "right" } },
-          state && state.regime ? state.regime : "—"),
-        h("span", { className: "dim" }, "Confidence"),
-        h("span", { className: "num", style: { textAlign: "right" } },
-          state && state.regime_confidence != null ? (Number(state.regime_confidence) * 100).toFixed(1) + "%" : "—")
-      ),
+      h(RegimeGuide, {
+        regime: state && state.regime,
+        conf: state && state.regime_confidence,
+        durHours: typeof durHours === "number" ? durHours : null,
+      }),
       h("div", { className: "hr" }),
       h("div", { className: "metric-label" }, "SENTIMENT"),
       h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginTop: 6, fontSize: "var(--t-xs)" } },
