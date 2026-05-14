@@ -251,10 +251,10 @@ async def api_candles(
     regime = regime_segments_from_df(df)
     state = latest_state_from_df(df, pair)
     # Post-cutover: Coinbase-sourced df has no FreqAI columns. Merge the
-    # canonical regime + sentiment from the V4-era sources so the pair
-    # table doesn't render "regime unknown" for every row.
+    # canonical regime + sentiment + on-chain from the V4-era sources so
+    # the pair table doesn't render "regime unknown" / "onchain —" rows.
     if not state.get("regime"):
-        state.update(_v4_state_fallback())
+        state.update(_v4_state_fallback(pair))
     last_close = float(df["close"].iloc[-1]) if "close" in df.columns else None
     last_time = (
         int(pd.to_datetime(df["date"].iloc[-1], utc=True).timestamp())
@@ -296,17 +296,24 @@ async def api_trades(base: str, quote: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _v4_state_fallback() -> dict[str, Any]:
-    """When freqtrade is dead, derive regime + sentiment from the V4-era
-    sources of truth instead of empty dataframes.
+def _v4_state_fallback(pair: str | None = None) -> dict[str, Any]:
+    """Post-2026-05-14 freqtrade decommissioning — derive every dashboard
+    sidebar field from canonical V4-era sources (TimescaleDB, not the
+    freqtrade dataframe).
 
-    - regime / regime_confidence  → ops_db.regime_latest()
-    - sentiment_score / confidence → ops_db.sentiment_latest()
+    Sources:
+      - regime / regime_confidence       ← ops_db.regime_latest()
+      - sentiment_score / confidence     ← ops_db.sentiment_latest()
+      - onchain_netflow_z / mvrv / whale ← ops_db.onchain_latest(pair)
+                                           (derivatives_features +
+                                            macro_features hypertables)
+
     Returns {} on any failure (caller already handles that path).
+    Wave A of the post-freqtrade rebuild (2026-05-14).
     """
     out: dict[str, Any] = {}
     try:
-        from .ops_db import regime_latest, sentiment_latest
+        from .ops_db import regime_latest, sentiment_latest, onchain_latest
     except Exception:
         return out
     try:
@@ -323,41 +330,58 @@ def _v4_state_fallback() -> dict[str, Any]:
             out["sentiment_confidence"] = float(sl.get("confidence") or 0.0)
     except Exception:
         pass
+    try:
+        oc = onchain_latest(pair) or {}
+        if oc.get("netflow_z") is not None:
+            out["onchain_netflow_z"] = oc["netflow_z"]
+        if oc.get("mvrv") is not None:
+            out["onchain_mvrv"] = oc["mvrv"]
+        if oc.get("whale_count_1h") is not None:
+            out["onchain_whale_count"] = oc["whale_count_1h"]
+    except Exception:
+        pass
     return out
+
+
+def _quanta_open_positions() -> list[dict[str, Any]]:
+    """Post-2026-05-14 — open positions come from trade_journal (mirrored
+    by quanta-core's run_v4_shadow.py on every paper-fill), NOT from
+    freqtrade's /api/v1/status endpoint.
+    """
+    try:
+        from .ops_db import open_positions as _op
+        return _op(limit=50)
+    except Exception:
+        logger.debug("open_positions fetch failed", exc_info=True)
+        return []
 
 
 async def _build_state_payload() -> dict[str, Any]:
     pair = (DEFAULT_PAIRS[0] if DEFAULT_PAIRS else "BTC/USD").strip()
 
-    # Run the slow pieces in parallel.
+    # Wave A: freqtrade is no longer the source of truth for any sidebar
+    # field. We still call fetch_freqtrade_candles in case operator
+    # re-enables it for telemetry, but the canonical path is the V4
+    # fallback below — never None on the no-freqtrade case.
     candles_task = asyncio.create_task(
         fetch_freqtrade_candles(pair, timeframe=DEFAULT_TIMEFRAME, limit=200),
     )
-    status_task = asyncio.create_task(fetch_freqtrade_status())
-
     df = await candles_task
-    status = await status_task
 
     pair_state = latest_state_from_df(df, pair) if df is not None else {}
 
-    # Post-cutover: freqtrade is dead → df has no FreqAI columns → regime
-    # comes back None. Fall back to the V4-era canonical sources so the
-    # dashboard pair table doesn't render "regime unknown" everywhere.
+    # Always merge the V4 fallback. If freqtrade is alive (rare), it
+    # provides the same fields and wins via dict-update precedence; if
+    # not (the common case post-cutover), the fallback fills them in.
     if not pair_state.get("regime"):
-        pair_state.update(_v4_state_fallback())
+        pair_state.update(_v4_state_fallback(pair))
     daily_pnl = fetch_daily_pnl()
     recent = fetch_recent_trades(limit=10)
     champion = fetch_champion()
 
-    open_trades = status.get("open_trades") or []
-    positions = [{
-        "pair": t.get("pair"),
-        "open_rate": t.get("open_rate"),
-        "stake_amount": t.get("stake_amount"),
-        "current_profit": t.get("profit_pct") or t.get("profit_ratio"),
-        "open_date": t.get("open_date") or t.get("open_date_hum"),
-        "trade_id": t.get("trade_id"),
-    } for t in open_trades]
+    # Open positions from trade_journal (quanta-core writes here on every
+    # paper-fill). Replaces the old freqtrade /api/v1/status path.
+    positions = _quanta_open_positions()
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     today_pnl = float(daily_pnl.get(today, 0.0) or 0.0)

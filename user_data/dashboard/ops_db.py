@@ -115,6 +115,109 @@ def sentiment_latest() -> dict[str, Any] | None:
         return dict(row) if row else None
 
 
+# --------------------------------------------------------------------------
+# Open positions — quanta-core paper engine source of truth
+# Post-2026-05-14 freqtrade decommissioning: trade_journal's open rows
+# (closed_at IS NULL) are the canonical open-position list. quanta-core
+# mirrors fills here on every paper-fill, so this is always current.
+# --------------------------------------------------------------------------
+
+
+def open_positions(limit: int = 50) -> list[dict[str, Any]]:
+    """All currently-open paper positions from trade_journal.
+
+    Shape matches what the dashboard `positions` payload expects:
+    ``pair``, ``open_rate`` (= entry_price), ``stake_amount`` (= stake),
+    ``current_profit`` (None — would need a live price feed to compute),
+    ``open_date`` (ISO timestamp), ``trade_id``, ``direction``.
+    """
+    if not _HAVE_PG:
+        return []
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT trade_id, pair, direction, entry_price, stake,
+                   opened_at, external_id, regime
+            FROM trade_journal
+            WHERE closed_at IS NULL
+            ORDER BY opened_at DESC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        rows = cur.fetchall()
+        return [
+            {
+                "trade_id": int(r["trade_id"]),
+                "pair": r["pair"],
+                "direction": r["direction"],
+                "open_rate": float(r["entry_price"]) if r["entry_price"] is not None else None,
+                "stake_amount": float(r["stake"]) if r["stake"] is not None else None,
+                "current_profit": None,  # would need a live-quote join; UI tolerates None
+                "open_date": r["opened_at"].isoformat() if r["opened_at"] else None,
+                "external_id": r["external_id"],
+                "regime_at_entry": r["regime"],
+            }
+            for r in rows
+        ]
+
+
+# --------------------------------------------------------------------------
+# On-chain enrich — read from derivatives_features + macro_features
+# Post-2026-05-14 freqtrade decommissioning: the previous on-chain enrich
+# path lived inside latest_state_from_df() and only fired when the df had
+# rows (i.e. when freqtrade's pair_candles returned). Now that the df is
+# always None on the no-freqtrade path, this helper extracts the same DB
+# lookup so _v4_state_fallback can call it directly.
+#
+# Mapping (mirrors data_sources.latest_state_from_df lines 587-604):
+#   onchain_netflow_z   ← OKX funding_rate × 10000 (basis points)
+#   onchain_mvrv        ← BTC MVRV (only for BTC/USD; 1.0 neutral elsewhere)
+#   onchain_whale_count ← log1p(taker_buy_vol_usd) over last hour
+# --------------------------------------------------------------------------
+
+
+def onchain_latest(pair: str | None) -> dict[str, Any]:
+    """Latest on-chain values for the dashboard's Market context card.
+
+    Returns a dict with keys ``netflow_z``, ``mvrv``, ``whale_count_1h``.
+    Missing values are None; UI renders them as ``—``.
+    """
+    out: dict[str, Any] = {"netflow_z": None, "mvrv": None, "whale_count_1h": None}
+    if not _HAVE_PG or not pair:
+        return out
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT funding_rate, taker_buy_vol_usd, taker_sell_vol_usd "
+                "FROM derivatives_features WHERE pair=%s ORDER BY ts DESC LIMIT 1",
+                (pair,),
+            )
+            deriv = cur.fetchone() or {}
+            cur.execute("SELECT btc_mvrv FROM macro_features ORDER BY ts DESC LIMIT 1")
+            macro = cur.fetchone() or {}
+    except Exception as exc:
+        logger.debug("onchain_latest(%s) failed: %s", pair, exc)
+        return out
+
+    fr = deriv.get("funding_rate")
+    if fr is not None:
+        # Mirror data_sources.py:595 — express as basis points × 100.
+        out["netflow_z"] = float(fr) * 10000.0
+    buy = deriv.get("taker_buy_vol_usd") or 0.0
+    if buy > 0:
+        import math
+        out["whale_count_1h"] = math.log1p(float(buy))
+
+    if pair.split("/")[0].upper() == "BTC":
+        mvrv = macro.get("btc_mvrv")
+        if mvrv is not None:
+            out["mvrv"] = float(mvrv)
+    else:
+        out["mvrv"] = 1.0  # neutral for non-BTC pairs
+    return out
+
+
 def sentiment_hourly_24h() -> list[dict[str, Any]]:
     """Hourly aggregate over last 24h (avg score weighted by n_headlines)."""
     if not _HAVE_PG:

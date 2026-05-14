@@ -44,6 +44,39 @@
     const f = frac == null ? 2 : frac;
     return v.toLocaleString("en-US", { minimumFractionDigits: f, maximumFractionDigits: f });
   }
+  // ET formatter for backend ISO/Date inputs.
+  //   includeSeconds: true → "05-14 11:54:32 ET"
+  //   includeSeconds: false (default) → "05-14 11:54 ET"
+  // Returns "—" for null/invalid input. Operator preference: every
+  // timestamp in the SPA renders in America/New_York (see MIGRATION_NOTES §1).
+  function fmtET(ts, includeSeconds) {
+    if (ts == null || ts === "") return "—";
+    let d;
+    if (ts instanceof Date) d = ts;
+    else if (typeof ts === "number") d = new Date(ts < 1e12 ? ts * 1000 : ts);
+    else d = new Date(String(ts));
+    if (isNaN(d.getTime())) return "—";
+    try {
+      const opts = {
+        timeZone: "America/New_York",
+        month: "2-digit", day: "2-digit",
+        hour: "2-digit", minute: "2-digit",
+        hour12: false,
+      };
+      if (includeSeconds) opts.second = "2-digit";
+      // en-GB gives day-first; we want MM-DD HH:MM. Build manually.
+      const parts = new Intl.DateTimeFormat("en-US", opts).formatToParts(d);
+      const get = (t) => (parts.find(p => p.type === t) || {}).value || "";
+      const date = `${get("month")}-${get("day")}`;
+      const time = includeSeconds
+        ? `${get("hour")}:${get("minute")}:${get("second")}`
+        : `${get("hour")}:${get("minute")}`;
+      return `${date} ${time} ET`;
+    } catch (_) {
+      // Fallback: UTC slice
+      return String(ts).replace("T", " ").slice(0, 16) + " UTC";
+    }
+  }
   function fmtPct(v, frac) {
     if (v == null || isNaN(v)) return "—";
     const f = frac == null ? 2 : frac;
@@ -935,7 +968,7 @@
                 h("td", { className: "num", style: { textAlign: "right" } }, p.stake_amount != null ? "$" + fmtUSD(p.stake_amount) : "—"),
                 h("td", { className: "num " + ((p.current_profit || 0) >= 0 ? "up" : "down"), style: { textAlign: "right" } },
                   p.current_profit != null ? fmtPct(p.current_profit * 100, 2) : "—"),
-                h("td", { className: "dim mono", style: { fontSize: "var(--t-xs)" } }, p.open_date || "—")
+                h("td", { className: "dim mono", style: { fontSize: "var(--t-xs)" } }, fmtET(p.open_date))
               ))
             )
           )
@@ -970,7 +1003,7 @@
               const pct = Number(t.pnl_pct != null ? t.pnl_pct : 0) * 100;
               const pnlUp = Number(t.pnl || 0) >= 0;
               const closedAt = t.closed_at || t.opened_at;
-              const closedShort = closedAt ? String(closedAt).replace("T", " ").slice(0, 16) : "—";
+              const closedShort = fmtET(closedAt);
               const entryPx = t.entry_price;
               const exitPx = t.exit_price;
               // freqtrade crypto today is long-only, but state.recent_trades will
