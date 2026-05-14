@@ -159,3 +159,153 @@ required).
    design but means trading is currently happening with the un-fine-tuned
    `hermes3:70b` / `qwen3:30b` base. Standing up vLLM is out of scope for
    FIX-H but worth noting in the ops debrief.
+
+## Operator follow-up (live telemetry, 2026-05-14 14:00 ET)
+
+### Circuit-breaker posture
+
+Source: `stocks/shark/llm/circuit_breaker.py:50-60`. Two breakers exist on
+disk right now, both `state=closed, failure_count=0` — healthy.
+
+| Knob | Default | Override env | Meaning |
+|---|---|---|---|
+| `FAILURE_THRESHOLD` | **5** | `CB_FAILURE_THRESHOLD` | Consecutive failures → trip OPEN |
+| `RECOVERY_TIMEOUT_S` | **60.0** | `CB_RECOVERY_TIMEOUT` | OPEN duration before HALF_OPEN probe |
+| `LATENCY_P95_THRESHOLD_S` (fast) | **15.0** | `CB_FAST_LATENCY_THRESHOLD` | p95 over 60 s window → latency-trip |
+| `LATENCY_P95_THRESHOLD_S` (deep) | **60.0** | `CB_DEEP_LATENCY_THRESHOLD` | p95 over 60 s window → latency-trip |
+| `LATENCY_WINDOW_SECONDS` | 60 | hard-coded | rolling window for p95 |
+| `LATENCY_MIN_SAMPLES` | 10 | hard-coded | don't latency-trip until N samples |
+
+Reset behavior: OPEN auto-transitions to HALF_OPEN after
+`RECOVERY_TIMEOUT_S` (60 s); HALF_OPEN success → CLOSED; HALF_OPEN failure →
+re-OPEN for another 60 s. **No infinite-stuck mode** — if the 70B model
+flakes, the breaker probes every minute, and the call falls back to
+Anthropic if `ANTHROPIC_API_KEY` is set (otherwise raises with a clear
+"BOTH PROVIDERS DOWN" message instead of looping silently).
+
+**Live deep-tier breaker had two latency samples (53.3 s, 32.5 s) at
+investigation time.** p95 of those two = 53.3 s, which is < 60 s threshold,
+so no trip. But the 53 s call is borderline — see GPU/keep-alive section.
+
+### GPU/keep-alive — the real concern
+
+`OLLAMA_KEEP_ALIVE` is **not set** in `/etc/systemd/system/ollama.service`
+(no `Environment=` lines for OLLAMA_*), and shark never passes `keep_alive`
+on a per-request basis (`stocks/shark/llm/client.py:322-324` only forwards
+it when the caller sets it, which no shark caller does). So Ollama uses its
+**factory default of 5 minutes**. Confirmed live:
+
+```
+$ curl http://127.0.0.1:11434/api/ps
+{"models":[{"name":"hermes3:8b","size":5.2 GB,"size_vram":5.2 GB,
+            "expires_at":"2026-05-14T14:06:30 ET"}]}        # loaded 14:01:30, 5-min TTL
+```
+
+Right now: only `hermes3:8b` is resident (5.2 GB VRAM). The 70B/72B models
+unloaded ~5 min after their last call. The 53 s p95 latency on the deep
+tier comes from **cold-load on every deep call** because no deep call has
+fired within 5 min of the previous one.
+
+**Two 40 GB models simultaneously resident?** Possible but not happening
+in steady state. The fix's `regime_tagger` runs on `hermes3:8b-trader`
+(5 GB) and is called once per shark phase (4×/day). When `risk_debate`
+fires (rare — gated on candidate passing the catalyst gate AND analyst
+RR ≥ 2.0), it loads `qwen2.5:72b-instruct` (40 GB). When `combined_analyst`
+fires (same gate), it also loads `qwen2.5:72b-instruct` (same 40 GB —
+SAME model, not a second one). The 70 GB `hermes3:70b` is referenced as
+the default tier=deep model in `_resolve_ollama_model` ONLY when
+`OLLAMA_MODEL` is unset — but `.env` pins `OLLAMA_MODEL=qwen2.5:72b-instruct`,
+so 70B doesn't actually get loaded by shark right now. **Net: at most
+one ~40 GB model + the 5 GB tagger resident at a time.** GB10 VRAM is
+fine.
+
+**Recommendation for the operator:** set `OLLAMA_KEEP_ALIVE=10m` in the
+ollama systemd unit. Rationale: shark phases fire pre_market (09:00 ET),
+pre_execute (09:30 ET), market_open (09:35 ET), midday (13:00 ET). The
+gap 09:35 → 13:00 is too long for keep-alive to bridge regardless. But
+within the 09:00-09:35 cluster, keep_alive=10m means the deep model
+stays warm across pre_market → pre_execute → market_open, saving 2×
+~50 s of cold-load latency. Set via:
+
+```
+[Service]
+Environment="OLLAMA_KEEP_ALIVE=10m"
+Environment="OLLAMA_MAX_LOADED_MODELS=2"   # tagger + deep, never thrash
+```
+
+### Resolved model-per-role table (post-fix)
+
+The `chat_by_role` table reads `routing` from `model_tiers.json`. The
+`chat_json` table is what the legacy agent code paths resolve to (via
+`_resolve_ollama_model`). **Empty `OLLAMA_FAST_MODEL`/`OLLAMA_MODEL`
+defaults shown below; live values come from `.env` which sets
+`OLLAMA_MODEL=qwen2.5:72b-instruct`, `OLLAMA_MODEL_DEEP=hermes3:70b`,
+`OLLAMA_MODEL_FAST=hermes3:8b`.**
+
+#### `chat_by_role` (routed roles, vLLM with Ollama fallback)
+
+| role | backend | model | adapter | NOTE: vLLM down → Ollama base, no adapter |
+|---|---|---|---|---|
+| `trading-bull` | vllm | qwen3:30b | bull | falls back to ollama qwen3:30b |
+| `trading-bear` | vllm | qwen3:30b | bear | falls back to ollama qwen3:30b |
+| `trading-arbiter` | vllm | qwen3:30b | arbiter | falls back to ollama qwen3:30b |
+| `trading-reflector` | vllm | qwen3:30b | reflector | falls back to ollama qwen3:30b |
+| `trading-regime-tagger` | ollama | **hermes3:8b-trader** | — | NEW: wired by FIX-H |
+| `trading-indicator-selector` | ollama | hermes3:8b-trader | — | not currently invoked |
+
+#### `chat_json` (legacy agents)
+
+| role | tier | resolved model | callers |
+|---|---|---|---|
+| `default` | fast | hermes3:8b | trade_reviewer, outcome_resolver |
+| `default` | deep | **qwen2.5:72b-instruct** (from `OLLAMA_MODEL`) | combined_analyst |
+| `debate` | fast | hermes3:8b | debate.bull/bear, rounds < N |
+| `debate` | deep | **qwen2.5:72b-instruct** | debate.bull/bear, final round |
+| `arbiter` | deep | **qwen2.5:72b-instruct** | debate.arbiter, risk_debate.judge |
+| `risk` | deep | **qwen2.5:72b-instruct** | risk_debate.{aggressive, conservative, neutral} |
+| `probe` | fast | hermes3:8b | ad-hoc probes |
+
+**The `_resolve_ollama_model` fix did NOT change any of these legacy-role
+resolutions** — `default`, `debate`, `arbiter`, `risk`, `probe` contain no
+hyphens, so the upper-and-replace is a no-op for them. The fix only
+affects the `trading-*` routed roles, which previously fell through to
+the generic defaults and now correctly select their per-role models.
+
+### Debate loop bound
+
+`run_risk_debate(rounds=1)` is the default from
+`stocks/shark/agents/risk_debate.py:225`. Each round = aggressive +
+conservative + neutral = 3 perspective calls. Plus one final judge call
+synthesising the transcript. **So per call to `run_risk_debate` with the
+default `rounds=1`: exactly 4 LLM calls. With `rounds=2`: 7 (6 perspective
++ 1 judge). With max `rounds=3`: 10.**
+
+Hard upper bound: `stocks/shark/config.py` validates
+`RISK_DEBATE_ROUNDS` in **[0, 3]** at startup. Setting >3 in env crashes
+the config loader (fail-fast — no silent runaway).
+
+Similarly the bull/bear debate (`run_debate` in `debate_orchestrator.py`)
+is bounded by `SHARK_DEBATE_ROUNDS` validated in **[0, 5]**, default **1**.
+Each round = 1 bull + 1 bear call; final round adds 1 arbiter synthesis.
+So default cost: 3 LLM calls per `analyze_symbol`. Max (rounds=5): 11.
+
+**Operator-tunable knobs:**
+
+| env var | range | default | what it controls |
+|---|---|---|---|
+| `SHARK_DEBATE_ROUNDS` | 0-5 | **1** | bull/bear/arbiter rounds in `combined_analyst → run_debate` |
+| `SHARK_RISK_DEBATE_ROUNDS` | 0-3 | **1** | aggressive/conservative/neutral rounds in `risk_debate` |
+| `OLLAMA_TIMEOUT_S` | — | 180 s | per-call hard timeout |
+| `CB_FAILURE_THRESHOLD` | — | 5 | breaker trip threshold |
+| `CB_DEEP_LATENCY_THRESHOLD` | — | 60 s | breaker latency p95 threshold (deep tier) |
+| `CB_RECOVERY_TIMEOUT` | — | 60 s | OPEN → HALF_OPEN cooldown |
+| `OLLAMA_KEEP_ALIVE` | — | **5m** (Ollama default; not set explicitly) | model VRAM TTL |
+
+There is no risk of unbounded loops: every debate is a `for r in
+range(1, rounds + 1)` over a config-validated integer, with `rounds`
+clamped at config-load time. If a single LLM call hangs, the per-call
+`OLLAMA_TIMEOUT_S=180` budget bounds it; the breaker counts that as a
+failure and (after 5 in a row) trips to OPEN for 60 s, falling back to
+Anthropic. Worst case per `run_risk_debate(rounds=1)`: 4 × 180 s = 12
+minutes if every call times out (and at that point the breaker is OPEN).
+In practice live latencies are 50-90 s for deep / sub-second for fast.
