@@ -1047,9 +1047,14 @@ async def fill_pending_proposals(
     """
     filled = 0
     async with conn.cursor() as cur:
+        # Pull intent JSON too: it carries the regime label + strategy
+        # conviction that was current at proposal write-time. Threading these
+        # into trade_journal keeps the regime/confidence columns truthful
+        # for downstream readers (Tape, readiness, nightly_reflector) — see
+        # Wave H-D2 audit, 2026-05-14.
         await cur.execute(
             """
-            SELECT p.client_order_id, p.symbol, p.side, p.qty
+            SELECT p.client_order_id, p.symbol, p.side, p.qty, p.intent
             FROM quanta_schema.proposals p
             JOIN quanta_schema.orders o ON o.client_order_id = p.client_order_id
             WHERE o.status = 'PROPOSED'
@@ -1057,10 +1062,29 @@ async def fill_pending_proposals(
         )
         rows = await cur.fetchall()
 
-        for coid, symbol, side, qty in rows:
+        for coid, symbol, side, qty, intent in rows:
             price = close_by_symbol.get(symbol)
             if price is None:
                 continue
+            # The intent column is jsonb; psycopg gives us a dict already,
+            # but tolerate str/None defensively.
+            intent_d: dict[str, Any] = {}
+            if isinstance(intent, dict):
+                intent_d = intent
+            elif isinstance(intent, str):
+                try:
+                    intent_d = json.loads(intent) or {}
+                except Exception:
+                    intent_d = {}
+            regime_val = intent_d.get("regime")
+            conviction_val = intent_d.get("conviction")
+            try:
+                confidence_val: float | None = (
+                    float(conviction_val) if conviction_val is not None else None
+                )
+            except (TypeError, ValueError):
+                confidence_val = None
+
             # write the fill at the simulated price
             await cur.execute(
                 """
@@ -1086,6 +1110,8 @@ async def fill_pending_proposals(
                 await _write_trade_journal_row(
                     cur, coid=coid, symbol=symbol, side=side,
                     qty=qty, price=price,
+                    regime=regime_val if isinstance(regime_val, str) else None,
+                    confidence=confidence_val,
                 )
             except Exception as exc:
                 log.warning("trade_journal write failed for %s/%s: %s",
@@ -1104,6 +1130,8 @@ async def _write_trade_journal_row(
     side: str,
     qty: Any,
     price: Any,
+    regime: str | None = None,
+    confidence: float | None = None,
 ) -> None:
     """Translate a V4 paper fill into a public.trade_journal entry.
 
@@ -1114,6 +1142,17 @@ async def _write_trade_journal_row(
     Schema lives in user_data/modules/trade_journal.py — we hit only the
     columns the dashboard reads. The `external_id` mirrors the V4
     client_order_id so V4-ledger ↔ trade_journal can be cross-referenced.
+
+    Unit convention (operator-canonical, see user_data/dashboard/ops_db.py:11-14):
+        pnl_pct is a FRACTION (-0.0123 = -1.23%). Every dashboard reader
+        multiplies × 100 at display time. Writing percent here causes 100×
+        inflation across ~7 surfaces (slack_preview / readiness / rebalance /
+        recent_trades JS / live_tape / drawdown / Sharpe). DO NOT × 100 here.
+
+    ``regime`` and ``confidence`` are stamped on BUY-inserted open rows so
+    downstream readers (Tape, readiness, nightly_reflector) see the regime
+    and strategy conviction the order was emitted under. Both default to
+    None so non-cycle callers (tests, migrations) still work.
     """
     qty_f = float(qty)
     price_f = float(price)
@@ -1125,20 +1164,22 @@ async def _write_trade_journal_row(
             INSERT INTO public.trade_journal
                 (external_id, pair, direction, opened_at, entry_price, stake,
                  confidence, regime, reasoning)
-            VALUES (%s, %s, 'long', NOW(), %s, %s, NULL, NULL,
+            VALUES (%s, %s, 'long', NOW(), %s, %s, %s, %s,
                     'V4 paper fill from quanta-core (' || %s || ')')
             """,
-            (coid, symbol, price_f, stake, coid),
+            (coid, symbol, price_f, stake, confidence, regime, coid),
         )
     elif side == "SELL":
         # Close the most-recent open long row on this pair.
+        # pnl_pct is stored as a FRACTION (no × 100); the BUY row's regime
+        # and confidence are preserved by NOT touching those columns here.
         await cur.execute(
             """
             UPDATE public.trade_journal
                SET closed_at    = NOW(),
                    exit_price   = %s,
                    pnl          = (%s - entry_price) * (stake / NULLIF(entry_price, 0)),
-                   pnl_pct      = ((%s - entry_price) / NULLIF(entry_price, 0)) * 100.0,
+                   pnl_pct      = (%s - entry_price) / NULLIF(entry_price, 0),
                    duration_min = EXTRACT(EPOCH FROM (NOW() - opened_at)) / 60.0,
                    exit_reason  = 'V4 SELL signal (' || %s || ')'
              WHERE trade_id = (
