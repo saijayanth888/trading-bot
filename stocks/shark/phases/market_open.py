@@ -277,34 +277,14 @@ def _collect_candidate_data(
             from shark.config import get_settings as _get_settings
             _cfg_local = _get_settings()
             _paper_override = bool(_cfg_local.is_paper and _cfg_local.paper_bear_override)
-            # Time-bounded override of the priced-in filter (Option C from
-            # the 2026-05-14 shark stall investigation). Active only when
-            # paper_bear_override is on AND today <= expiry date. Set via
-            # PAPER_PRICED_IN_OVERRIDE_UNTIL=YYYY-MM-DD; auto-clears past
-            # the date so it can't drift into the codebase as a forgotten
-            # relaxation. Mirrors REGIME_OVERRIDE_UNTIL safety pattern.
-            _priced_in_expiry = getattr(_cfg_local, "paper_priced_in_override_until", None)
-            _priced_in_override_active = bool(
-                _paper_override
-                and _priced_in_expiry is not None
-                and date.today() <= _priced_in_expiry
-            )
         except Exception:
             _paper_override = False
-            _priced_in_expiry = None
-            _priced_in_override_active = False
 
-        priced_in = bool(perplexity_intel.get("catalyst_priced_in", False))
         has_specific_catalyst = bool(perplexity_intel.get("catalyst_specific", True))
         if not has_specific_catalyst:
             soft_ok = (
                 _paper_override
-                # The date-bounded override (when active) bypasses the
-                # `not priced_in` AND. This is the only way candidates with
-                # priced_in=true can reach the bull/bear LLM debate — the
-                # whole point of the override per Option C of the 2026-05-14
-                # stall investigation.
-                and (not priced_in or _priced_in_override_active)
+                and not perplexity_intel.get("catalyst_priced_in", False)
                 and bool(perplexity_intel.get("headlines"))
                 and float(perplexity_intel.get("sentiment_score") or 0.0) >= 0.30
                 and str(perplexity_intel.get("analyst_rating") or "hold").lower() != "sell"
@@ -321,23 +301,9 @@ def _collect_candidate_data(
                 perplexity_intel.get("analyst_rating") or "hold",
             )
 
-        # Hard kill: priced-in candidates are skipped UNLESS the date-bounded
-        # paper-mode override is active. Pre-2026-05-14 this kill was
-        # unconditional and ran AFTER the soft-gate — which meant the soft
-        # gate's bypass intent was structurally unreachable. Restructured
-        # here as part of the Option C fix.
-        if priced_in:
-            if _priced_in_override_active:
-                logger.critical(
-                    "%s — catalyst_priced_in=true BUT paper-mode override "
-                    "active until %s. Letting through to bull/bear debate "
-                    "for pipeline validation. Operator: this is expected "
-                    "while the override is set; auto-clears after expiry.",
-                    symbol, _priced_in_expiry.isoformat(),
-                )
-            else:
-                logger.info("%s skipped — catalyst already priced in", symbol)
-                return None
+        if perplexity_intel.get("catalyst_priced_in", False):
+            logger.info("%s skipped — catalyst already priced in", symbol)
+            return None
 
         sector = get_ticker_sector(symbol)
         sector_ok, sector_reason = _check_sector_momentum(sector)
