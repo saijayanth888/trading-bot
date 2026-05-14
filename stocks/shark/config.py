@@ -114,8 +114,16 @@ class Settings:
     alpaca_base_url: str                 # Alpaca endpoint (paper vs live)
 
     # ----- Paper-mode overrides (only apply when trading_mode="paper") -----
-    paper_bear_override: bool            # allow limited trades in BEAR regimes
-    paper_macro_bypass: bool             # bypass CRITICAL/HIGH macro blocks
+    #
+    # `paper_bear_override` and `paper_macro_bypass` USED to be env vars
+    # (PAPER_BEAR_OVERRIDE, PAPER_MACRO_BYPASS, both default "true"). Per
+    # the 2026-05-14 stagnant-config audit, those env vars are paper-mode
+    # behavior masquerading as toggles — paper mode exists to exercise the
+    # full pipeline including bear-regime trades and macro-day code paths,
+    # so the env vars only ever defaulted to true in practice. They are now
+    # @property accessors that derive from is_paper (see below). Removed
+    # from the dataclass field list; existing call sites (cfg.paper_bear_override,
+    # cfg.paper_macro_bypass) work unchanged via the properties.
     paper_bear_max_trades: int           # max new trades/day in BEAR override
     paper_bear_size_mult: float          # position size multiplier (0.5 = half)
     paper_bear_confidence: float         # min confidence threshold
@@ -183,6 +191,26 @@ class Settings:
     def is_live(self) -> bool:
         """True when running in live-trading mode."""
         return self.trading_mode == "live"
+
+    @property
+    def paper_bear_override(self) -> bool:
+        """Always True in paper mode, False in live mode. Paper mode exists
+        to exercise the full pipeline; bear-regime trades are an intrinsic
+        part of that. Was env var PAPER_BEAR_OVERRIDE (default 'true') —
+        2026-05-14 audit replaced with this derivation. Existing call sites
+        `cfg.is_paper and cfg.paper_bear_override` continue to work; the
+        whole expression collapses to `cfg.is_paper`.
+        """
+        return self.is_paper
+
+    @property
+    def paper_macro_bypass(self) -> bool:
+        """Always True in paper mode, False in live mode. Paper mode should
+        always exercise macro-day code paths to surface bugs; live mode
+        should never. Was env var PAPER_MACRO_BYPASS (default 'true') —
+        same audit, same fix as paper_bear_override.
+        """
+        return self.is_paper
 
     def validate(self) -> None:
         """Raise ConfigError if any field is out of range. Called once at load."""
@@ -335,8 +363,9 @@ def _load_from_env() -> Settings:
         alpaca_base_url=_env_str("ALPACA_BASE_URL", "https://paper-api.alpaca.markets"),
 
         # Paper-mode overrides
-        paper_bear_override=_env_str("PAPER_BEAR_OVERRIDE", "true").lower() in ("true", "1", "yes"),
-        paper_macro_bypass=_env_str("PAPER_MACRO_BYPASS", "true").lower() in ("true", "1", "yes"),
+        # paper_bear_override + paper_macro_bypass removed as env vars in
+        # the 2026-05-14 stagnant-config audit — see properties below.
+        # Operator-set values are detected at load time (warning logged).
         paper_bear_max_trades=_env_int("PAPER_BEAR_MAX_TRADES", 1),
         paper_bear_size_mult=_env_float("PAPER_BEAR_SIZE_MULT", 0.5),
         paper_bear_confidence=_env_float("PAPER_BEAR_CONFIDENCE", 0.85),
@@ -383,6 +412,19 @@ def load_settings(*, force_reload: bool = False) -> Settings:
         return _cached_settings
     settings = _load_from_env()
     settings.validate()
+    # Detect operator-set deprecated env vars (paper_bear_override and
+    # paper_macro_bypass were removed in the 2026-05-14 stagnant-config
+    # audit). Warn loudly if someone set these explicitly — their value is
+    # being silently ignored. We don't error; live deployments may still
+    # have these in .env from before the deprecation.
+    for _deprecated in ("PAPER_BEAR_OVERRIDE", "PAPER_MACRO_BYPASS"):
+        if os.environ.get(_deprecated):
+            logger.warning(
+                "%s is set in environment but ignored — both are now derived "
+                "from trading_mode (paper → true, live → false). Remove from "
+                "your .env to silence this warning.",
+                _deprecated,
+            )
     _cached_settings = settings
     return settings
 

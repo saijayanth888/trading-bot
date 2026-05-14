@@ -98,11 +98,12 @@ Run `python scripts/gmail_oauth_setup.py` once locally to get the OAuth tokens, 
 
 ### Paper-Mode Overrides (optional, has defaults — only apply when `TRADING_MODE=paper`)
 
-In paper mode, the agent allows limited trading in BEAR regimes and bypasses macro blocks
-so the full pipeline can be tested. Set `PAPER_BEAR_OVERRIDE=false` to disable.
+Paper mode unconditionally allows BEAR-regime trades and bypasses CRITICAL/HIGH
+macro blocks so the full pipeline can be tested. As of 2026-05-14 those two
+toggles are derived from `TRADING_MODE` itself — the env vars
+`PAPER_BEAR_OVERRIDE` and `PAPER_MACRO_BYPASS` are no longer read (Settings
+logs a warning if they are present in your `.env`).
 
-- `PAPER_BEAR_OVERRIDE` — allow trades in BEAR regimes (default: `true`)
-- `PAPER_MACRO_BYPASS` — bypass CRITICAL/HIGH macro blocks (default: `true`)
 - `PAPER_BEAR_MAX_TRADES` — max new trades per day in BEAR override (default: `1`)
 - `PAPER_BEAR_SIZE_MULT` — position size multiplier, 0.5 = half size (default: `0.5`)
 - `PAPER_BEAR_CONFIDENCE` — min confidence threshold (default: `0.85`)
