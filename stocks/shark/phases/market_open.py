@@ -332,11 +332,46 @@ def _collect_candidate_data(
         # require BOTH model conviction AND market-state confirmation; a
         # candidate that triggers all three has multi-signal agreement
         # well above any single-LLM-boolean's weight.
-        composite_override = (
-            tft_up is not None
-            and tft_up >= 0.55
-            and sentiment_score >= 0.5
-            and rs_composite >= 1.0
+        #
+        # TFT-unavailable handling (C-3 fix, 2026-05-14): when _tft_predict
+        # returns None (model missing, insufficient bars, runtime error)
+        # we MUST NOT treat that as a TFT-vetoes-composite case — that
+        # collapses the composite to a strict-three-AND that silently
+        # excludes every candidate whenever the model is offline. Instead
+        # we fail-open on TFT and require the OTHER TWO signals to agree.
+        # This mirrors _tft_gate's fail-open semantics and matches the
+        # operator's stated principle (infrastructure hiccups should not
+        # veto trades — only model DISAGREEMENT should).
+        if tft_up is None:
+            # TFT signal unavailable — composite passes when the two
+            # remaining signals are in firm agreement. This is strictly
+            # MORE conservative than the live-TFT composite path because
+            # we're missing one of the three confirmations, so we keep
+            # the same sentiment/RS thresholds and let those carry it.
+            composite_override = (
+                sentiment_score >= 0.5
+                and rs_composite >= 1.0
+            )
+        else:
+            composite_override = (
+                tft_up >= 0.55
+                and sentiment_score >= 0.5
+                and rs_composite >= 1.0
+            )
+
+        # ─── Diagnostic gate-state log ─────────────────────────────────────
+        # Per agent4 audit suggestion (2026-05-14): operator can't tell from
+        # the cron log whether composite_override was evaluated at all on
+        # the killed candidate. Emit one structured INFO line up front so
+        # downstream `<SYM> skipped — ...` lines have ground-truth context.
+        tft_up_str = f"{tft_up:.2f}" if tft_up is not None else "n/a"
+        logger.info(
+            "[GATES] %s composite_override=%s catalyst_priced_in=%s "
+            "has_specific_catalyst=%s (tft_up=%s sentiment=%.2f rs=%.2f "
+            "outperforming=%s paper_override=%s)",
+            symbol, composite_override, priced_in,
+            has_specific_catalyst, tft_up_str, sentiment_score, rs_composite,
+            outperforming, _paper_override,
         )
 
         # ─── Catalyst-specific gate ────────────────────────────────────────
