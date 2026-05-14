@@ -88,15 +88,21 @@ def cmd_status(args: argparse.Namespace) -> int:
     positions = load_positions()
     pnl = cumulative_pnl()
 
+    # Derived caps (Wave 1.4): show the operator both the cfg-pinned
+    # ceiling and the equity-relative cap that will actually fire.
+    from .risk_caps import caps_as_dict, derive_caps
+    _caps = derive_caps(acct.portfolio_value, cfg)
     out = {
         "config": {
             "symbols": list(cfg.symbols),
             "delta_band": [cfg.delta_min, cfg.delta_max],
             "dte_band": [cfg.dte_min, cfg.dte_max],
-            "max_risk_per_ticker": cfg.max_risk_per_ticker_usd,
-            "max_total_collateral": cfg.max_total_collateral_usd,
+            "max_risk_per_ticker_ceiling": cfg.max_risk_per_ticker_usd,
+            "max_total_collateral_ceiling": cfg.max_total_collateral_usd,
+            "kill_loss_ceiling": cfg.kill_loss_per_cycle_usd,
             "paper": cfg.paper,
         },
+        "effective_caps": caps_as_dict(_caps),
         "account": {
             "cash": round(acct.cash, 2),
             "buying_power": round(acct.buying_power, 2),

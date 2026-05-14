@@ -39,6 +39,7 @@ from shark.memory.kill_switch import is_killed as _shark_kill_active
 
 from .broker import from_env
 from .config import load_config
+from .risk_caps import EquityRiskCaps, caps_as_dict, derive_caps
 from .state import (
     Position, TradeRecord,
     add_position, append_trade, cumulative_pnl_for, find_open_csp, find_open_cc,
@@ -180,13 +181,28 @@ def sell_csps(symbols_override: Optional[List[str]] = None) -> dict:
     positions_snapshot: List[Position] = load_positions()
     open_collateral = _open_csp_collateral_total(positions_snapshot)
     summary["open_collateral_usd_pre"] = round(open_collateral, 2)
-    summary["max_total_collateral_usd"] = float(cfg.max_total_collateral_usd)
+
+    # Stagnant-config audit Wave 1.4 (2026-05-14): wheel risk caps now
+    # scale with equity. Compute once per cycle so all candidates see a
+    # stable cap-of-record even if portfolio_value drifts between fills.
+    caps = derive_caps(acct.portfolio_value, cfg)
+    summary["risk_caps"] = caps_as_dict(caps)
+    summary["max_total_collateral_usd"] = caps.max_total_collateral_usd
+    logger.info(
+        "wheel: equity caps — portfolio=$%.0f total=$%.0f/$%.0f ticker=$%.0f/$%.0f kill=$%.0f/$%.0f pinned=%s",
+        caps.portfolio_value,
+        caps.max_total_collateral_usd, cfg.max_total_collateral_usd,
+        caps.max_risk_per_ticker_usd, cfg.max_risk_per_ticker_usd,
+        caps.kill_loss_per_cycle_usd, cfg.kill_loss_per_cycle_usd,
+        list(caps.pinned) or "none",
+    )
 
     for sym in symbols:
         try:
             _try_sell_csp(
                 broker, sym, cfg, acct, summary,
                 open_collateral_running=open_collateral,
+                caps=caps,
             )
             # Refresh after each (potential) entry so subsequent symbols see
             # the updated collateral total.
@@ -217,7 +233,12 @@ def _try_sell_csp(
     acct,
     summary: dict,
     open_collateral_running: float = 0.0,
+    caps: EquityRiskCaps | None = None,
 ) -> None:
+    # Caps default to cfg ceilings if the caller didn't pass them in
+    # (preserves behavior for any non-sell_csps direct caller).
+    if caps is None:
+        caps = derive_caps(acct.portfolio_value, cfg)
     if is_killed(sym):
         summary["skipped"].append(f"{sym}: per-ticker kill flag active")
         return
@@ -246,10 +267,10 @@ def _try_sell_csp(
     # by a single bad week early in the pilot.
     cycle_window_days = 30
     cycle_pnl = cumulative_pnl_for(sym, since=date.today() - timedelta(days=cycle_window_days))
-    if cycle_pnl <= -abs(cfg.kill_loss_per_cycle_usd):
+    if cycle_pnl <= -abs(caps.kill_loss_per_cycle_usd):
         kill_ticker(sym, days=90)
         summary["skipped"].append(
-            f"{sym}: cycle P&L ${cycle_pnl:.2f} ≤ -${cfg.kill_loss_per_cycle_usd:.2f} — "
+            f"{sym}: cycle P&L ${cycle_pnl:.2f} ≤ -${caps.kill_loss_per_cycle_usd:.2f} — "
             f"per-ticker kill flag set for 90 days"
         )
         return
@@ -271,9 +292,9 @@ def _try_sell_csp(
     best: OptionContract = best_list[0]
 
     collateral = best.strike * 100  # 1 contract = 100 shares
-    if collateral > cfg.max_risk_per_ticker_usd:
+    if collateral > caps.max_risk_per_ticker_usd:
         summary["skipped"].append(
-            f"{sym}: collateral ${collateral:.0f} > max_risk_per_ticker ${cfg.max_risk_per_ticker_usd:.0f}"
+            f"{sym}: collateral ${collateral:.0f} > max_risk_per_ticker ${caps.max_risk_per_ticker_usd:.0f}"
         )
         return
     # Alpaca enforces CSP submits against `options_buying_power`, NOT
@@ -287,10 +308,10 @@ def _try_sell_csp(
         )
         return
     # P1-S4: pilot-wide total-collateral ceiling.
-    if open_collateral_running + collateral > cfg.max_total_collateral_usd:
+    if open_collateral_running + collateral > caps.max_total_collateral_usd:
         summary["skipped"].append(
             f"{sym}: total collateral ${open_collateral_running + collateral:.0f} would exceed "
-            f"max_total_collateral ${cfg.max_total_collateral_usd:.0f} "
+            f"max_total_collateral ${caps.max_total_collateral_usd:.0f} "
             f"(${open_collateral_running:.0f} already open)"
         )
         return
