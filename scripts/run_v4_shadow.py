@@ -1187,6 +1187,11 @@ async def _write_trade_journal_row(
         # Close the most-recent open long row on this pair.
         # pnl_pct is stored as a FRACTION (no × 100); the BUY row's regime
         # and confidence are preserved by NOT touching those columns here.
+        # Structural caveat (see ledger reconcile below): this matches by
+        # "most-recent open on pair" not by external_id, because the SELL
+        # proposal's coid is different from the BUY's coid. When BUYs and
+        # SELLs don't interleave 1:1, older BUYs can get stranded as
+        # orphans. The reconcile block AFTER this UPDATE catches them.
         await cur.execute(
             """
             UPDATE public.trade_journal
@@ -1205,6 +1210,39 @@ async def _write_trade_journal_row(
              )
             """,
             (price_f, price_f, price_f, coid, symbol),
+        )
+        # Ledger reconciliation (2026-05-15): after the SELL above, check
+        # whether the V4 fills ledger considers this strategy+symbol fully
+        # closed (net qty == 0). If yes BUT trade_journal still has open
+        # rows for this pair, those are orphans from the most-recent-open
+        # close logic above — multiple BUYs before SELLs leaves older
+        # rows stranded forever. Close them with a ledger_reconciliation
+        # exit_reason and pnl=0 so the dashboard's open count matches truth.
+        # This prevented today's phantom ETH/USD orphan from 2026-05-14
+        # (V4 ledger net=0 but trade_journal showed it open for ~28h).
+        await cur.execute(
+            """
+            WITH net AS (
+                SELECT
+                    SUM(CASE WHEN f.side='BUY'  THEN f.qty ELSE 0 END) -
+                    SUM(CASE WHEN f.side='SELL' THEN f.qty ELSE 0 END) AS net_qty
+                FROM quanta_schema.fills f
+                JOIN quanta_schema.proposals p USING (client_order_id)
+                WHERE p.symbol = %s
+            )
+            UPDATE public.trade_journal
+               SET closed_at    = NOW(),
+                   exit_price   = entry_price,
+                   pnl          = 0.0,
+                   pnl_pct      = 0.0,
+                   duration_min = EXTRACT(EPOCH FROM (NOW() - opened_at)) / 60.0,
+                   exit_reason  = 'ledger_reconciliation (V4 net=0, journal orphan)'
+             WHERE pair = %s
+               AND direction = 'long'
+               AND closed_at IS NULL
+               AND (SELECT net_qty FROM net) = 0
+            """,
+            (symbol, symbol),
         )
 
 
