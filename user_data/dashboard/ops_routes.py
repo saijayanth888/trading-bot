@@ -3724,6 +3724,17 @@ def _v4_crypto_open_positions() -> list[dict]:
     Returns crypto-kind trade rows in the same shape live_trades expects,
     so the hero ticker renders identically whether the active engine is
     freqtrade or V4.
+
+    Enriched with mark-to-market values from ``quanta_schema.fills`` —
+    each symbol's most recent fill price is its best in-DB proxy for
+    "what's it worth right now" (~5 min cadence, no external API hop).
+    Display fields populated:
+        current  = latest fill price for that symbol
+        pnl_pct  = (current - avg_buy) / avg_buy × 100
+        pnl_usd  = net_qty × (current - avg_buy)
+    Without this enrichment the Open positions table renders ``—`` for
+    Mark + uPnL on every row even though the data is one JOIN away
+    (the bug agent-2 surfaced 2026-05-14).
     """
     rows: list[dict] = []
     try:
@@ -3736,15 +3747,29 @@ def _v4_crypto_open_positions() -> list[dict]:
         with _connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """
+                WITH latest_fill AS (
+                    SELECT DISTINCT ON (p.symbol)
+                           p.symbol AS symbol,
+                           f.price  AS mark_price,
+                           f.ts     AS mark_ts
+                    FROM quanta_schema.fills f
+                    JOIN quanta_schema.proposals p
+                      ON p.client_order_id = f.client_order_id
+                    ORDER BY p.symbol, f.ts DESC
+                )
                 SELECT p.symbol,
                        SUM(CASE WHEN f.side='BUY'  THEN f.qty ELSE 0 END) -
                        SUM(CASE WHEN f.side='SELL' THEN f.qty ELSE 0 END)            AS net_qty,
                        SUM(CASE WHEN f.side='BUY' THEN f.qty * f.price ELSE 0 END) /
                        NULLIF(SUM(CASE WHEN f.side='BUY' THEN f.qty ELSE 0 END), 0)  AS avg_buy_px,
+                       MIN(CASE WHEN f.side='BUY' THEN f.ts END)                     AS first_buy_ts,
                        MAX(f.ts)                                                     AS last_fill_ts,
-                       MAX(p.strategy)                                               AS strategy
+                       MAX(p.strategy)                                               AS strategy,
+                       MAX(lf.mark_price)                                            AS mark_price,
+                       MAX(lf.mark_ts)                                               AS mark_ts
                 FROM quanta_schema.fills f
                 JOIN quanta_schema.proposals p USING (client_order_id)
+                LEFT JOIN latest_fill lf ON lf.symbol = p.symbol
                 GROUP BY p.symbol
                 HAVING SUM(CASE WHEN f.side='BUY' THEN f.qty ELSE 0 END) -
                        SUM(CASE WHEN f.side='SELL' THEN f.qty ELSE 0 END) > 0
@@ -3752,18 +3777,35 @@ def _v4_crypto_open_positions() -> list[dict]:
             )
             # ops_db._connect() uses dict_row factory; rows are dicts keyed
             # by the SELECT-alias names (symbol, net_qty, avg_buy_px, ...).
+            from datetime import datetime as _dt, timezone as _tz
+            now_ts = _dt.now(_tz.utc)
             for r in cur.fetchall():
+                entry = float(r["avg_buy_px"]) if r["avg_buy_px"] is not None else None
+                mark = float(r["mark_price"]) if r["mark_price"] is not None else None
+                qty = float(r["net_qty"]) if r["net_qty"] is not None else 0.0
+                pnl_pct: float | None = None
+                pnl_usd: float | None = None
+                if entry and mark and entry > 0:
+                    pnl_pct = ((mark - entry) / entry) * 100.0
+                    pnl_usd = qty * (mark - entry)
+                duration_s: int | None = None
+                if r.get("first_buy_ts"):
+                    try:
+                        duration_s = int((now_ts - r["first_buy_ts"]).total_seconds())
+                    except Exception:
+                        duration_s = None
                 rows.append({
                     "kind": "crypto",
                     "subkind": "long",
                     "label": r["symbol"],
-                    "entry": float(r["avg_buy_px"]) if r["avg_buy_px"] is not None else None,
-                    "current": None,  # filled by client from /api/candles
-                    "qty": float(r["net_qty"]),
-                    "pnl_pct": None,
-                    "pnl_usd": None,
-                    "duration_s": None,
-                    "opened_at": r["last_fill_ts"].isoformat() if r["last_fill_ts"] else None,
+                    "entry": entry,
+                    "current": mark,
+                    "qty": qty,
+                    "pnl_pct": pnl_pct,
+                    "pnl_usd": pnl_usd,
+                    "duration_s": duration_s,
+                    "opened_at": (r["first_buy_ts"] or r["last_fill_ts"]).isoformat()
+                                  if (r.get("first_buy_ts") or r.get("last_fill_ts")) else None,
                     "extra": f"v4·strategy={r['strategy']}",
                 })
     except Exception as exc:
@@ -4983,6 +5025,16 @@ async def weekly_training() -> dict[str, Any]:
                 adapter_version = "v" + dt.strftime("%Y%m%d")
             except ValueError:
                 adapter_version = None
+        # Graceful fallback when mf-api omits the promoted_at timestamp
+        # (agent audit 2026-05-14: trading-reflector row was showing
+        # green PROMOTED pill next to em-dash version + 0.000 score —
+        # mf-api `/api/forge/tracks` doesn't include the timestamp yet).
+        # Derive a stable label from `champion_generation` so the version
+        # cell shows something meaningful: "gen 1" instead of "—".
+        if adapter_version is None:
+            gen = mf_t.get("champion_generation")
+            if isinstance(gen, (int, float)) and gen > 0:
+                adapter_version = f"gen {int(gen)}"
 
         scores = mf_t.get("champion_scores") or mf_t.get("last_eval_scores") or {}
         if not isinstance(scores, dict):

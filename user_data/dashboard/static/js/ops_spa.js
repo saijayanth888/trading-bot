@@ -485,7 +485,27 @@
     },
       h(DDRibbon, { dayPct: liveDayPct, haltPct: haltFrac }),
       h("div", { className: "v3-score-hero" },
-        h("div", { className: "dim2 mono", style: { fontSize: "var(--t-2xs)", letterSpacing: ".12em" } }, "LIVE DAY P&L"),
+        // Day-boundary annotation — explicit so the operator never reads
+        // a freshly-rolled $0.00 as "scoreboard not loading". The bot's
+        // "today" boundary is UTC midnight (00:00 UTC = 20:00 ET / 19:00
+        // EDT). Within the first hour after rollover, surface a "rolled
+        // over Xm ago" hint instead of a flat label.
+        h("div", {
+          className: "dim2 mono",
+          style: { fontSize: "var(--t-2xs)", letterSpacing: ".12em", display: "flex", alignItems: "baseline", gap: 8 },
+        },
+          h("span", null, "LIVE DAY P&L"),
+          (function() {
+            const now = new Date();
+            const utcMid = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0));
+            const minsSinceRollover = Math.floor((now - utcMid) / 60000);
+            const hint = minsSinceRollover < 60
+              ? "rolled over " + minsSinceRollover + "m ago"
+              : "since 00:00 UTC · " + (now.getUTCHours()) + "h " + (now.getUTCMinutes()) + "m in";
+            return h("span", { className: "dim", style: { fontSize: "var(--t-2xs)", fontWeight: 400, letterSpacing: ".04em", textTransform: "none" } },
+              "· " + hint);
+          })()
+        ),
         h("div", { className: dayCls, style: { lineHeight: 1 } },
           h(NumberRoll, {
             value: liveDayPnl,

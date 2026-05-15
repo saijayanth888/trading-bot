@@ -242,7 +242,32 @@
           return h("span", { className: "pill " + m.cls, title: m.title },
             h("span", { className: "dot " + m.cls + (m.pulse ? " pulse" : "") }),
             " ", m.txt);
-        })() : null)
+        })() : null),
+        // STOCKS DATA UNTRUSTED pill — surfaces when unified_risk has
+        // marked the stocks snapshot too stale to trust for the combined
+        // drawdown calc AND NYSE is in the regular session (after-hours
+        // staleness is expected). Without this pill, the operator only
+        // learns about it via the combined breaker tripping — too late.
+        // Source: /api/ops/combined_portfolio {stocks_data_untrusted,
+        //         market_open_now} (already polled every 10s for equity).
+        (function() {
+          const m = envelopeData(marketHours) || {};
+          const isOpen = !!(m.is_open || m.session === "regular");
+          const cp = envelopeData(combined) || {};
+          if (!isOpen) return null;
+          if (!cp.stocks_data_untrusted && !cp.stocks_data_stale) return null;
+          const ageS = cp.stocks_snapshot_age_s;
+          const ageTxt = ageS != null ? Math.round(ageS / 60) + "m" : "—";
+          const cls = cp.stocks_data_untrusted ? "down" : "warn";
+          const txt = cp.stocks_data_untrusted ? "STOCKS UNTRUSTED" : "STOCKS STALE";
+          return h("span", {
+            className: "pill " + cls,
+            title: "Stocks account snapshot is " + ageTxt + " old · combined-DD calculation degraded · "
+                   + "refresh: bash ~/.hermes/scripts/wheel_snapshot.sh",
+          },
+            h("span", { className: "dot " + cls + " pulse" }),
+            " ", txt, " ", ageTxt);
+        })()
       ),
       h("div", { className: "tb-divider" }),
       h("div", { className: "tb-group", "data-test": "topbar-equity" },
