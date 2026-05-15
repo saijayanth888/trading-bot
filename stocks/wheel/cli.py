@@ -262,6 +262,7 @@ def _reconcile_positions_with_broker(broker) -> dict:
     # We keep `status='assigned'` rows even when the option is gone — those
     # represent the underlying shares from a CSP that exercised, the wheel
     # cycle isn't done with them yet. Only drop status='' or 'closed'.
+    removed_underlyings: set[str] = set()
     for sym, lp in local.items():
         if sym in broker_syms:
             continue
@@ -270,12 +271,42 @@ def _reconcile_positions_with_broker(broker) -> dict:
         # Ghost — option not at broker, not assigned locally. Drop it.
         try:
             remove_position(sym)
+            removed_underlyings.add(lp.underlying)
             summary["removed"].append({
                 "symbol": sym, "underlying": lp.underlying,
                 "kind": lp.kind, "status": lp.status or "",
             })
         except Exception as exc:
             summary["errors"].append(f"remove {sym}: {exc}")
+
+    # ── Stage 3: SYNC owned_symbols.json against truth ──────────────────
+    # Why: owned_symbols.json is the per-subsystem claim/release registry
+    # (see stocks/shared/subsystem_ownership.py). It's normally maintained
+    # by claim() on open and release() on close. If a close path ever
+    # forgets to call release() — silent failure, expired option, manual
+    # broker action — the registry drifts forever. We hit this 2026-05-15:
+    # SOFI puts had been closed at the broker but SOFI/SOFI260516P/
+    # SOFI260522P entries lingered in wheel/state/owned_symbols.json.
+    #
+    # Authoritative truth: positions.json (just reconciled against Alpaca
+    # above) + any "assigned" rows. Anything in owned_symbols that ISN'T
+    # in that truth set is a ghost claim — release it.
+    try:
+        from shared.subsystem_ownership import load_owned, release as _release
+        owned = load_owned("wheel")
+        # Reload positions after Stage 2 mutations so we see current truth.
+        truth: set[str] = set()
+        for p in load_positions():
+            if p.contract_symbol:
+                truth.add(p.contract_symbol)
+            if p.underlying:
+                truth.add(p.underlying)
+        ghosts = owned - truth
+        for g in sorted(ghosts):
+            _release("wheel", g)
+            summary.setdefault("ownership_released", []).append(g)
+    except Exception as exc:
+        summary["errors"].append(f"owned_symbols sync failed: {exc}")
 
     return summary
 
