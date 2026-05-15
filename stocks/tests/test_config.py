@@ -4,7 +4,6 @@ Tests for shark.config — central configuration validation.
 Verifies that out-of-range values fail fast and that defaults load cleanly.
 """
 
-import os
 import pytest
 
 
@@ -66,50 +65,50 @@ class TestDefaults:
 
 class TestValidation:
     def test_max_positions_too_high(self, _minimal_env, monkeypatch):
-        from shark.config import load_settings, ConfigError
+        from shark.config import ConfigError, load_settings
         monkeypatch.setenv("MAX_POSITIONS", "50")
         with pytest.raises(ConfigError, match="MAX_POSITIONS"):
             load_settings(force_reload=True)
 
     def test_max_position_pct_too_high(self, _minimal_env, monkeypatch):
-        from shark.config import load_settings, ConfigError
+        from shark.config import ConfigError, load_settings
         monkeypatch.setenv("MAX_POSITION_PCT", "0.90")
         with pytest.raises(ConfigError, match="MAX_POSITION_PCT"):
             load_settings(force_reload=True)
 
     def test_circuit_breaker_too_high(self, _minimal_env, monkeypatch):
-        from shark.config import load_settings, ConfigError
+        from shark.config import ConfigError, load_settings
         monkeypatch.setenv("CIRCUIT_BREAKER_PCT", "0.80")
         with pytest.raises(ConfigError, match="CIRCUIT_BREAKER_PCT"):
             load_settings(force_reload=True)
 
     def test_hard_stop_must_be_negative(self, _minimal_env, monkeypatch):
-        from shark.config import load_settings, ConfigError
+        from shark.config import ConfigError, load_settings
         monkeypatch.setenv("HARD_STOP_PCT", "0.07")
         with pytest.raises(ConfigError, match="HARD_STOP_PCT"):
             load_settings(force_reload=True)
 
     def test_trail_min_must_be_less_than_max(self, _minimal_env, monkeypatch):
-        from shark.config import load_settings, ConfigError
+        from shark.config import ConfigError, load_settings
         monkeypatch.setenv("TRAIL_PCT_MIN", "20.0")
         monkeypatch.setenv("TRAIL_PCT_MAX", "10.0")
         with pytest.raises(ConfigError, match="TRAIL_PCT_MIN"):
             load_settings(force_reload=True)
 
     def test_risk_per_trade_too_high(self, _minimal_env, monkeypatch):
-        from shark.config import load_settings, ConfigError
+        from shark.config import ConfigError, load_settings
         monkeypatch.setenv("RISK_PER_TRADE_PCT", "0.50")
         with pytest.raises(ConfigError, match="RISK_PER_TRADE_PCT"):
             load_settings(force_reload=True)
 
     def test_non_numeric_raises(self, _minimal_env, monkeypatch):
-        from shark.config import load_settings, ConfigError
+        from shark.config import ConfigError, load_settings
         monkeypatch.setenv("MAX_POSITIONS", "abc")
         with pytest.raises(ConfigError, match="not a valid int"):
             load_settings(force_reload=True)
 
     def test_float_env_non_numeric(self, _minimal_env, monkeypatch):
-        from shark.config import load_settings, ConfigError
+        from shark.config import ConfigError, load_settings
         monkeypatch.setenv("CIRCUIT_BREAKER_PCT", "notanumber")
         with pytest.raises(ConfigError, match="not a valid float"):
             load_settings(force_reload=True)

@@ -1,10 +1,11 @@
 from __future__ import annotations
+
 import logging
 import re
 from datetime import date
 from pathlib import Path
 
-from shark.data.alpaca_data import get_account, get_positions, get_bars
+from shark.data.alpaca_data import get_bars
 from shark.data.perplexity import fetch_market_intel
 from shark.memory import handoff, state
 

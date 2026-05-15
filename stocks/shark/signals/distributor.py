@@ -21,8 +21,8 @@ Environment variables:
 
 import logging
 import os
-import socket
 import smtplib
+import socket
 import urllib.error
 import urllib.request
 from email.mime.multipart import MIMEMultipart

@@ -6,9 +6,10 @@ Returns None for NO_TRADE, WAIT, or low-confidence outcomes.
 """
 
 from __future__ import annotations
-import uuid
+
 import logging
-from datetime import datetime, timezone
+import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from shark.risk_floors import min_confidence
@@ -81,7 +82,7 @@ def generate_signal(
 
     signal: dict[str, Any] = {
         "signal_id": str(uuid.uuid4()),
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "symbol": symbol,
         "action": "BUY",
         "entry_price": round(entry_price, 2),

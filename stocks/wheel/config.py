@@ -30,13 +30,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Tuple
 
 
 @dataclass(frozen=True)
 class WheelConfig:
     # Universe — start single-ticker; expand only after 30-day pilot success.
-    symbols: Tuple[str, ...] = ("SOFI",)
+    symbols: tuple[str, ...] = ("SOFI",)
 
     # Strike-selection knobs.
     delta_min: float = 0.25

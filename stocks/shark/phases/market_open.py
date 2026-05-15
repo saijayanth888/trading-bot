@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import json
 import logging
 import os
@@ -6,26 +7,26 @@ import re
 from datetime import date
 from pathlib import Path
 
-from shark.data.alpaca_data import get_account, get_positions, get_bars
-from shark.data.technical import compute_indicators
-from shark.data.perplexity import fetch_market_intel
-from shark.data.market_regime import detect_regime, get_regime_rules
-from shark.risk_floors import min_confidence, min_risk_reward, min_risk_reward_tol
-from shark.data.relative_strength import compute_relative_strength
-from shark.data.macro_calendar import check_macro_calendar
-from shark.data.watchlist import get_ticker_sector, SECTOR_ETFS
-from shark.execution.guardrails import Guardrails
-from shark.execution.position_sizer import compute_position_size, compute_partial_exit_plan
 from shark.agents.combined_analyst import analyze_symbol
+from shark.data.alpaca_data import get_account, get_bars, get_positions
+from shark.data.macro_calendar import check_macro_calendar
+from shark.data.market_regime import detect_regime, get_regime_rules
+from shark.data.perplexity import fetch_market_intel
+from shark.data.relative_strength import compute_relative_strength
+from shark.data.technical import compute_indicators
+from shark.data.watchlist import SECTOR_ETFS, get_ticker_sector
+from shark.execution.guardrails import Guardrails
 from shark.execution.orders import place_bracket_order
-from shark.memory.journal import log_trade
-from shark.notify import notify as _notify
-from shark.signals.generator import generate_signal
-from shark.signals.distributor import send_email_digest
-from shark.signals.templates import trade_signal_html
+from shark.execution.position_sizer import compute_position_size
 from shark.memory import handoff, state
 from shark.memory.atomic import atomic_write_json
-from shark.memory.kill_switch import enforce_kill_switch, KillSwitchActive
+from shark.memory.journal import log_trade
+from shark.memory.kill_switch import KillSwitchActive, enforce_kill_switch
+from shark.notify import notify as _notify
+from shark.risk_floors import min_confidence, min_risk_reward, min_risk_reward_tol
+from shark.signals.distributor import send_email_digest
+from shark.signals.generator import generate_signal
+from shark.signals.templates import trade_signal_html
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +67,9 @@ def _tft_predict(symbol: str) -> dict | None:
     site (don't kill a candidate just because the model isn't available).
     """
     try:
-        from shark.ml.tft_stock import predict_direction
         from shark.ml.dataset_stock import _load_bars_json
-        from shark.ml.features_stock import build_features, FEATURE_COLS
+        from shark.ml.features_stock import FEATURE_COLS, build_features
+        from shark.ml.tft_stock import predict_direction
     except ImportError as exc:
         logger.debug("[TFT] import failed for %s: %s", symbol, exc)
         return None

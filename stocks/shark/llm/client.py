@@ -26,7 +26,7 @@ import logging
 import os
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -522,7 +522,6 @@ def _maybe_alert_fallback_active(agent: str, primary_status: dict) -> None:
     try:
         # Slack via direct webhook — avoids importing freqtrade-side modules
         # that may not be on PYTHONPATH for the shark process.
-        import json as _json
         webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
         if not webhook:
             return
@@ -603,7 +602,7 @@ def chat_json(
 
     primary_breaker = get_breaker(f"ollama:{tier}", tier=tier)
     fallback_breaker = get_breaker(f"anthropic:{tier}", tier=tier)
-    last_error: Optional[Exception] = None
+    last_error: Exception | None = None
 
     # ── Attempt 1: Ollama (primary) ───────────────────────────────────
     can_primary, reason = primary_breaker.can_execute()

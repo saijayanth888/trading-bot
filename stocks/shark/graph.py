@@ -52,7 +52,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 

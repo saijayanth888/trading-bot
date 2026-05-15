@@ -32,9 +32,8 @@ from __future__ import annotations
 
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Callable
 
 REPO = Path(__file__).resolve().parents[1]
 MEM_DIR = REPO / "stocks" / "memory"
@@ -93,7 +92,7 @@ def _archive_by_date(
 
     text = src.read_text(encoding="utf-8", errors="replace")
     blocks = _split_into_blocks(text, header_re)
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).date()
+    cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).date()
 
     kept: list[str] = []
     moved: list[str] = []

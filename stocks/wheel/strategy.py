@@ -13,8 +13,8 @@ Adapted from alpacahq/options-wheel/core/strategy.py with adjustments:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
-from typing import Iterable, List, Optional, Tuple
+from datetime import date
+from typing import Iterable
 
 from .config import WheelConfig
 
@@ -46,9 +46,9 @@ def filter_puts(
     contracts: Iterable[OptionContract],
     cfg: WheelConfig,
     min_strike: float = 0.0,
-) -> List[OptionContract]:
+) -> list[OptionContract]:
     """Apply delta-band, OI floor, weekly-yield floor, and DTE band filters."""
-    out: List[OptionContract] = []
+    out: list[OptionContract] = []
     for c in contracts:
         if c.contract_type != "put":
             continue
@@ -77,10 +77,10 @@ def filter_calls(
     contracts: Iterable[OptionContract],
     cfg: WheelConfig,
     cost_basis: float,
-) -> List[OptionContract]:
+) -> list[OptionContract]:
     """Covered-call filter: short call must be ABOVE our cost basis (else we
     risk being called away at a loss)."""
-    out: List[OptionContract] = []
+    out: list[OptionContract] = []
     for c in contracts:
         if c.contract_type != "call":
             continue
@@ -114,17 +114,17 @@ def score_contract(c: OptionContract) -> float:
 
 
 def select_best(
-    contracts: List[OptionContract],
-    n: Optional[int] = None,
-) -> List[OptionContract]:
+    contracts: list[OptionContract],
+    n: int | None = None,
+) -> list[OptionContract]:
     """Sort by score descending, dedup by underlying, return top n (or all)."""
     if not contracts:
         return []
-    scored: List[Tuple[OptionContract, float]] = [
+    scored: list[tuple[OptionContract, float]] = [
         (c, score_contract(c)) for c in contracts
     ]
     # Best per underlying
-    best_per_underlying: dict[str, Tuple[OptionContract, float]] = {}
+    best_per_underlying: dict[str, tuple[OptionContract, float]] = {}
     for c, s in scored:
         cur = best_per_underlying.get(c.underlying)
         if cur is None or s > cur[1]:
@@ -136,8 +136,8 @@ def select_best(
 
 
 def is_earnings_blackout(
-    next_earnings: Optional[date],
-    today: Optional[date] = None,
+    next_earnings: date | None,
+    today: date | None = None,
     blackout_days: int = 3,
 ) -> bool:
     """True if next_earnings is within blackout_days of today.

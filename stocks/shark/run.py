@@ -82,9 +82,9 @@ def _maybe_install_dependencies() -> None:
         else:
             print("INFO: uv pip install succeeded (pip had failed)", file=sys.stderr)
 
-from shark.config import load_settings, ConfigError
-from shark.context.context_manager import generate_context_briefing, check_context_health
-from shark.memory.kill_switch import enforce_kill_switch, KillSwitchActive
+from shark.config import ConfigError, load_settings
+from shark.context.context_manager import check_context_health, generate_context_briefing
+from shark.memory.kill_switch import KillSwitchActive, enforce_kill_switch
 
 PHASES = {
     "pre-market": "shark.phases.pre_market",

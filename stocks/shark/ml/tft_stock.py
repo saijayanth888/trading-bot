@@ -32,9 +32,8 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import torch
@@ -125,10 +124,10 @@ def _stack_batch(batch):
 def train(
     kb_dir: Path,
     *,
-    cfg: Optional[TFTStockConfig] = None,
-    output_dir: Optional[Path] = None,
-    tickers: Optional[list[str]] = None,
-    max_train_samples: Optional[int] = None,
+    cfg: TFTStockConfig | None = None,
+    output_dir: Path | None = None,
+    tickers: list[str] | None = None,
+    max_train_samples: int | None = None,
 ) -> dict:
     """Train one cross-ticker TFT on all S&P 500 historical bars."""
     cfg = cfg or TFTStockConfig()
@@ -317,7 +316,7 @@ def predict_direction(
     ticker: str,
     feature_window: np.ndarray,
     *,
-    weights_path: Optional[Path] = None,
+    weights_path: Path | None = None,
 ) -> dict:
     """Run the trained TFT on a single (sequence_length × num_features) window."""
     weights_path = weights_path or (

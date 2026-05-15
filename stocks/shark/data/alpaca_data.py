@@ -21,7 +21,7 @@ import functools
 import logging
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, Callable, TypeVar
 
 import pandas as pd
@@ -347,8 +347,8 @@ def get_bars(
     tf = _resolve_timeframe(timeframe)
     client = _get_data_client()
 
+    from alpaca.data.enums import Adjustment, DataFeed  # type: ignore[import]
     from alpaca.data.requests import StockBarsRequest  # type: ignore[import]
-    from alpaca.data.enums import DataFeed, Adjustment  # type: ignore[import]
 
     # Calculate a safe start date — Alpaca can return 0 bars without one.
     # Use a generous calendar-day multiplier to cover weekends/holidays.
@@ -356,7 +356,7 @@ def get_bars(
         "1Day": 1.8, "1Hour": 0.15, "15Min": 0.04, "5Min": 0.015, "1Min": 0.003,
     }
     cal_days = int(limit * _tf_day_multiplier.get(timeframe, 2.0)) + 10
-    start_dt = datetime.now(timezone.utc) - timedelta(days=cal_days)
+    start_dt = datetime.now(UTC) - timedelta(days=cal_days)
 
     # Explicit feed: free-tier accounts only have IEX access; SIP requires paid.
     # Override with ALPACA_DATA_FEED env var (e.g. "sip" for paid accounts).
@@ -462,15 +462,15 @@ def get_bars_multi(
     tf = _resolve_timeframe(timeframe)
     client = _get_data_client()
 
+    from alpaca.data.enums import Adjustment, DataFeed  # type: ignore[import]
     from alpaca.data.requests import StockBarsRequest  # type: ignore[import]
-    from alpaca.data.enums import DataFeed, Adjustment  # type: ignore[import]
 
     # Generous start date for the requested limit
     _tf_day_multiplier = {
         "1Day": 1.8, "1Hour": 0.15, "15Min": 0.04, "5Min": 0.015, "1Min": 0.003,
     }
     cal_days = int(limit * _tf_day_multiplier.get(timeframe, 2.0)) + 30
-    start_dt = datetime.now(timezone.utc) - timedelta(days=cal_days)
+    start_dt = datetime.now(UTC) - timedelta(days=cal_days)
 
     feed_str = os.environ.get("ALPACA_DATA_FEED", "iex").lower()
     feed_map = {"iex": DataFeed.IEX, "sip": DataFeed.SIP, "otc": DataFeed.OTC}

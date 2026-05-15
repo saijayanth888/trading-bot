@@ -18,7 +18,7 @@ import io
 import json
 import logging
 import urllib.request
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 

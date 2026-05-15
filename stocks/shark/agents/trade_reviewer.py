@@ -13,13 +13,10 @@ This creates an adaptive learning loop — the agent gets smarter over time.
 
 import json
 import logging
-import os
 import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-
-from shark.config import get_settings
 
 logger = logging.getLogger(__name__)
 

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import aiohttp
 
@@ -89,7 +89,7 @@ async def fetch_hn_top(limit: int = 30) -> list[HNItem]:
                     url=item.get("url"),
                     score=int(item.get("score", 0)),
                     descendants=int(item.get("descendants", 0)),
-                    ts=datetime.fromtimestamp(int(item["time"]), tz=timezone.utc),
+                    ts=datetime.fromtimestamp(int(item["time"]), tz=UTC),
                 )
             )
     return out

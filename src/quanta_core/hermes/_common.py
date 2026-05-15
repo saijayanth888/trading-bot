@@ -18,7 +18,7 @@ import os
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -306,7 +306,7 @@ def load_config() -> HermesConfig:
 def utc_now() -> datetime:
     """Return tz-aware UTC ``now``.  Single chokepoint so tests can monkey-patch."""
 
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def utc_iso(ts: datetime | None = None) -> str:
@@ -314,7 +314,7 @@ def utc_iso(ts: datetime | None = None) -> str:
 
     ts = ts or utc_now()
     if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=timezone.utc)
+        ts = ts.replace(tzinfo=UTC)
     return ts.isoformat()
 
 

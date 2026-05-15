@@ -23,7 +23,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +34,7 @@ from fastapi.templating import Jinja2Templates
 
 from . import mcp_local, ops_db, ops_probes
 from .data_sources import fetch_coinbase_candles
+
 # NOTE: removed `from .stocks_sentiment import StocksSentimentFetcher` —
 # the placeholder pipeline was redundant. Per-symbol sentiment is already
 # produced by Shark's analyst_bull/analyst_bear/debate_orchestrator using
@@ -57,7 +58,7 @@ def _envelope(status: str, data: Any = None, error: str | None = None) -> dict[s
         "status": status,
         "data": data,
         "error": error,
-        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "checked_at": datetime.now(UTC).isoformat(),
     }
 
 
@@ -219,6 +220,7 @@ async def services():
 # liveness is surfaced via _quanta_core_probe in /api/ops/services instead.
 
 import time as _uptime_time
+
 _DASHBOARD_START_TS = _uptime_time.time()
 
 
@@ -297,7 +299,7 @@ def _training_health_payload(identifier: str = "tft_v1") -> dict[str, Any]:
         # Config-read failures are non-fatal — fall back to eligibility only.
         pass
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     rows: list[dict[str, Any]] = []
     for pair, info in sorted(scan.items()):
         zip_path_str = info.get("zip_path")
@@ -321,7 +323,7 @@ def _training_health_payload(identifier: str = "tft_v1") -> dict[str, Any]:
         if last_train_ts:
             age_hours = round((now.timestamp() - last_train_ts) / 3600.0, 2)
         last_train_iso = (
-            datetime.fromtimestamp(last_train_ts, timezone.utc).isoformat()
+            datetime.fromtimestamp(last_train_ts, UTC).isoformat()
             if last_train_ts else None
         )
 
@@ -444,7 +446,7 @@ async def regime():
     ts = latest.get("ts")
     age_s = None
     if ts:
-        age_s = (datetime.now(timezone.utc) - ts).total_seconds() if ts.tzinfo else None
+        age_s = (datetime.now(UTC) - ts).total_seconds() if ts.tzinfo else None
     stale = (age_s is not None) and age_s > 90 * 60
 
     return _envelope(
@@ -489,7 +491,7 @@ async def sentiment():
         return _envelope("degraded", data={"score": None}, error="sentiment_log empty")
 
     ts = latest.get("ts")
-    age_s = (datetime.now(timezone.utc) - ts).total_seconds() if ts and ts.tzinfo else None
+    age_s = (datetime.now(UTC) - ts).total_seconds() if ts and ts.tzinfo else None
     stale = (age_s is not None) and age_s > 30 * 60
 
     # Pull per-model scores so the operator can see WHY the aggregate is 0
@@ -932,7 +934,7 @@ async def regime_config_post(request: Request):
         from datetime import datetime as _dt
         backup_dir = USER_DATA_ROOT_FOR_BACKUPS / "data"
         backup_dir.mkdir(parents=True, exist_ok=True)
-        stamp = _dt.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+        stamp = _dt.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
         backup_path = backup_dir / f"config-backup-{stamp}.json"
         backup_path.write_text(cfg_text)
     except Exception as exc:
@@ -994,7 +996,7 @@ def risk_gates_get():
     # Live-resolved values (defaults overlaid with whatever's in config.json).
     # Lets the UI distinguish between "operator set this" and "fallback default".
     try:
-        from user_data.modules.unified_risk import _load_risk_gates, _RISK_GATE_DEFAULTS
+        from user_data.modules.unified_risk import _RISK_GATE_DEFAULTS, _load_risk_gates
         resolved = _load_risk_gates()
         defaults = dict(_RISK_GATE_DEFAULTS)
     except Exception as exc:
@@ -1076,7 +1078,7 @@ async def risk_gates_post(request: Request):
         from datetime import datetime as _dt
         backup_dir = USER_DATA_ROOT_FOR_BACKUPS / "data"
         backup_dir.mkdir(parents=True, exist_ok=True)
-        stamp = _dt.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+        stamp = _dt.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
         backup_path = backup_dir / f"config-backup-{stamp}.json"
         backup_path.write_text(cfg_text)
     except Exception as exc:
@@ -1166,7 +1168,7 @@ async def resume(request: Request):
             data = json.loads(anchor_path.read_text())
             if data.get("paused_for_drawdown"):
                 data["paused_for_drawdown"] = False
-                data["manual_resume_at"] = datetime.now(timezone.utc).isoformat()
+                data["manual_resume_at"] = datetime.now(UTC).isoformat()
                 tmp = anchor_path.with_suffix(anchor_path.suffix + ".tmp")
                 tmp.write_text(json.dumps(data, indent=2))
                 tmp.replace(anchor_path)
@@ -1340,7 +1342,7 @@ def _evaluate_readiness_inline(mode: str = "standard") -> dict:
     # Thresholds in _READINESS_MODES mirror scripts/validate_readiness.py.
     daily: dict[str, float] = {}
     for r in rows:
-        day = r["closed_at"].astimezone(timezone.utc).strftime("%Y-%m-%d")
+        day = r["closed_at"].astimezone(UTC).strftime("%Y-%m-%d")
         daily[day] = daily.get(day, 0.0) + float(r["pnl_pct"] or 0)
     daily_pcts = list(daily.values())
     if len(daily_pcts) >= 2:
@@ -1568,7 +1570,7 @@ async def rebalance_apply(request: Request):
     cfg = json.loads(cfg_text)
     backup_dir = USER_DATA_ROOT_FOR_BACKUPS / "data"
     backup_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+    stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
     backup_path = backup_dir / f"config-backup-{stamp}-rebalance-ui.json"
     backup_path.write_text(cfg_text)
     cfg["capital_allocation"]["pair_weights"] = result["proposed_weights"]
@@ -1930,7 +1932,7 @@ async def slack_preview():
     worst = per_pair[-1] if per_pair and len(per_pair) > 1 else None
 
     return _envelope("ok", data={
-        "date_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "date_utc": datetime.now(UTC).strftime("%Y-%m-%d"),
         # Keep `pnl_usd` and the new explicit aliases. day_pnl_* mirror
         # combined_portfolio's contract so the Slack preview card and
         # the hero card render the same numbers.
@@ -1992,7 +1994,7 @@ def _file_age_seconds(path: Path) -> int | None:
     try:
         if not path.is_file():
             return None
-        return int((datetime.now(timezone.utc).timestamp() - path.stat().st_mtime))
+        return int((datetime.now(UTC).timestamp() - path.stat().st_mtime))
     except OSError:
         return None
 
@@ -2032,7 +2034,7 @@ def _parse_shark_phase_decisions(handoff_file: Path) -> dict:
     instead of raising, so a malformed handoff doesn't 500 the endpoint.
     """
     import re
-    today_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today_iso = datetime.now(UTC).strftime("%Y-%m-%d")
     result: dict = {
         "briefing_date": None,
         "missing": True,
@@ -2285,8 +2287,8 @@ async def stocks_status():
             # Tolerate naive (no tz) timestamps — fall back to UTC.
             _dt = datetime.fromisoformat(str(shark_gen_iso))
             if _dt.tzinfo is None:
-                _dt = _dt.replace(tzinfo=timezone.utc)
-            shark_content_age = int(datetime.now(timezone.utc).timestamp() - _dt.timestamp())
+                _dt = _dt.replace(tzinfo=UTC)
+            shark_content_age = int(datetime.now(UTC).timestamp() - _dt.timestamp())
         except (ValueError, TypeError) as exc:
             logger.debug("stocks: failed to parse generated_at %r: %s", shark_gen_iso, exc)
     if shark_content_age is None:
@@ -2395,13 +2397,13 @@ def _is_nyse_open_now() -> bool:
     sparklines envelope doesn't pay an extra round-trip. Holiday awareness
     is a TODO across both call sites.
     """
-    from datetime import datetime, time, timezone
+    from datetime import datetime, time
     try:
         from zoneinfo import ZoneInfo
     except ImportError:  # pragma: no cover
         from backports.zoneinfo import ZoneInfo
     et = ZoneInfo("America/New_York")
-    now_et = datetime.now(timezone.utc).astimezone(et)
+    now_et = datetime.now(UTC).astimezone(et)
     if now_et.weekday() >= 5:
         return False
     return time(9, 30) <= now_et.time() < time(16, 0)
@@ -2667,7 +2669,7 @@ async def gates():
     # to surface MODEL EXPIRED before the strategy-level do_predict gate.
     _pair_dict: dict = {}
     try:
-        import json as _json2, time as _time
+        import json as _json2
         _pd_path = Path(f"/app/user_data/models/{_identifier}/pair_dictionary.json")
         if _pd_path.exists():
             _pair_dict = _json2.loads(_pd_path.read_text()) or {}
@@ -3113,8 +3115,8 @@ async def gates():
         })
 
         # 7. Calendar / cron schedule (today is Friday for sell-csps)
-        from datetime import datetime, timezone, timedelta
-        weekday = datetime.now(timezone.utc).weekday()
+        from datetime import datetime
+        weekday = datetime.now(UTC).weekday()
         gate_results.append({
             "gate": "schedule",
             "pass": True,  # always passes; schedule-driven
@@ -3262,7 +3264,7 @@ async def market_hours():
 
     Crypto charts run 24/7 regardless of this payload.
     """
-    from datetime import datetime, time, timedelta, timezone
+    from datetime import datetime, time, timedelta
     try:
         # Python 3.9+ stdlib
         from zoneinfo import ZoneInfo
@@ -3270,7 +3272,7 @@ async def market_hours():
         from backports.zoneinfo import ZoneInfo
 
     ET = ZoneInfo("America/New_York")
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
     now_et = now_utc.astimezone(ET)
 
     REG_OPEN = time(9, 30)
@@ -3371,9 +3373,9 @@ async def market_hours():
         "is_after_hours": is_after_hours,
         "is_broker_pre": is_broker_pre,
         "session": session,
-        "last_close_utc": last_close_et.astimezone(timezone.utc).isoformat(),
-        "next_open_utc": next_open_et.astimezone(timezone.utc).isoformat(),
-        "next_close_utc": next_close_et.astimezone(timezone.utc).isoformat(),
+        "last_close_utc": last_close_et.astimezone(UTC).isoformat(),
+        "next_open_utc": next_open_et.astimezone(UTC).isoformat(),
+        "next_close_utc": next_close_et.astimezone(UTC).isoformat(),
         "now_et": now_et.isoformat(timespec="seconds"),
         "weekday": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][weekday],
         "holiday_note": holiday_note,
@@ -3738,7 +3740,7 @@ def _v4_crypto_open_positions() -> list[dict]:
     """
     rows: list[dict] = []
     try:
-        from .ops_db import _connect, _HAVE_PG
+        from .ops_db import _HAVE_PG, _connect
     except Exception:
         return rows
     if not _HAVE_PG:
@@ -3777,8 +3779,8 @@ def _v4_crypto_open_positions() -> list[dict]:
             )
             # ops_db._connect() uses dict_row factory; rows are dicts keyed
             # by the SELECT-alias names (symbol, net_qty, avg_buy_px, ...).
-            from datetime import datetime as _dt, timezone as _tz
-            now_ts = _dt.now(_tz.utc)
+            from datetime import datetime as _dt
+            now_ts = _dt.now(UTC)
             for r in cur.fetchall():
                 entry = float(r["avg_buy_px"]) if r["avg_buy_px"] is not None else None
                 mark = float(r["mark_price"]) if r["mark_price"] is not None else None
@@ -3941,7 +3943,7 @@ async def llm_stats():
         "avg_latency_seconds": 0.0, "total_api_cost_saved_usd": 0.0,
         "by_model": {}, "by_agent": {}, "by_tier": {"fast": 0, "deep": 0},
     }
-    cutoff = datetime.now(timezone.utc).timestamp() - 86400
+    cutoff = datetime.now(UTC).timestamp() - 86400
     if shark_log.is_file():
         try:
             calls = []
@@ -4133,7 +4135,7 @@ async def shark_briefing():
 
     import re
     # Find today's date header (operator wants TODAY only)
-    today = datetime.now(timezone.utc).astimezone(
+    today = datetime.now(UTC).astimezone(
         timezone(timedelta(hours=-4))  # ET — Shark writes in EDT
     ).strftime("%Y-%m-%d")
     # Locate "# Daily Handoff — <date>" block
@@ -4170,7 +4172,7 @@ async def shark_briefing():
             "lessons": kv.get("lessons"),
         })
 
-    age_s = int((datetime.now(timezone.utc).timestamp() - handoff_path.stat().st_mtime))
+    age_s = int((datetime.now(UTC).timestamp() - handoff_path.stat().st_mtime))
     return _envelope(
         "ok" if phases else "degraded",
         data={
@@ -4226,7 +4228,8 @@ async def stocks_ml():
     # When a worker is mid-flight, parse the latest "epoch N/M loss=… val_acc=…"
     # line out of the log tail so the dashboard renders a progress card
     # instead of just "weights present: False".
-    import re, os as _os
+    import os as _os
+    import re
     live_state = "idle"
     live_pid = training_status.get("pid")
     if live_pid is not None:
@@ -4454,7 +4457,7 @@ async def shark_override_health() -> dict[str, Any]:
     if checked_at:
         try:
             ts = datetime.fromisoformat(checked_at.replace("Z", "+00:00"))
-            age_s = int((datetime.now(timezone.utc) - ts).total_seconds())
+            age_s = int((datetime.now(UTC) - ts).total_seconds())
         except Exception:
             age_s = None
 
@@ -4544,7 +4547,7 @@ async def backtest_gates():
                          data={"strategies": [], "any_eligible": False, "results_dir": str(results_dir)})
 
     rows: list[dict[str, Any]] = []
-    now_ts = datetime.now(timezone.utc).timestamp()
+    now_ts = datetime.now(UTC).timestamp()
     STALE_S = 8 * 24 * 3600
 
     for f in sorted(results_dir.glob("gates_report_*_latest.json")):
@@ -4685,7 +4688,7 @@ def _monday_of_this_week_utc() -> datetime:
     02:00 ET training run completes — operator sees "reflections trained
     last night vs new since" cleanly.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     # weekday(): Mon=0 … Sun=6
     monday = now - timedelta(days=now.weekday(),
                              hours=now.hour, minutes=now.minute,
@@ -4725,7 +4728,7 @@ def _count_reflections_since(path: Path, since: datetime) -> int:
                     head = ls.lstrip("[").split("|", 1)[0].strip()
                     try:
                         current_date = datetime.strptime(head[:10], "%Y-%m-%d").replace(
-                            tzinfo=timezone.utc
+                            tzinfo=UTC
                         )
                     except ValueError:
                         current_date = None
@@ -4826,7 +4829,7 @@ def _next_sunday_training_iso() -> str:
     (DST is Mar-Nov in the US); a 1-hour DST-transition wobble twice a
     year is acceptable for a countdown display.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     days_until_sun = (6 - now.weekday()) % 7
     sunday = now + timedelta(days=days_until_sun)
     # ET 14:00 → 18:00 UTC (EDT) or 19:00 UTC (EST).
@@ -5552,7 +5555,7 @@ async def llm_calls(
     # card's "calls / tokens / avg lat" numbers don't shrink when the user
     # types a search term — operator wants the search to filter the rows
     # but keep the headline numbers honest about overall activity.
-    cutoff_24h = datetime.now(timezone.utc).timestamp() - 86400
+    cutoff_24h = datetime.now(UTC).timestamp() - 86400
     window_24h: list[dict] = []
     for rec in tail_records:
         ts_str = rec.get("timestamp") or ""

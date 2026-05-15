@@ -538,7 +538,7 @@ def _write_hf_dataset(
         "generation":       int(generation),
         "source_split":     "train",
         "sample_count":     int(len(rows)),
-        "timestamp_utc":    dt.datetime.now(dt.timezone.utc).isoformat(),
+        "timestamp_utc":    dt.datetime.now(dt.UTC).isoformat(),
         "num_samples":      int(len(rows)),
         "categories":       [role],
         "sources":          ["trading-bot"],
@@ -731,7 +731,7 @@ def curate(
             seen = set(state[role].get("source_files", []))
             seen.update(str(p) for p in new_files)
             state[role]["source_files"] = sorted(seen)
-            state[role]["last_curate_utc"] = dt.datetime.now(dt.timezone.utc).isoformat()
+            state[role]["last_curate_utc"] = dt.datetime.now(dt.UTC).isoformat()
 
         # Persist per-day stats next to the state file so the operator can
         # cat the day's accept/reject breakdown at a glance.
@@ -772,7 +772,7 @@ def _log_error(msg: str) -> None:
         path = _curate_log_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as fh:
-            fh.write(f"{dt.datetime.now(dt.timezone.utc).isoformat()} {msg}\n")
+            fh.write(f"{dt.datetime.now(dt.UTC).isoformat()} {msg}\n")
     except OSError:
         pass
 

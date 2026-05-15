@@ -325,10 +325,10 @@ def run_discovery_cycle(
         The newly added entries (after guardrails + deduplication).
     """
     from shark.data.watchlist import (
+        DYNAMIC_EXPIRY_DAYS,
         get_core_watchlist,
         get_dynamic_entries,
         save_dynamic_watchlist,
-        DYNAMIC_EXPIRY_DAYS,
     )
 
     core = get_core_watchlist()

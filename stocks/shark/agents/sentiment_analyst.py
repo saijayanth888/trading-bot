@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from shark.data.sentiment import fetch_grounded_sentiment
@@ -95,7 +95,7 @@ def analyze_sentiment(
         tier: ``"fast"`` (8B local) or ``"deep"`` (70B / Anthropic).
     """
     symbol = symbol.upper()
-    date_str = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date_str = date or datetime.now(UTC).strftime("%Y-%m-%d")
 
     try:
         block = fetch_grounded_sentiment(

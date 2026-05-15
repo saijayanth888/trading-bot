@@ -28,11 +28,10 @@ import os
 import re
 import statistics
 import subprocess
-import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from . import ops_db
 
@@ -103,7 +102,7 @@ def _audit(tool: str, args: dict, result_summary: str = "ok") -> None:
     five backups.
     """
     try:
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         args_str = json.dumps(args, default=str)[:300]
         _get_audit_logger().info(
             "%s INFO via=dashboard tool=%s args=%s result=%s",
@@ -141,7 +140,7 @@ async def get_open_trades() -> list[dict]:
     """
     rows = ops_db.open_positions(limit=50)
     out = []
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for r in rows:
         cp = r.get("current_profit")  # fractional return (e.g. 0.012 = +1.2%)
         stake = r.get("stake_amount")
@@ -171,7 +170,7 @@ async def get_open_trades() -> list[dict]:
 
 
 def get_trade_history(days: int = 7) -> list[dict]:
-    cutoff = datetime.now(timezone.utc) - timedelta(days=int(days))
+    cutoff = datetime.now(UTC) - timedelta(days=int(days))
     if not ops_db._HAVE_PG:
         return []
     with ops_db._connect() as conn, conn.cursor() as cur:
@@ -195,7 +194,7 @@ def get_trade_history(days: int = 7) -> list[dict]:
 
 
 def get_daily_pnl(days: int = 14) -> list[dict]:
-    cutoff = datetime.now(timezone.utc) - timedelta(days=int(days))
+    cutoff = datetime.now(UTC) - timedelta(days=int(days))
     if not ops_db._HAVE_PG:
         return []
     with ops_db._connect() as conn, conn.cursor() as cur:
@@ -241,7 +240,7 @@ def get_performance_metrics() -> dict:
 
     daily: dict[str, float] = {}
     for r in rows:
-        day = r["closed_at"].astimezone(timezone.utc).strftime("%Y-%m-%d")
+        day = r["closed_at"].astimezone(UTC).strftime("%Y-%m-%d")
         daily[day] = daily.get(day, 0.0) + float(r["pnl_pct"] or 0)
     daily_pcts = list(daily.values())
     if len(daily_pcts) >= 2:
@@ -744,7 +743,7 @@ def get_stock_pnl(days: int = 7) -> dict:
         return {"error": "TRADE-LOG.md missing", "days": days}
 
     text = log_path.read_text(errors="replace")
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=int(days))).date()
+    cutoff = (datetime.now(UTC) - timedelta(days=int(days))).date()
     action_re = _re.compile(r"\[(\d{4}-\d{2}-\d{2})\]\s+(BUY|SELL|STOPPED|TIGHTEN|SCAN)")
     pnl_re = _re.compile(r"\*\*Day P&L:\*\*\s+([+\-]?[\d.,]+)")
     eod_re = _re.compile(r"###\s+(\d{4}-\d{2}-\d{2})\s+—\s+EOD")
@@ -820,7 +819,7 @@ def get_wheel_status() -> dict:
     snap_age = None
     try:
         if snap_path.is_file():
-            snap_age = int(datetime.now(timezone.utc).timestamp() - snap_path.stat().st_mtime)
+            snap_age = int(datetime.now(UTC).timestamp() - snap_path.stat().st_mtime)
     except OSError:
         pass
 
@@ -852,7 +851,7 @@ def get_wheel_status() -> dict:
 
 
 def get_regime_history(days: int = 7) -> list[dict]:
-    cutoff = datetime.now(timezone.utc) - timedelta(days=int(days))
+    cutoff = datetime.now(UTC) - timedelta(days=int(days))
     if not ops_db._HAVE_PG:
         return []
     with ops_db._connect() as conn, conn.cursor() as cur:

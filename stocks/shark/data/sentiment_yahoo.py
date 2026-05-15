@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -99,7 +99,7 @@ def _normalize_news_item(item: Any) -> dict[str, Any] | None:
     publisher = item.get("publisher") or ""
     epoch = item.get("providerPublishTime")
     if isinstance(epoch, (int, float)) and epoch > 0:
-        published_at = datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
+        published_at = datetime.fromtimestamp(epoch, tz=UTC).isoformat()
     else:
         published_at = ""
     return {
@@ -136,7 +136,7 @@ def fetch_yahoo_news(
     — the caller will see ``available: False`` and ``error: "ImportError"``.
     """
     ticker = ticker.upper()
-    date_str = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date_str = date or datetime.now(UTC).strftime("%Y-%m-%d")
 
     if use_cache and not force_refresh:
         cached = _read_cache(ticker, date_str)

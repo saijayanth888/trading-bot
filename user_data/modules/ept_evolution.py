@@ -76,15 +76,12 @@ import json
 import logging
 import math
 import random
-import statistics
 import shutil
-import uuid
+import statistics
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
-
-import numpy as np
+from typing import Any, Callable, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +159,7 @@ class TradingGenome:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "TradingGenome":
+    def from_dict(cls, d: dict) -> TradingGenome:
         return cls(
             learning_rate=float(d["learning_rate"]),
             lookback_window=int(d["lookback_window"]),
@@ -200,7 +197,7 @@ class PopulationMember:
     sharpe_history: list[float] = field(default_factory=list)
     status: str = "alive"        # alive | eliminated | champion | standby
     created_at: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+        default_factory=lambda: datetime.now(UTC).isoformat()
     )
 
     def to_dict(self) -> dict:
@@ -268,7 +265,7 @@ class EvolutionConfig:
             )
 
     @classmethod
-    def from_dict(cls, d: dict | None) -> "EvolutionConfig":
+    def from_dict(cls, d: dict | None) -> EvolutionConfig:
         """Build an EvolutionConfig from a config.json[ept_evolution] dict.
 
         Unknown keys (e.g. the ``_doc`` comment) are ignored. Caller-supplied
@@ -302,7 +299,7 @@ class EvolutionConfig:
         return cls(**kwargs)
 
     @classmethod
-    def from_config_file(cls, path: str | Path = "user_data/config.json") -> "EvolutionConfig":
+    def from_config_file(cls, path: str | Path = "user_data/config.json") -> EvolutionConfig:
         """Convenience: read config.json and pull the [ept_evolution] block."""
         import json
         with Path(path).open("r") as f:
@@ -607,7 +604,7 @@ def crossover_weights(
         "noise": float(noise),
         "rng_seed": rng_seed,
         "files": written,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
     (dir_c / "crossover_metadata.json").write_text(json.dumps(meta, indent=2))
     return written
@@ -937,7 +934,7 @@ class TradingPopulation:
         champ = self.get_champion()
         runner = self._runner_up()
         snapshot = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "generation": self.generation,
             "reason": reason,
             "config": {

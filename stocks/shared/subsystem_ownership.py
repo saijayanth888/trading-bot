@@ -57,7 +57,7 @@ import json
 import logging
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterable, Literal
 
@@ -109,7 +109,7 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 # ── Public API ──────────────────────────────────────────────────────────────

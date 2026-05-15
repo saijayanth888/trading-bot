@@ -70,7 +70,7 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -284,7 +284,7 @@ def _http_json(
 
 
 def _ts_to_dt(ts: int) -> datetime:
-    return datetime.fromtimestamp(int(ts), tz=timezone.utc)
+    return datetime.fromtimestamp(int(ts), tz=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -484,7 +484,7 @@ def _fetch_btc_mvrv() -> float | None:
 
 
 class OnChainSignals:
-    _instance: "OnChainSignals | None" = None
+    _instance: OnChainSignals | None = None
     _instance_lock = threading.Lock()
 
     def __init__(self) -> None:
@@ -493,7 +493,7 @@ class OnChainSignals:
         self.last_poll_ts: float = 0.0
 
     @classmethod
-    def instance(cls) -> "OnChainSignals":
+    def instance(cls) -> OnChainSignals:
         with cls._instance_lock:
             if cls._instance is None:
                 cls._instance = cls()
@@ -527,7 +527,7 @@ class OnChainSignals:
     # ------------------------------------------------------------------
 
     def poll_once(self) -> None:
-        now_dt = datetime.now(timezone.utc)
+        now_dt = datetime.now(UTC)
         logger.info("poll cycle start (sources=%s)",
                     sorted(_SOURCES_CONFIG.keys()) or "<defaults>")
 
@@ -643,7 +643,7 @@ def get_features(pair: str, timeframe: str) -> pd.DataFrame:
     OnChainSignals.instance().start()                 # lazy start
 
     asset = pair.split("/")[0].upper()
-    cutoff = datetime.now(timezone.utc) - timedelta(days=HISTORY_DAYS)
+    cutoff = datetime.now(UTC) - timedelta(days=HISTORY_DAYS)
 
     try:
         deriv_rows = db.fetch_all(

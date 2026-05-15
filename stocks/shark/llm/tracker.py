@@ -25,8 +25,8 @@ import logging
 import os
 import threading
 from collections import deque
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -73,7 +73,7 @@ class LLMCallRecord:
     latency_seconds: float = 0.0
     prompt_tokens: int = 0
     completion_tokens: int = 0
-    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     # Optional full-text payload (only persisted when SHARK_LLM_LOG_FULL_TEXT=1)
     # — all fields default to None so the in-memory ring stays compact for the
@@ -254,7 +254,7 @@ def read_log_window(
     path = log_path or _LOG_PATH
     if not path.is_file():
         return []
-    cutoff = datetime.now(timezone.utc).timestamp() - since_seconds
+    cutoff = datetime.now(UTC).timestamp() - since_seconds
     out: list[LLMCallRecord] = []
     try:
         with path.open("r", encoding="utf-8") as fh:

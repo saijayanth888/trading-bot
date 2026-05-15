@@ -37,7 +37,7 @@ import argparse
 import json
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -160,10 +160,10 @@ def _humanize_age(published_at: str, now: datetime | None = None) -> str:
         ts = published_at.rstrip("Z")
         dt = datetime.fromisoformat(ts)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
     except ValueError:
         return "unknown time"
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     delta = now - dt
     seconds = int(delta.total_seconds())
     if seconds < 60:
@@ -238,7 +238,7 @@ def fetch_grounded_sentiment(
     Never raises — degrades gracefully when any/all sources are down.
     """
     ticker = ticker.upper()
-    date_str = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date_str = date or datetime.now(UTC).strftime("%Y-%m-%d")
 
     stocktwits = fetch_stocktwits(ticker, date=date_str, force_refresh=force_refresh)
     reddit = fetch_reddit(ticker, date=date_str, force_refresh=force_refresh)
@@ -256,7 +256,7 @@ def refresh_ticker(ticker: str, date: str | None = None) -> dict[str, Any]:
     callers that want the block should call ``fetch_grounded_sentiment``.
     """
     ticker = ticker.upper()
-    date_str = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date_str = date or datetime.now(UTC).strftime("%Y-%m-%d")
 
     st = fetch_stocktwits(ticker, date=date_str, force_refresh=True)
     rd = fetch_reddit(ticker, date=date_str, force_refresh=True)

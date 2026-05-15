@@ -9,7 +9,6 @@ Covers:
 
 from __future__ import annotations
 
-import io
 import json
 import time
 from pathlib import Path
@@ -17,12 +16,10 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from shark.data import sentiment as agg
 from shark.data import sentiment_reddit as rd
 from shark.data import sentiment_stocktwits as st
 from shark.data import sentiment_yahoo as yh
-
 
 # ---------------------------------------------------------------------------
 # Helpers

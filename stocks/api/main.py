@@ -6,9 +6,9 @@ stub for future integrations. Enables CORS for all origins so a dashboard
 can connect from any host.
 """
 
+import logging
 import os
 import re
-import logging
 from pathlib import Path
 from typing import Any
 

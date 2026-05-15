@@ -5,10 +5,7 @@ Covers: ATR sizing, Kelly sizing, regime adjustment, drawdown scaling,
 confidence scaling, circuit breaker, partial exit plan, edge cases.
 """
 
-import os
 import pytest
-from unittest.mock import patch
-
 
 # ---------------------------------------------------------------------------
 # Helpers — reset module-level globals between tests
@@ -17,6 +14,7 @@ from unittest.mock import patch
 def _load_sizer():
     """Import (or reimport) the position_sizer module with fresh env."""
     import importlib
+
     import shark.execution.position_sizer as mod
     importlib.reload(mod)
     return mod

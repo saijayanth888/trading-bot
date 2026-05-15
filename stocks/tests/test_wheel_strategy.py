@@ -8,7 +8,6 @@ Run from stocks/: source venv/bin/activate && pytest tests/test_wheel_strategy.p
 from datetime import date, timedelta
 
 import pytest
-
 from wheel.config import WheelConfig, load_config
 from wheel.strategy import (
     OptionContract,
@@ -19,7 +18,6 @@ from wheel.strategy import (
     score_contract,
     select_best,
 )
-
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
 

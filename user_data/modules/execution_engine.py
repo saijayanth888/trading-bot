@@ -46,7 +46,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import random
 import threading
 import time
 import uuid
@@ -106,7 +105,7 @@ class ExecutionConfig:
     api_secret_env: str = "COINBASE_API_SECRET"
 
     @classmethod
-    def from_dict(cls, d: Mapping[str, Any] | None) -> "ExecutionConfig":
+    def from_dict(cls, d: Mapping[str, Any] | None) -> ExecutionConfig:
         if not d:
             return cls()
         kwargs = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
@@ -192,7 +191,7 @@ class ExecutionEngine:
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_config_file(cls, path: str | Path) -> "ExecutionEngine":
+    def from_config_file(cls, path: str | Path) -> ExecutionEngine:
         cfg_dict = json.loads(Path(path).read_text())
         exec_cfg = ExecutionConfig.from_dict(cfg_dict.get("execution", {}))
         return cls(exec_cfg)

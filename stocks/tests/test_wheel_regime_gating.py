@@ -13,12 +13,9 @@ earlier in the session.
 """
 from __future__ import annotations
 
-import os
-from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
-
 from wheel.config import WheelConfig, load_config
 
 

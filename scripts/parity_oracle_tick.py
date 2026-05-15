@@ -64,7 +64,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -133,7 +133,7 @@ class _ReplayContext:
         self._history: dict[str, list[Any]] = {}
 
     def now(self) -> datetime:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
     def get_position(self, symbol: str) -> Any | None:  # type: ignore[override]
         return None
@@ -255,7 +255,7 @@ async def fetch_coinbase_candles(
                 low=Decimal(str(low)),
                 close=Decimal(str(close)),
                 volume=Decimal(str(vol)),
-                timestamp_utc=datetime.fromtimestamp(int(t), tz=timezone.utc),
+                timestamp_utc=datetime.fromtimestamp(int(t), tz=UTC),
                 timeframe="5m",  # type: ignore[arg-type]
             ))
         except Exception as exc:

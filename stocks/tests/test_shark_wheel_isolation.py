@@ -23,7 +23,6 @@ import importlib
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from shared import subsystem_ownership as so
 
 
@@ -249,6 +248,7 @@ class TestGetPositionsAssetClass:
     def test_asset_class_default(self):
         """Defensive default: missing asset_class → us_equity (legacy behaviour)."""
         from types import SimpleNamespace
+
         from shark.data import alpaca_data
 
         fake_pos = SimpleNamespace(
@@ -266,6 +266,7 @@ class TestGetPositionsAssetClass:
     def test_asset_class_pass_through(self):
         """Alpaca returns an option → asset_class flows through unchanged."""
         from types import SimpleNamespace
+
         from shark.data import alpaca_data
 
         fake_pos = SimpleNamespace(

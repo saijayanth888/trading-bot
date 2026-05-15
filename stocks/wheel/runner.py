@@ -24,27 +24,36 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, timedelta
-from typing import List, Optional
 
 # Path so `python -m wheel.runner` works regardless of cwd
 import sys
+from datetime import date, timedelta
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # Load unified .env via shark's loader (no-op if already loaded)
 import shark.run  # noqa: F401
-
 from shark.memory.kill_switch import is_killed as _shark_kill_active
 
 from .broker import from_env
 from .config import load_config
 from .risk_caps import EquityRiskCaps, caps_as_dict, derive_caps
 from .state import (
-    Position, TradeRecord,
-    add_position, append_trade, cumulative_pnl_for, find_open_csp, find_open_cc,
-    is_killed, kill_ticker, load_positions, now_iso, remove_position,
-    shares_held, update_position,
+    Position,
+    TradeRecord,
+    add_position,
+    append_trade,
+    cumulative_pnl_for,
+    find_open_cc,
+    find_open_csp,
+    is_killed,
+    kill_ticker,
+    load_positions,
+    now_iso,
+    remove_position,
+    shares_held,
+    update_position,
 )
 from .strategy import (
     OptionContract,
@@ -62,7 +71,7 @@ from .strategy import (
 _EARNINGS_FILE = Path(__file__).resolve().parent / "state" / "earnings.json"
 
 
-def _next_earnings_for(symbol: str) -> Optional[date]:
+def _next_earnings_for(symbol: str) -> date | None:
     """Return the next-earnings date for `symbol`, or None if unknown.
 
     Reads from `state/earnings.json` formatted as `{ "SOFI": "2026-05-15", ... }`.
@@ -80,7 +89,7 @@ def _next_earnings_for(symbol: str) -> Optional[date]:
         return None
 
 
-def _open_csp_collateral_total(positions: List[Position]) -> float:
+def _open_csp_collateral_total(positions: list[Position]) -> float:
     """Sum of strike × 100 × qty for every open short_put in the journal.
 
     Used by the WHEEL_MAX_TOTAL_COLLATERAL cap (P1-S4): the runner refuses
@@ -110,7 +119,9 @@ def _fetch_spy_regime(timeout_s: float = 2.0) -> str:
     (which treat unknown as a no-op) keep entries flowing safely.
     Used by sell_csps() to apply the WheelConfig.regime_gating policy.
     """
-    import os, urllib.request, json as _json
+    import json as _json
+    import os
+    import urllib.request
     base = os.environ.get("DASHBOARD_INTERNAL_URL", "http://localhost:8081")
     try:
         with urllib.request.urlopen(f"{base}/api/ops/stock_regime", timeout=timeout_s) as r:
@@ -124,7 +135,7 @@ def _fetch_spy_regime(timeout_s: float = 2.0) -> str:
 # ── Entry: sell_csps ────────────────────────────────────────────────────────
 
 
-def sell_csps(symbols_override: Optional[List[str]] = None) -> dict:
+def sell_csps(symbols_override: list[str] | None = None) -> dict:
     """Sell cash-secured puts for each allowed ticker. One-shot.
 
     Applies the configured regime_gating policy: SPY regime is fetched
@@ -178,7 +189,7 @@ def sell_csps(symbols_override: Optional[List[str]] = None) -> dict:
 
     # Snapshot existing positions ONCE so per-symbol gates (P1-S4 collateral
     # cap) operate on a consistent view of the journal across the cycle.
-    positions_snapshot: List[Position] = load_positions()
+    positions_snapshot: list[Position] = load_positions()
     open_collateral = _open_csp_collateral_total(positions_snapshot)
     summary["open_collateral_usd_pre"] = round(open_collateral, 2)
 
@@ -351,8 +362,8 @@ def _try_sell_csp(
     filled = False
     fill_price = None
     try:
-        from alpaca.trading.requests import GetOrdersRequest as _GO  # type: ignore
         import time as _time
+
         order_id = getattr(order, "id", None) or getattr(order, "order_id", None)
         deadline = _time.time() + 30
         while _time.time() < deadline:
@@ -414,7 +425,7 @@ def _try_sell_csp(
 # ── Entry: assignment_check ────────────────────────────────────────────────
 
 
-def assignment_check(broker=None, positions: Optional[List[Position]] = None) -> dict:
+def assignment_check(broker=None, positions: list[Position] | None = None) -> dict:
     """Detect short_put → long_shares assignment and bridge the wheel cycle.
 
     For each open short_put position in the journal:
@@ -459,7 +470,7 @@ def assignment_check(broker=None, positions: Optional[List[Position]] = None) ->
 def _check_one_assignment(
     broker,
     pos: Position,
-    all_positions: List[Position],
+    all_positions: list[Position],
     summary: dict,
 ) -> None:
     """Inspect one short_put position for assignment evidence."""

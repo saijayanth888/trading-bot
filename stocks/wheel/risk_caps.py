@@ -37,7 +37,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-
 # Equity-fraction policy. Ratios mirror the pilot $50k → static dollar
 # defaults so the $50k case is a no-op. Tighter than the pilot would
 # require an explicit env-var override on the cfg ceilings.

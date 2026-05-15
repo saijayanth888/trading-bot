@@ -15,12 +15,10 @@ These tests work without the alpaca SDK by patching the broker hook.
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from wheel.config import WheelConfig
 from wheel.state import Position
 

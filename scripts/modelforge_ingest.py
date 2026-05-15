@@ -160,7 +160,7 @@ def parse_target_date(arg: str | None, *, now: dt.datetime | None = None) -> dt.
     """
     if arg and arg.lower() != "yesterday":
         return dt.date.fromisoformat(arg)
-    base = (now or dt.datetime.now(dt.timezone.utc))
+    base = (now or dt.datetime.now(dt.UTC))
     return (base - dt.timedelta(days=1)).date()
 
 
@@ -615,7 +615,7 @@ def _log_error(msg: str) -> None:
         path = _ingest_log_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as fh:
-            fh.write(f"{dt.datetime.now(dt.timezone.utc).isoformat()} {msg}\n")
+            fh.write(f"{dt.datetime.now(dt.UTC).isoformat()} {msg}\n")
     except OSError:
         pass
 

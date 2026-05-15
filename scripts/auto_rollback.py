@@ -43,9 +43,8 @@ import math
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
 
 import psycopg
 from psycopg.rows import dict_row
@@ -179,7 +178,7 @@ def weekly_sharpe(now_utc: datetime) -> tuple[float, int, int]:
     for r in rows:
         ts = r.get("closed_at")
         if isinstance(ts, datetime):
-            day = ts.astimezone(timezone.utc).strftime("%Y-%m-%d")
+            day = ts.astimezone(UTC).strftime("%Y-%m-%d")
         else:
             day = (str(ts or ""))[:10] or "0000-00-00"
         by_day[day] = by_day.get(day, 0.0) + float(r.get("pnl_pct") or 0.0)
@@ -276,7 +275,7 @@ def main() -> int:
     p.add_argument("--dry", action="store_true", help="Compute + log only; take no action")
     args = p.parse_args()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     state = _load_state()
     today_key = now.strftime("%Y-%m-%d")
     week_key = now.strftime("%Y-W%V")

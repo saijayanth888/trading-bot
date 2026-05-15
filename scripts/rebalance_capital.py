@@ -35,7 +35,7 @@ import math
 import os
 import sys
 import urllib.request
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote_plus
 
@@ -247,7 +247,7 @@ def main() -> int:
 
     # Snapshot + atomic-write.
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+    stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
     backup = BACKUP_DIR / f"config-backup-{stamp}-rebalance.json"
     backup.write_text(cfg_text)
     cfg["capital_allocation"]["pair_weights"] = new

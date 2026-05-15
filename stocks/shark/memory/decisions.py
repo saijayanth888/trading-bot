@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Iterator
 
 from shark.memory.atomic import atomic_write_text, file_lock
 
@@ -77,7 +77,7 @@ _TAG_RE = re.compile(r"^\[(?P<inner>[^\[\]]+)\]\s*$")
 # Path / lock helpers
 # ---------------------------------------------------------------------------
 
-def _resolve_log_path(log_path: Optional[Path]) -> Path:
+def _resolve_log_path(log_path: Path | None) -> Path:
     """Return the absolute path to decisions.md, falling back to repo default.
 
     Resolution rules (first match wins):
@@ -150,7 +150,7 @@ def _iter_entries(log_path: Path) -> Iterator[dict]:
                 yield parsed
 
 
-def _parse_block(lines: list[str]) -> Optional[dict]:
+def _parse_block(lines: list[str]) -> dict | None:
     """Parse one block of lines into an entry dict, or None for non-entries
     (e.g. the file header)."""
     # Find the tag line: first non-blank line that matches [ ... ]
@@ -231,7 +231,7 @@ def append_decision(
     rating: str,
     thesis: str,
     *,
-    log_path: Optional[Path] = None,
+    log_path: Path | None = None,
 ) -> None:
     """Append a `pending` decision block to decisions.md.
 
@@ -293,7 +293,7 @@ def update_with_outcome(
     holding_days: int,
     reflection: str,
     *,
-    log_path: Optional[Path] = None,
+    log_path: Path | None = None,
 ) -> bool:
     """Find the `pending` block for (date, ticker) and rewrite it with the
     realized outcome + reflection.
@@ -393,7 +393,7 @@ def get_past_context(
     k_same_symbol: int = 5,
     k_cross_symbol: int = 3,
     *,
-    log_path: Optional[Path] = None,
+    log_path: Path | None = None,
 ) -> str:
     """Return a prompt-injectable markdown block of past *realized* lessons.
 

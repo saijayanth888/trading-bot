@@ -6,9 +6,6 @@ Each test uses a tmp_path-scoped log file (no shared state).
 
 from __future__ import annotations
 
-import pytest
-
-
 # ---------------------------------------------------------------------------
 # 1. append_decision writes correctly
 # ---------------------------------------------------------------------------

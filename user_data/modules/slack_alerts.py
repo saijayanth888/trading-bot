@@ -28,14 +28,13 @@ Env vars:
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import threading
 import time
 import traceback
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Iterable, Mapping, Sequence
 
 logger = logging.getLogger(__name__)
@@ -74,7 +73,7 @@ class SlackConfig:
     icon_emoji: str = ":chart_with_upwards_trend:"
 
     @classmethod
-    def from_env(cls) -> "SlackConfig":
+    def from_env(cls) -> SlackConfig:
         return cls(
             webhook_url_env=os.environ.get("SLACK_WEBHOOK_URL_ENV_NAME", "SLACK_WEBHOOK_URL"),
             dry_run=os.environ.get("SLACK_ALERTS_DRY_RUN", "0") == "1",
@@ -100,7 +99,7 @@ class SlackAlerter:
             )
 
     @classmethod
-    def from_env(cls) -> "SlackAlerter":
+    def from_env(cls) -> SlackAlerter:
         return cls(SlackConfig.from_env())
 
     @property
@@ -562,7 +561,7 @@ def _blocks(
         "type": "context",
         "elements": [{
             "type": "mrkdwn",
-            "text": f":clock1: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%SZ')}",
+            "text": f":clock1: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%SZ')}",
         }],
     })
     return out

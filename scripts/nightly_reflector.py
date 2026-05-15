@@ -50,9 +50,9 @@ import logging
 import os
 import re
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 # psycopg is the only hard dependency outside the trading-bot codebase
 try:
@@ -154,7 +154,7 @@ def _resolve_dsn() -> str:
     return f"postgresql://{quote_plus(user)}:{quote_plus(password)}@{host}:{port}/{db}"
 
 
-def _query_closed_trades(target_date: Optional[date] = None,
+def _query_closed_trades(target_date: date | None = None,
                           backfill: bool = False) -> list[dict[str, Any]]:
     """Pull closed trades from ``trade_journal``.
 
@@ -179,7 +179,7 @@ def _query_closed_trades(target_date: Optional[date] = None,
                     )
                 else:
                     if target_date is None:
-                        target_date = (datetime.now(timezone.utc).date()
+                        target_date = (datetime.now(UTC).date()
                                         - timedelta(days=1))
                     cur.execute(
                         "SELECT * FROM trade_journal "
@@ -210,7 +210,7 @@ def _benchmark_for(pair: str) -> str:
 
 def _benchmark_return_pct(benchmark: str,
                            opened_at: datetime,
-                           closed_at: datetime) -> Optional[float]:
+                           closed_at: datetime) -> float | None:
     """Returns the benchmark's percent return over [opened_at, closed_at].
 
     Tries (in order):
@@ -259,17 +259,17 @@ def _benchmark_return_pct(benchmark: str,
         return None
 
 
-def _coerce_dt(value: Any) -> Optional[datetime]:
+def _coerce_dt(value: Any) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
     try:
         s = str(value)
         if s.endswith("Z"):
             s = s[:-1] + "+00:00"
         d = datetime.fromisoformat(s)
-        return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+        return d if d.tzinfo else d.replace(tzinfo=UTC)
     except Exception:
         return None
 
@@ -512,7 +512,7 @@ def _reflect_one(
         return True, f"{pair}: [dry] alpha={alpha_pct:+.2f}% holding={holding_days}d"
 
     # ── Call LLM with up-to-2 retries; verify alpha citation deterministically
-    last_err: Optional[Exception] = None
+    last_err: Exception | None = None
     text = ""
     for attempt in range(2):
         try:
@@ -582,7 +582,7 @@ def main() -> int:
     )
     args = p.parse_args()
 
-    target_date: Optional[date] = None
+    target_date: date | None = None
     if args.date:
         try:
             target_date = datetime.strptime(args.date, "%Y-%m-%d").date()

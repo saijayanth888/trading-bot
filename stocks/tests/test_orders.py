@@ -9,14 +9,12 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from shark.execution.orders import (
     OrderResponseError,
     _make_client_order_id,
     _order_to_dict,
     _validate_order_response,
 )
-
 
 # ---------------------------------------------------------------------------
 # _make_client_order_id

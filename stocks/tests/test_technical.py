@@ -1,6 +1,6 @@
-import pytest
-import pandas as pd
 import numpy as np
+import pandas as pd
+import pytest
 
 
 def make_df(n=50, trend="up"):

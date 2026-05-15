@@ -15,12 +15,10 @@ was removed when the freqtrade service was retired. See memory
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
-import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -92,7 +90,7 @@ async def fetch_coinbase_candles(
     product = pair.replace("/", "-").upper()
     gran = _TF_TO_GRAN.get(timeframe, 300)
     limit = min(int(limit), 300)
-    end = datetime.now(timezone.utc)
+    end = datetime.now(UTC)
     start = end - timedelta(seconds=gran * limit)
     try:
         async with httpx.AsyncClient() as client:
@@ -143,7 +141,7 @@ def _to_unix_dt(v) -> int | None:
         return None
     if isinstance(v, datetime):
         if v.tzinfo is None:
-            v = v.replace(tzinfo=timezone.utc)
+            v = v.replace(tzinfo=UTC)
         return int(v.timestamp())
     return _to_unix(str(v))
 
@@ -163,7 +161,7 @@ def fetch_trade_markers(pair: str, since: datetime | None = None) -> list[dict]:
     params: list[Any] = [pair]
     if since is not None:
         sql += "AND opened_at >= %s "
-        params.append(since.astimezone(timezone.utc))
+        params.append(since.astimezone(UTC))
     sql += "ORDER BY opened_at ASC"
     rows = _journal_query(sql, tuple(params))
     out: list[dict] = []
@@ -204,7 +202,7 @@ def fetch_recent_trades(limit: int = 20) -> list[dict]:
         for k in ("opened_at", "closed_at"):
             v = r.get(k)
             if isinstance(v, datetime):
-                r[k] = v.astimezone(timezone.utc).isoformat()
+                r[k] = v.astimezone(UTC).isoformat()
     return rows
 
 
@@ -226,7 +224,7 @@ def _to_unix(iso: str | None) -> int | None:
         s = iso.replace("Z", "+00:00") if iso.endswith("Z") else iso
         dt = datetime.fromisoformat(s)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         return int(dt.timestamp())
     except Exception:
         return None

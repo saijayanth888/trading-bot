@@ -9,9 +9,8 @@ from __future__ import annotations
 import time
 
 import pytest
-
 from shark.llm import circuit_breaker as cb_module
-from shark.llm.circuit_breaker import CircuitBreaker, State
+from shark.llm.circuit_breaker import CircuitBreaker
 
 
 @pytest.fixture(autouse=True)

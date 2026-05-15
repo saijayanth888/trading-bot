@@ -16,8 +16,6 @@ import logging
 import os
 from typing import Any
 
-from shark.config import get_settings
-
 logger = logging.getLogger(__name__)
 
 try:

@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -83,10 +83,10 @@ def _is_recent(created_at: str, hours: int = 24) -> bool:
     try:
         # Tolerate trailing Z which fromisoformat in older Python can't parse
         ts = created_at.rstrip("Z")
-        dt = datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
+        dt = datetime.fromisoformat(ts).replace(tzinfo=UTC)
     except ValueError:
         return False
-    return (datetime.now(timezone.utc) - dt) <= timedelta(hours=hours)
+    return (datetime.now(UTC) - dt) <= timedelta(hours=hours)
 
 
 def fetch_stocktwits(
@@ -118,7 +118,7 @@ def fetch_stocktwits(
     the exception class name.
     """
     ticker = ticker.upper()
-    date_str = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date_str = date or datetime.now(UTC).strftime("%Y-%m-%d")
 
     if use_cache and not force_refresh:
         cached = _read_cache(ticker, date_str)

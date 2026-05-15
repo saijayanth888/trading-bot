@@ -193,7 +193,7 @@ def compute_historical_edge(
     # 3) Calendar effects — day-of-week tilt
     # ---------------------------------------------------------------
     try:
-        from shark.data.knowledge_base import _read_json, _PATTERNS_DIR  # type: ignore
+        from shark.data.knowledge_base import _PATTERNS_DIR, _read_json  # type: ignore
         cal = _read_json(_PATTERNS_DIR / "calendar_effects.json") or {}
         dow_map = cal.get("day_of_week", {})
         dow_names = ["Mon", "Tue", "Wed", "Thu", "Fri"]
@@ -216,7 +216,7 @@ def compute_historical_edge(
     try:
         days_to_fomc = _days_until_next_fomc(today)
         if days_to_fomc == 1:
-            from shark.data.knowledge_base import _read_json, _PATTERNS_DIR  # type: ignore
+            from shark.data.knowledge_base import _PATTERNS_DIR, _read_json  # type: ignore
             cal = _read_json(_PATTERNS_DIR / "calendar_effects.json") or {}
             fomc = cal.get("fomc_drift", {}).get("pre_fomc_day", {})
             avg_ret = fomc.get("avg_return_pct", 0)
@@ -241,7 +241,7 @@ def compute_historical_edge(
     #    to avoid noise during sideways markets.
     # ---------------------------------------------------------------
     try:
-        from shark.data.knowledge_base import _read_json, _PATTERNS_DIR  # type: ignore
+        from shark.data.knowledge_base import _PATTERNS_DIR, _read_json  # type: ignore
         from shark.data.watchlist import get_ticker_sector  # type: ignore
         sector_data = _read_json(_PATTERNS_DIR / "sector_rotation.json") or {}
         ranking = sector_data.get("momentum_6m_ranking", [])
@@ -328,7 +328,7 @@ def compute_kb_summary() -> dict[str, Any]:
     }
 
     try:
-        from shark.data.knowledge_base import _read_json, _PATTERNS_DIR  # type: ignore
+        from shark.data.knowledge_base import _PATTERNS_DIR, _read_json  # type: ignore
         cal = _read_json(_PATTERNS_DIR / "calendar_effects.json") or {}
         dow_map = cal.get("day_of_week", {})
         today = date.today()

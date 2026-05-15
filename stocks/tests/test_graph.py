@@ -19,7 +19,6 @@ from unittest.mock import patch
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -214,11 +213,10 @@ class TestConcurrency:
           - sequential (max_parallel=1): all 60 calls serialised
           - parallel   (max_parallel=5): candidates run concurrently
         """
-        from shark.graph import run_candidates_parallel_sync
-
         # Monkey-patch the fake_call inside mock_llm to add a per-call delay.
         # Easier: install our own slow mock here.
         import shark.graph as g
+        from shark.graph import run_candidates_parallel_sync
 
         sleep_per_call = 0.02  # 20ms per LLM call
 
@@ -336,10 +334,9 @@ class TestPMIsolation:
 class TestModelTiers:
     def test_judges_get_70b_grunts_get_8b(self):
         """Sanity check: defaults send judges to 70b, grunts to 8b."""
-        from shark.graph import model_for_node, _load_model_tiers
-
         # Force fresh load
         import shark.graph as g
+        from shark.graph import _load_model_tiers, model_for_node
         g._MODEL_TIERS_CACHE = None
         tiers = _load_model_tiers()
 

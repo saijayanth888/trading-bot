@@ -3,9 +3,6 @@ Tests for shark.dashboard.generate — dashboard data generation.
 """
 
 import json
-from pathlib import Path
-
-import pytest
 
 
 class TestDashboardGenerate:

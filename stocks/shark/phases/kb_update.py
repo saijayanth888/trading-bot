@@ -31,15 +31,15 @@ def run(dry_run: bool = False) -> bool:
     logger.info("KB UPDATE — daily incremental")
     logger.info("=" * 60)
 
-    from shark.data.knowledge_base import (
-        load_historical_bars,
-        save_historical_bars,
-        load_bars_metadata,
-        save_bars_metadata,
-        merge_bars,
-        kb_status,
-    )
     from shark.data.alpaca_data import get_bars_multi
+    from shark.data.knowledge_base import (
+        kb_status,
+        load_bars_metadata,
+        load_historical_bars,
+        merge_bars,
+        save_bars_metadata,
+        save_historical_bars,
+    )
 
     # Discover all tickers currently in KB
     bars_dir = _REPO_ROOT / "kb" / "historical_bars"

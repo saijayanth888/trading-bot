@@ -24,10 +24,9 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +40,8 @@ class GenerationRecord:
     generation: int
     week_ending: str  # ISO date
     members: list[dict]   # [{member_id, agent_type, val_acc, paper_sharpe, ...}]
-    champion_id: Optional[str]
-    runner_up_id: Optional[str]
+    champion_id: str | None
+    runner_up_id: str | None
     notes: str = ""
 
     def to_dict(self) -> dict:
@@ -68,7 +67,7 @@ def _save_history(path: Path, history: list[dict]) -> None:
 def record_generation(
     members: list[dict],
     *,
-    log_path: Optional[Path] = None,
+    log_path: Path | None = None,
     notes: str = "",
 ) -> dict:
     """Append one generation summary to the evolution log.
@@ -81,7 +80,7 @@ def record_generation(
     log_path = log_path or _DEFAULT_LOG
     history = _load_history(log_path)
     gen = len(history) + 1
-    week_ending = datetime.now(timezone.utc).date().isoformat()
+    week_ending = datetime.now(UTC).date().isoformat()
 
     if members:
         ranked = sorted(
@@ -110,9 +109,9 @@ def record_generation(
 
 
 def run_generation(
-    weights_path: Optional[Path] = None,
+    weights_path: Path | None = None,
     *,
-    paper_sharpe_lookup: Optional[dict] = None,
+    paper_sharpe_lookup: dict | None = None,
 ) -> dict:
     """Friday-cron entry point. Reads the trained TFT model + paper-trade
     sharpe (from the past week's trades.jsonl, when populated) and

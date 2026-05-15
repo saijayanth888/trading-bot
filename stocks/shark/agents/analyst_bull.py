@@ -13,7 +13,6 @@ try:
 except ImportError:  # safety net — anthropic SDK is optional now
     _anthropic_lib = None
 
-from shark.config import get_settings
 from shark.llm.client import chat_json
 
 logger = logging.getLogger(__name__)

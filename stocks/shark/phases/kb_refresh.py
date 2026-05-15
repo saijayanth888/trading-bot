@@ -39,7 +39,7 @@ def run(dry_run: bool = False) -> bool:
     # 1) Refresh S&P 500 constituents
     # ------------------------------------------------------------------
     try:
-        from shark.data.sp500 import refresh_sp500_cache, get_sp500_tickers
+        from shark.data.sp500 import get_sp500_tickers, refresh_sp500_cache
         cache = refresh_sp500_cache()
         sp500 = get_sp500_tickers()
         logger.info("S&P 500 cache refreshed — %d tickers", len(sp500))
@@ -63,15 +63,16 @@ def run(dry_run: bool = False) -> bool:
     #    - FRESH tickers (have recent data): pull last 10 bars (delta only)
     #    Steady-state cost: ~10 bars × ~520 tickers = ~5K bars (vs 262K brute force)
     # ------------------------------------------------------------------
-    from shark.data.knowledge_base import (
-        load_historical_bars, save_historical_bars,
-        save_bars_metadata, merge_bars,
-    )
-
     # Detect legacy KB without adjustment metadata — must force full re-refresh
     # because old bars were pulled with raw (unadjusted) prices, which break
     # any cross-split/dividend math (sector returns, regime stats, backtest).
-    from shark.data.knowledge_base import load_bars_metadata
+    from shark.data.knowledge_base import (
+        load_bars_metadata,
+        load_historical_bars,
+        merge_bars,
+        save_bars_metadata,
+        save_historical_bars,
+    )
     existing_meta = load_bars_metadata()
     needs_format_upgrade = existing_meta.get("adjustment") != "all"
 

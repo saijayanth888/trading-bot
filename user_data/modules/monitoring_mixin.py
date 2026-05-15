@@ -54,9 +54,9 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 try:
+    from modules.metrics_writer import MetricsWriter
     from modules.slack_alerts import SlackAlerter
     from modules.trade_journal import TradeJournal
-    from modules.metrics_writer import MetricsWriter
     _MONITOR_AVAILABLE = True
 except Exception as exc:
     logger.warning("monitoring modules unavailable: %s", exc)

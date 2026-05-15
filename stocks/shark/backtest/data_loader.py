@@ -11,7 +11,6 @@ the live system — no separate API calls.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 import pandas as pd
 

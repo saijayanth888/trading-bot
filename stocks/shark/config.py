@@ -28,8 +28,8 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass, field, fields
-from typing import Any, Callable, Optional
+from dataclasses import dataclass, fields
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -397,7 +397,7 @@ def _load_from_env() -> Settings:
     )
 
 
-_cached_settings: Optional[Settings] = None
+_cached_settings: Settings | None = None
 
 
 def load_settings(*, force_reload: bool = False) -> Settings:

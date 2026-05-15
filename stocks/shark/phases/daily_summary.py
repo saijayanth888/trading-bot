@@ -1,15 +1,14 @@
 import logging
 import re
-import subprocess
 from datetime import date
 from pathlib import Path
 
 from shark.data.alpaca_data import get_account, get_positions
 from shark.memory import handoff, state
 from shark.memory.journal import write_daily_summary
+from shark.notify import notify as _notify
 from shark.signals.distributor import send_email_digest
 from shark.signals.templates import daily_summary_html
-from shark.notify import notify as _notify
 
 logger = logging.getLogger(__name__)
 
@@ -295,7 +294,7 @@ def _kb_context_html() -> str:
 
     # Sector leadership (6m momentum, computed weekly)
     try:
-        from shark.data.knowledge_base import _read_json, _PATTERNS_DIR
+        from shark.data.knowledge_base import _PATTERNS_DIR, _read_json
         sector_data = _read_json(_PATTERNS_DIR / "sector_rotation.json") or {}
         top_3 = sector_data.get("top_3_sectors", [])
         bottom_3 = sector_data.get("bottom_3_sectors", [])
@@ -311,8 +310,9 @@ def _kb_context_html() -> str:
 
     # Active PEAD setups
     try:
-        from shark.data.knowledge_base import _EARNINGS_DIR
         from datetime import date as _date
+
+        from shark.data.knowledge_base import _EARNINGS_DIR
         today_d = _date.today()
         active_count = 0
         for path in _EARNINGS_DIR.glob("*_*.json"):

@@ -24,10 +24,9 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass, asdict, field
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -63,11 +62,11 @@ class HealthStatus:
     consecutive_failures: int = 0
     models_available: list[str] = field(default_factory=list)
     models_missing: list[str] = field(default_factory=list)
-    last_probe_latency_s: Optional[float] = None
-    error: Optional[str] = None
+    last_probe_latency_s: float | None = None
+    error: str | None = None
 
 
-def check_endpoint() -> tuple[bool, list[str], Optional[str]]:
+def check_endpoint() -> tuple[bool, list[str], str | None]:
     """Hit /api/tags. Returns (ok, model_names, error_msg)."""
     try:
         import httpx
@@ -82,7 +81,7 @@ def check_endpoint() -> tuple[bool, list[str], Optional[str]]:
         return False, [], str(exc)[:200]
 
 
-def probe_latency(model: str) -> Optional[float]:
+def probe_latency(model: str) -> float | None:
     """One-token probe call to measure end-to-end latency."""
     try:
         import httpx
@@ -108,7 +107,7 @@ def probe_latency(model: str) -> Optional[float]:
 
 def run_check() -> HealthStatus:
     """Run a single health check, persist the result, fire alerts as needed."""
-    status = HealthStatus(timestamp=datetime.now(timezone.utc).isoformat())
+    status = HealthStatus(timestamp=datetime.now(UTC).isoformat())
 
     # Load previous failure count so consecutive-failure alerting works
     # across cron invocations.

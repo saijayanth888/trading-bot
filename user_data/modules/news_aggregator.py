@@ -36,7 +36,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -198,21 +198,21 @@ def _trunc(text: str, n: int = 400) -> str:
 
 def _utc_from_epoch(seconds: float | int | None) -> datetime:
     if seconds is None:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
     try:
-        return datetime.fromtimestamp(float(seconds), tz=timezone.utc)
+        return datetime.fromtimestamp(float(seconds), tz=UTC)
     except (TypeError, ValueError, OSError):
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
 
 def _utc_from_iso(value: str | None) -> datetime:
     if not value:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
     try:
         # Strict ISO 8601; trailing 'Z' is allowed.
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
     except ValueError:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
 
 def _dedup(items: list[NewsItem], threshold: float = DEDUP_RATIO_THRESHOLD) -> list[NewsItem]:
@@ -431,7 +431,7 @@ class NewsAggregator:
             sym = item.get("symbol")
             if sym:
                 coins.append(sym.upper())
-        return TrendingSnapshot(coins=coins, timestamp=datetime.now(timezone.utc))
+        return TrendingSnapshot(coins=coins, timestamp=datetime.now(UTC))
 
     # ---- RSS feeds ---------------------------------------------------------
 
@@ -472,7 +472,7 @@ class NewsAggregator:
                     import calendar
                     ts_dt = _utc_from_epoch(calendar.timegm(ts_struct))
                 else:
-                    ts_dt = datetime.now(timezone.utc)
+                    ts_dt = datetime.now(UTC)
                 out.append(NewsItem(
                     title=title, summary=summary,
                     source=source_name, url=str(getattr(entry, "link", "") or ""),
@@ -609,9 +609,10 @@ def store_aggregated(result: AggregatedNews) -> None:
     Tables are created idempotently from user_data/data/schema.sql; this fn
     is a no-op if the tables don't exist yet (caller logs the error once).
     """
-    from . import db
     import json
     from collections import Counter
+
+    from . import db
 
     # Operator-visible per-poll summary: which sources contributed how many
     # items + which sources failed. Cheap to compute and invaluable for

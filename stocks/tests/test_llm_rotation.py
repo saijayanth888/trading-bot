@@ -15,15 +15,10 @@ from __future__ import annotations
 
 import gzip
 import json
-import os
-import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import pytest
-
 from shark.llm import rotate as rot
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -59,7 +54,7 @@ def _rec(ts: datetime, agent: str = "t1", n: int = 1) -> dict:
 class TestSizeTrigger:
     def test_under_limit_does_not_rotate(self, tmp_path: Path):
         log = tmp_path / "llm-calls.jsonl"
-        _write_jsonl(log, [_rec(datetime.now(timezone.utc))])
+        _write_jsonl(log, [_rec(datetime.now(UTC))])
         do, reason = rot.should_rotate(log, size_limit_bytes=1024 * 1024)
         assert do is False
         assert "size" in reason
@@ -68,7 +63,7 @@ class TestSizeTrigger:
         log = tmp_path / "llm-calls.jsonl"
         # Write 51 KB of data with a 50 KB limit — same shape as 51 MB / 50 MB.
         rows = []
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # Each record is ~200 bytes; we need ~260 to top 51 KB.
         for i in range(300):
             rows.append(_rec(now, agent="t" + str(i)))
@@ -98,7 +93,7 @@ class TestSizeTrigger:
 class TestAgeTrigger:
     def test_31_day_old_triggers(self, tmp_path: Path):
         log = tmp_path / "llm-calls.jsonl"
-        old = datetime.now(timezone.utc) - timedelta(days=31)
+        old = datetime.now(UTC) - timedelta(days=31)
         _write_jsonl(log, [_rec(old, agent="ancient")])
         do, reason = rot.should_rotate(log, age_limit_days=30)
         assert do is True
@@ -106,7 +101,7 @@ class TestAgeTrigger:
 
     def test_29_day_old_no_rotate(self, tmp_path: Path):
         log = tmp_path / "llm-calls.jsonl"
-        recent = datetime.now(timezone.utc) - timedelta(days=29)
+        recent = datetime.now(UTC) - timedelta(days=29)
         _write_jsonl(log, [_rec(recent, agent="fresh")])
         do, _reason = rot.should_rotate(log, age_limit_days=30)
         assert do is False
@@ -129,7 +124,7 @@ class TestAgeTrigger:
 class TestRotateFile:
     def test_rotates_and_truncates_in_place(self, tmp_path: Path):
         log = tmp_path / "llm-calls.jsonl"
-        rows = [_rec(datetime.now(timezone.utc), agent="t" + str(i)) for i in range(5)]
+        rows = [_rec(datetime.now(UTC), agent="t" + str(i)) for i in range(5)]
         _write_jsonl(log, rows)
         inode_before = log.stat().st_ino
 
@@ -156,10 +151,10 @@ class TestRotateFile:
 
     def test_archive_path_uniqueness(self, tmp_path: Path):
         log = tmp_path / "llm-calls.jsonl"
-        _write_jsonl(log, [_rec(datetime.now(timezone.utc))])
+        _write_jsonl(log, [_rec(datetime.now(UTC))])
         archive_a = rot.rotate_file(log)
         # Second rotation in the same day — must not clobber.
-        _write_jsonl(log, [_rec(datetime.now(timezone.utc), agent="round2")])
+        _write_jsonl(log, [_rec(datetime.now(UTC), agent="round2")])
         archive_b = rot.rotate_file(log)
         assert archive_a is not None and archive_b is not None
         assert archive_a != archive_b
@@ -173,10 +168,10 @@ class TestRotateFile:
 class TestPrune:
     def _make_archive(self, parent: Path, days_ago: int) -> Path:
         """Create a fake archive file with the given date in its name."""
-        stamp = (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+        stamp = (datetime.now(UTC) - timedelta(days=days_ago)).strftime("%Y-%m-%d")
         arch = parent / f"llm-calls.{stamp}.jsonl.gz"
         with gzip.open(arch, "wt") as fh:
-            fh.write(json.dumps(_rec(datetime.now(timezone.utc))) + "\n")
+            fh.write(json.dumps(_rec(datetime.now(UTC))) + "\n")
         return arch
 
     def test_old_archives_deleted(self, tmp_path: Path):
@@ -209,12 +204,12 @@ class TestArchiveSearch:
         log = tmp_path / "llm-calls.jsonl"
         log.touch()
         target_ts = "2026-04-15T10:00:00.000000+00:00"
-        target = {**_rec(datetime.now(timezone.utc)), "timestamp": target_ts, "agent": "target"}
+        target = {**_rec(datetime.now(UTC)), "timestamp": target_ts, "agent": "target"}
         stamp = "2026-04-15"
         arch = tmp_path / f"llm-calls.{stamp}.jsonl.gz"
         with gzip.open(arch, "wt") as fh:
             fh.write(json.dumps(target) + "\n")
-            fh.write(json.dumps(_rec(datetime.now(timezone.utc))) + "\n")
+            fh.write(json.dumps(_rec(datetime.now(UTC))) + "\n")
 
         rec, found_arch = rot.find_record_in_archives(log, target_ts)
         assert rec is not None
@@ -227,7 +222,7 @@ class TestArchiveSearch:
         # One archive that doesn't contain our target
         arch = tmp_path / "llm-calls.2026-04-01.jsonl.gz"
         with gzip.open(arch, "wt") as fh:
-            fh.write(json.dumps(_rec(datetime.now(timezone.utc))) + "\n")
+            fh.write(json.dumps(_rec(datetime.now(UTC))) + "\n")
 
         rec, hint = rot.find_record_in_archives(log, "2099-01-01T00:00:00+00:00")
         assert rec is None
@@ -249,7 +244,7 @@ class TestArchiveSearch:
 class TestRunSummary:
     def test_run_does_nothing_when_below_thresholds(self, tmp_path: Path):
         log = tmp_path / "llm-calls.jsonl"
-        _write_jsonl(log, [_rec(datetime.now(timezone.utc))])
+        _write_jsonl(log, [_rec(datetime.now(UTC))])
         out = rot.run(log_path=log, size_limit_bytes=10 * 1024 * 1024)
         assert out["rotated"] is False
         assert out["rotated_to"] is None
@@ -258,7 +253,7 @@ class TestRunSummary:
     def test_run_rotates_when_above(self, tmp_path: Path):
         log = tmp_path / "llm-calls.jsonl"
         # Tiny size limit so any non-empty file triggers.
-        _write_jsonl(log, [_rec(datetime.now(timezone.utc))])
+        _write_jsonl(log, [_rec(datetime.now(UTC))])
         out = rot.run(log_path=log, size_limit_bytes=10)
         assert out["rotated"] is True
         assert out["rotated_to"] is not None

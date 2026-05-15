@@ -37,7 +37,6 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +84,7 @@ class CircuitState:
         }
 
     @classmethod
-    def from_json(cls, data: dict) -> "CircuitState":
+    def from_json(cls, data: dict) -> CircuitState:
         try:
             samples = [(float(t), float(l)) for t, l in (data.get("latency_samples") or [])]
         except (TypeError, ValueError):
@@ -234,7 +233,7 @@ class CircuitBreaker:
 
     # ── Helpers ────────────────────────────────────────────────────────
     @staticmethod
-    def _percentile(samples: list[float], p: float) -> Optional[float]:
+    def _percentile(samples: list[float], p: float) -> float | None:
         if not samples:
             return None
         s = sorted(samples)

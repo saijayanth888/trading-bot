@@ -20,7 +20,7 @@ import json
 import logging
 import math
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +31,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from . import ops_routes, v4_routes
 from .data_sources import (
     fetch_champion,
     fetch_coinbase_candles,
@@ -41,8 +42,6 @@ from .data_sources import (
     regime_segments_from_df,
 )
 from .indicators import attach_all
-from . import ops_routes
-from . import v4_routes
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -174,7 +173,7 @@ async def api_mode() -> dict[str, Any]:
             async with httpx.AsyncClient(timeout=2.0) as client:
                 # quanta-core has no HTTP surface yet; we infer liveness from
                 # the most recent decision row instead. That query is cheap.
-                from .ops_db import _connect, _HAVE_PG  # local import
+                from .ops_db import _HAVE_PG, _connect  # local import
                 if _HAVE_PG:
                     with _connect() as conn, conn.cursor() as cur:
                         cur.execute(
@@ -291,8 +290,11 @@ def _v4_state_fallback(pair: str | None = None) -> dict[str, Any]:
     out: dict[str, Any] = {}
     try:
         from .ops_db import (
-            regime_latest, sentiment_latest, onchain_latest, meta_signal_latest,
             classifier_latest,
+            meta_signal_latest,
+            onchain_latest,
+            regime_latest,
+            sentiment_latest,
         )
     except Exception:
         return out
@@ -381,11 +383,11 @@ async def _build_state_payload() -> dict[str, Any]:
     # paper-fill). Replaces the old freqtrade /api/v1/status path.
     positions = _quanta_open_positions()
 
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     today_pnl = float(daily_pnl.get(today, 0.0) or 0.0)
 
     return {
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": datetime.now(UTC).isoformat(),
         "pair": pair,
         "regime": pair_state.get("regime"),
         "regime_confidence": pair_state.get("regime_confidence"),

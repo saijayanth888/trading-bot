@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from shark.data.alpaca_data import _safe_float, _safe_int
-
 
 # ---------------------------------------------------------------------------
 # _safe_float

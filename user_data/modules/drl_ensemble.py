@@ -29,13 +29,12 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
 import pandas as pd
-
 from stable_baselines3 import A2C, DQN, PPO
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.monitor import Monitor
@@ -220,8 +219,8 @@ class DRLEnsemble:
         except Exception:
             return True
         if last.tzinfo is None:
-            last = last.replace(tzinfo=timezone.utc)
-        now = now or datetime.now(timezone.utc)
+            last = last.replace(tzinfo=UTC)
+        now = now or datetime.now(UTC)
         return (now - last) >= timedelta(days=self.retrain_days)
 
     def last_train_time(self) -> datetime | None:
@@ -251,7 +250,7 @@ class DRLEnsemble:
 
     def _write_meta(self, **extra) -> None:
         meta = {
-            "last_train": datetime.now(timezone.utc).isoformat(),
+            "last_train": datetime.now(UTC).isoformat(),
             "agents": list(self.agents.keys()),
             **extra,
         }

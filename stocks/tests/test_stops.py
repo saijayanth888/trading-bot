@@ -5,8 +5,7 @@ All Alpaca API calls are mocked. Tests verify decision logic, safety
 guardrails, and error-recovery paths.
 """
 
-from unittest.mock import MagicMock, patch, call
-import pytest
+from unittest.mock import MagicMock, patch
 
 
 def _pos(symbol="AAPL", qty=30, price=110.0, plpc=0.10):

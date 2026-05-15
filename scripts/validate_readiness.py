@@ -29,12 +29,12 @@ import math
 import os
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
 from psycopg.rows import dict_row
+
 
 def _resolve_dsn() -> str:
     """URL-encode-safe DSN — same pattern as user_data/modules/db.py."""
@@ -111,7 +111,7 @@ def _load_closed_trades(
     window_start: str | None = None
     window_end: str | None = None
     if window_days is not None and window_days > 0:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
+        cutoff = datetime.now(UTC) - timedelta(days=window_days)
         where += " AND closed_at >= %s"
         params.append(cutoff)
         window_start = cutoff.isoformat()
@@ -133,7 +133,7 @@ def _load_closed_trades(
         for k in ("closed_at",):
             v = r.get(k)
             if isinstance(v, datetime):
-                r[k] = v.astimezone(timezone.utc).isoformat()
+                r[k] = v.astimezone(UTC).isoformat()
 
     if rows:
         window_end = rows[-1]["closed_at"]

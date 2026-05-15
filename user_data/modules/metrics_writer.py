@@ -45,8 +45,8 @@ import os
 import queue
 import threading
 import time
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Mapping
 
 logger = logging.getLogger(__name__)
@@ -80,7 +80,7 @@ class InfluxConfig:
     enabled: bool = True
 
     @classmethod
-    def from_env(cls) -> "InfluxConfig":
+    def from_env(cls) -> InfluxConfig:
         return cls(
             url=os.environ.get("INFLUX_URL", "http://influxdb:8086"),
             token=os.environ.get("INFLUX_TOKEN", ""),
@@ -230,7 +230,7 @@ class MetricsWriter:
         ts: datetime | None = None,
     ) -> None:
         """One-shot consolidation of the slow Grafana panels."""
-        ts = ts or datetime.now(timezone.utc)
+        ts = ts or datetime.now(UTC)
         self.write_pnl(
             equity=equity, peak_equity=peak_equity,
             drawdown=drawdown, daily_pnl=daily_pnl,
@@ -273,7 +273,7 @@ class MetricsWriter:
             "measurement": measurement,
             "tags": {k: str(v) for k, v in tags.items() if v is not None},
             "fields": dict(fields),
-            "ts": ts or datetime.now(timezone.utc),
+            "ts": ts or datetime.now(UTC),
         }
         try:
             self._queue.put_nowait(item)

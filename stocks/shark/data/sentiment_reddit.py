@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
@@ -140,7 +140,7 @@ def fetch_reddit(
     ``available: False`` and the last error class.
     """
     ticker = ticker.upper()
-    date_str = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date_str = date or datetime.now(UTC).strftime("%Y-%m-%d")
     subs = list(subreddits)
 
     if use_cache and not force_refresh:

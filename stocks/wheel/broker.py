@@ -21,14 +21,20 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
-from typing import List, Optional
+from datetime import UTC, date, datetime, timedelta
 
+from alpaca.data.historical.option import OptionHistoricalDataClient
+from alpaca.data.historical.stock import StockHistoricalDataClient
+from alpaca.data.requests import (
+    OptionSnapshotRequest,
+    StockBarsRequest,
+    StockLatestTradeRequest,
+)
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import (
     AssetStatus,
     ContractType,
-    OrderClass,
     OrderSide,
     OrderType,
     PositionIntent,
@@ -39,17 +45,7 @@ from alpaca.trading.requests import (
     GetOptionContractsRequest,
     GetOrdersRequest,
     LimitOrderRequest,
-    MarketOrderRequest,
 )
-from alpaca.data.historical.option import OptionHistoricalDataClient
-from alpaca.data.historical.stock import StockHistoricalDataClient
-from alpaca.data.requests import (
-    OptionLatestQuoteRequest,
-    OptionSnapshotRequest,
-    StockBarsRequest,
-    StockLatestTradeRequest,
-)
-from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from .strategy import OptionContract
 
@@ -103,7 +99,7 @@ class Broker:
         symbol: str,
         timeframe: str = "5Min",
         limit: int = 288,
-    ) -> List[dict]:
+    ) -> list[dict]:
         """Return OHLCV bars in the shape Lightweight-Charts expects.
 
         timeframe: "1Min", "5Min", "15Min", "1Hour", "1Day"
@@ -132,7 +128,7 @@ class Broker:
         # Wide lookback to absorb non-trading hours and weekends. Floor at
         # 7 days so 1Min×limit-bars-on-a-weekend still hits Friday's bars.
         # We always trim to `limit` after fetching.
-        end = datetime.now(timezone.utc)
+        end = datetime.now(UTC)
         if tf.unit == TimeFrameUnit.Minute:
             wanted = timedelta(minutes=tf.amount * limit * 7)
             start = end - max(wanted, timedelta(days=7))
@@ -151,7 +147,7 @@ class Broker:
         )
         resp = self.stock_data.get_stock_bars(req)
         bars_obj = resp.data.get(symbol, []) if hasattr(resp, "data") else []
-        out: List[dict] = []
+        out: list[dict] = []
         for b in bars_obj:
             ts = b.timestamp
             if hasattr(ts, "timestamp"):
@@ -177,7 +173,7 @@ class Broker:
         min_dte: int,
         max_dte: int,
         strike_pct_band: tuple[float, float] = (0.85, 0.98),
-    ) -> List[OptionContract]:
+    ) -> list[OptionContract]:
         """Return puts in the strike band % of current spot, in DTE window."""
         spot = self.get_stock_price(underlying)
         today = date.today()
@@ -208,7 +204,7 @@ class Broker:
         snapshots = self.option_data.get_option_snapshot(
             OptionSnapshotRequest(symbol_or_symbols=symbols)
         )
-        out: List[OptionContract] = []
+        out: list[OptionContract] = []
         for c in raw:
             snap = snapshots.get(c.symbol)
             if snap is None:
@@ -238,7 +234,7 @@ class Broker:
         max_dte: int,
         min_strike: float,
         strike_pct_above_spot: float = 1.10,
-    ) -> List[OptionContract]:
+    ) -> list[OptionContract]:
         """Return calls strike >= min_strike (cost basis), within DTE window."""
         spot = self.get_stock_price(underlying)
         today = date.today()
@@ -260,7 +256,7 @@ class Broker:
         snapshots = self.option_data.get_option_snapshot(
             OptionSnapshotRequest(symbol_or_symbols=symbols)
         )
-        out: List[OptionContract] = []
+        out: list[OptionContract] = []
         for c in raw:
             snap = snapshots.get(c.symbol)
             if snap is None:
@@ -358,7 +354,7 @@ class Broker:
 
     # ── Order maintenance ──────────────────────────────────────────────────
 
-    def list_open_orders(self, symbol: Optional[str] = None) -> list:
+    def list_open_orders(self, symbol: str | None = None) -> list:
         # Use the SDK enum (P1-S6). String "open" worked because QueryOrderStatus
         # is a str-enum, but future SDK versions may tighten validation.
         req = GetOrdersRequest(
@@ -369,7 +365,7 @@ class Broker:
 
     def cancel_stale_orders(self, max_age_minutes: int = 240) -> int:
         """Cancel any DAY-tif orders older than max_age_minutes. Returns count."""
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+        cutoff = datetime.now(UTC) - timedelta(minutes=max_age_minutes)
         n = 0
         for o in self.list_open_orders():
             ts = getattr(o, "submitted_at", None) or getattr(o, "created_at", None)

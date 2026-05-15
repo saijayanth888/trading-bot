@@ -25,7 +25,6 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +53,7 @@ class TelegramConfig:
     timeout_s: float = 10.0
 
     @classmethod
-    def from_env(cls) -> "TelegramConfig":
+    def from_env(cls) -> TelegramConfig:
         token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
         chat_id = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
         # Treat an obvious placeholder as "not configured"
@@ -77,7 +76,7 @@ class TelegramAlerter:
         self._dedup_window_s = 60
 
     @classmethod
-    def from_env(cls) -> "TelegramAlerter":
+    def from_env(cls) -> TelegramAlerter:
         return cls(TelegramConfig.from_env())
 
     # ── Public API — only critical / warning trigger Telegram ────────
@@ -176,7 +175,7 @@ class TelegramAlerter:
         self,
         text: str,
         *,
-        dedup_key: Optional[str] = None,
+        dedup_key: str | None = None,
         priority: bool = False,
     ) -> bool:
         if not self.cfg.enabled:
@@ -222,7 +221,7 @@ class TelegramAlerter:
         return True
 
 
-_alerter: Optional[TelegramAlerter] = None
+_alerter: TelegramAlerter | None = None
 
 
 def get_alerter() -> TelegramAlerter:

@@ -31,7 +31,7 @@ import logging
 import math
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
@@ -89,7 +89,7 @@ if not logger.handlers:
 
 
 def _ts_to_dt(ts: int | float) -> datetime:
-    return datetime.fromtimestamp(int(ts), tz=timezone.utc)
+    return datetime.fromtimestamp(int(ts), tz=UTC)
 
 # ---------------------------------------------------------------------------
 # HTTP with retry
@@ -191,8 +191,8 @@ def _fetch_btc_1h_coinbase_exchange(days: int) -> pd.DataFrame:
         cur_start = max(start_ts, cur_end - 300 * granularity)
         params = {
             "granularity": granularity,
-            "start": datetime.fromtimestamp(cur_start, tz=timezone.utc).isoformat(),
-            "end":   datetime.fromtimestamp(cur_end,   tz=timezone.utc).isoformat(),
+            "start": datetime.fromtimestamp(cur_start, tz=UTC).isoformat(),
+            "end":   datetime.fromtimestamp(cur_end,   tz=UTC).isoformat(),
         }
         r = _http_get(
             f"{COINBASE_EXCHANGE_BASE}/products/BTC-USD/candles", params=params,
@@ -558,7 +558,7 @@ def _deserialise_model(blob: dict):
 
 
 class RegimeDetector:
-    _instance: "RegimeDetector | None" = None
+    _instance: RegimeDetector | None = None
     _instance_lock = threading.Lock()
 
     def __init__(self) -> None:
@@ -572,7 +572,7 @@ class RegimeDetector:
         self._load_persisted()
 
     @classmethod
-    def instance(cls) -> "RegimeDetector":
+    def instance(cls) -> RegimeDetector:
         with cls._instance_lock:
             if cls._instance is None:
                 cls._instance = cls()
@@ -880,7 +880,7 @@ def get_regime_features(pair: str = "BTC/USD") -> pd.DataFrame:
     """
     RegimeDetector.instance().start()                      # lazy start
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=TRAIN_WINDOW_DAYS)
+    cutoff = datetime.now(UTC) - timedelta(days=TRAIN_WINDOW_DAYS)
     try:
         raw = db.fetch_all(
             "SELECT ts, regime, probability, regime_duration_hours, "

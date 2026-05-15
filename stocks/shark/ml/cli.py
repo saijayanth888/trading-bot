@@ -67,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _cmd_train_tft(args) -> int:
-    from shark.ml.tft_stock import train, TFTStockConfig
+    from shark.ml.tft_stock import TFTStockConfig, train
     here = Path(__file__).resolve()
     kb_dir = here.parents[2] / "kb" / "historical_bars"
     cfg = TFTStockConfig(
@@ -88,9 +88,9 @@ def _cmd_train_tft(args) -> int:
 
 
 def _cmd_infer(args) -> int:
-    from shark.ml.tft_stock import predict_direction
     from shark.ml.dataset_stock import _load_bars_json
-    from shark.ml.features_stock import build_features, FEATURE_COLS
+    from shark.ml.features_stock import FEATURE_COLS, build_features
+    from shark.ml.tft_stock import predict_direction
 
     here = Path(__file__).resolve()
     bars_path = here.parents[2] / "kb" / "historical_bars" / f"{args.symbol.upper()}.json"

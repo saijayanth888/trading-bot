@@ -6,13 +6,14 @@ are read from environment variables.
 """
 
 from __future__ import annotations
+
 import functools
 import hashlib
-import os
 import logging
+import os
 import time
 import uuid
-from datetime import date, timezone
+from datetime import date
 from typing import Any, Callable, TypeVar
 
 from shark.notify import notify as _notify
@@ -262,8 +263,8 @@ def place_order(
     client = _get_client()
 
     try:
-        from alpaca.trading.requests import MarketOrderRequest  # type: ignore[import]
         from alpaca.trading.enums import OrderSide, TimeInForce  # type: ignore[import]
+        from alpaca.trading.requests import MarketOrderRequest  # type: ignore[import]
 
         order_side = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
         cid = _make_client_order_id(symbol, side, qty, order_tag=order_type)
@@ -336,8 +337,8 @@ def place_trailing_stop(
     client = _get_client()
 
     try:
-        from alpaca.trading.requests import TrailingStopOrderRequest  # type: ignore[import]
         from alpaca.trading.enums import OrderSide, TimeInForce  # type: ignore[import]
+        from alpaca.trading.requests import TrailingStopOrderRequest  # type: ignore[import]
 
         cid = _make_client_order_id(
             symbol, "sell", qty, order_tag="trailing_stop",
@@ -409,8 +410,8 @@ def cancel_all_orders() -> int:
     client = _get_client()
 
     try:
-        from alpaca.trading.requests import GetOrdersRequest  # type: ignore[import]
         from alpaca.trading.enums import QueryOrderStatus  # type: ignore[import]
+        from alpaca.trading.requests import GetOrdersRequest  # type: ignore[import]
 
         open_orders = client.get_orders(
             filter=GetOrdersRequest(status=QueryOrderStatus.OPEN)
@@ -499,8 +500,8 @@ def get_open_orders(side: str | None = None) -> list[dict[str, Any]]:
     """
     client = _get_client()
     try:
-        from alpaca.trading.requests import GetOrdersRequest  # type: ignore[import]
         from alpaca.trading.enums import QueryOrderStatus  # type: ignore[import]
+        from alpaca.trading.requests import GetOrdersRequest  # type: ignore[import]
 
         orders = client.get_orders(
             filter=GetOrdersRequest(status=QueryOrderStatus.OPEN)
@@ -530,15 +531,15 @@ def _place_true_bracket(
     """
     client = _get_client()
     try:
-        from alpaca.trading.requests import (  # type: ignore[import]
-            MarketOrderRequest,
-            TakeProfitRequest,
-            StopLossRequest,
-        )
         from alpaca.trading.enums import (  # type: ignore[import]
             OrderClass,
             OrderSide,
             TimeInForce,
+        )
+        from alpaca.trading.requests import (  # type: ignore[import]
+            MarketOrderRequest,
+            StopLossRequest,
+            TakeProfitRequest,
         )
 
         cid = _make_client_order_id(

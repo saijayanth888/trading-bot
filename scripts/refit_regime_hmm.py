@@ -40,7 +40,7 @@ import os
 import sys
 import time
 import urllib.request
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -126,8 +126,8 @@ def fetch_btc_1h_candles(days: int = INGEST_DAYS) -> pd.DataFrame:
         cur_start = max(start_ts, cur_end - 300 * granularity)
         params = {
             "granularity": granularity,
-            "start": datetime.fromtimestamp(cur_start, tz=timezone.utc).isoformat(),
-            "end":   datetime.fromtimestamp(cur_end,   tz=timezone.utc).isoformat(),
+            "start": datetime.fromtimestamp(cur_start, tz=UTC).isoformat(),
+            "end":   datetime.fromtimestamp(cur_end,   tz=UTC).isoformat(),
         }
         r = _http_get(url, params=params)
         if r is None or not r.ok:
@@ -367,10 +367,10 @@ def main() -> int:
 
         elapsed = time.time() - started
         prior_str = (
-            datetime.fromtimestamp(prior_fitted_at, tz=timezone.utc).isoformat()
+            datetime.fromtimestamp(prior_fitted_at, tz=UTC).isoformat()
             if prior_fitted_at else "n/a"
         )
-        new_str = datetime.fromtimestamp(fitted_at, tz=timezone.utc).isoformat()
+        new_str = datetime.fromtimestamp(fitted_at, tz=UTC).isoformat()
         slack_post(
             f":white_check_mark: *[hmm_refit]* OK — n={len(feats)} ll={ll:.1f} "
             f"mapping={mapping} prior={prior_str} new={new_str} elapsed={elapsed:.1f}s"

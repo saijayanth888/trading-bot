@@ -49,10 +49,9 @@ https://github.com/TauricResearch/TradingAgents — see
 from __future__ import annotations
 
 from datetime import date
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-
 
 # ---------------------------------------------------------------------------
 # RegimeTag — per-ticker regime label
@@ -143,22 +142,22 @@ class TraderProposal(BaseModel):
             "catalyst). No markdown, no bullets."
         ),
     )
-    entry_price: Optional[float] = Field(
+    entry_price: float | None = Field(
         default=None,
         gt=0.0,
         description="Optional limit / target entry price.",
     )
-    stop_loss: Optional[float] = Field(
+    stop_loss: float | None = Field(
         default=None,
         gt=0.0,
         description="Optional stop-loss price level.",
     )
-    target: Optional[float] = Field(
+    target: float | None = Field(
         default=None,
         gt=0.0,
         description="Optional take-profit / price-target level.",
     )
-    position_sizing_pct: Optional[float] = Field(
+    position_sizing_pct: float | None = Field(
         default=None,
         ge=0.0,
         le=1.0,
@@ -202,12 +201,12 @@ class WheelDecision(BaseModel):
             "SKIP = no action this cycle."
         ),
     )
-    strike: Optional[float] = Field(default=None, gt=0.0)
-    expiry: Optional[date] = Field(
+    strike: float | None = Field(default=None, gt=0.0)
+    expiry: date | None = Field(
         default=None,
         description="Option expiry date (YYYY-MM-DD).",
     )
-    premium_target: Optional[float] = Field(
+    premium_target: float | None = Field(
         default=None,
         gt=0.0,
         description="Minimum acceptable premium per contract, in dollars.",

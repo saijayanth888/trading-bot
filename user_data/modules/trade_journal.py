@@ -22,11 +22,10 @@ from __future__ import annotations
 import csv
 import json
 import logging
-from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from . import db
 
@@ -34,18 +33,18 @@ logger = logging.getLogger(__name__)
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _coerce_dt(v: Any) -> datetime | None:
     if v is None:
         return None
     if isinstance(v, datetime):
-        return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+        return v if v.tzinfo else v.replace(tzinfo=UTC)
     s = str(v).replace("Z", "+00:00") if str(v).endswith("Z") else str(v)
     try:
         d = datetime.fromisoformat(s)
-        return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+        return d if d.tzinfo else d.replace(tzinfo=UTC)
     except Exception:
         return None
 
@@ -75,7 +74,7 @@ class TradeRow:
     reasoning: str | None
 
     @classmethod
-    def from_db_row(cls, r: Mapping[str, Any]) -> "TradeRow":
+    def from_db_row(cls, r: Mapping[str, Any]) -> TradeRow:
         return cls(
             trade_id=int(r["trade_id"]),
             external_id=r.get("external_id"),
@@ -148,7 +147,7 @@ class TradeJournal:
         external_id: str | None = None,
         opened_at: datetime | None = None,
     ) -> int:
-        ts = (opened_at or _utc_now()).astimezone(timezone.utc)
+        ts = (opened_at or _utc_now()).astimezone(UTC)
         row = db.execute_returning(
             """
             INSERT INTO trade_journal
@@ -187,7 +186,7 @@ class TradeJournal:
         duration_min: float | None = None,
         closed_at: datetime | None = None,
     ) -> bool:
-        ts = (closed_at or _utc_now()).astimezone(timezone.utc)
+        ts = (closed_at or _utc_now()).astimezone(UTC)
         affected = db.execute_one(
             """
             UPDATE trade_journal
@@ -257,10 +256,10 @@ class TradeJournal:
         clauses, params = [], []
         if start is not None:
             clauses.append("opened_at >= %s")
-            params.append(start.astimezone(timezone.utc))
+            params.append(start.astimezone(UTC))
         if end is not None:
             clauses.append("opened_at < %s")
-            params.append(end.astimezone(timezone.utc))
+            params.append(end.astimezone(UTC))
         if pair is not None:
             clauses.append("pair = %s")
             params.append(pair)

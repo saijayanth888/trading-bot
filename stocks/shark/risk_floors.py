@@ -30,7 +30,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 # Conservative defaults — match the pre-audit hardcoded values in the
 # three deduplicated call sites. When callers pass regime_rules these
 # are overridden per-regime (see helpers below).

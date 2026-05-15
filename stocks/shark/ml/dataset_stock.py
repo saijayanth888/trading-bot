@@ -28,9 +28,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -88,14 +86,14 @@ class StockDataset(Dataset):
         self,
         kb_dir: Path,
         *,
-        tickers: Optional[list[str]] = None,
+        tickers: list[str] | None = None,
         sequence_length: int = 60,
         target_horizon_days: int = 5,
         up_threshold: float = 0.015,
         down_threshold: float = -0.015,
         split: str = "train",  # "train" | "val" | "test" | "all"
-        splits: Optional[SplitDates] = None,
-        max_samples: Optional[int] = None,
+        splits: SplitDates | None = None,
+        max_samples: int | None = None,
         normalize_per_ticker: bool = True,
     ):
         self.kb_dir = Path(kb_dir)

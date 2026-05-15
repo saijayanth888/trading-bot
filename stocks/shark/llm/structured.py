@@ -39,7 +39,7 @@ import json
 import logging
 import os
 import time
-from typing import Any, Optional, Type, TypeVar
+from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -58,7 +58,7 @@ class StructuredOutputError(RuntimeError):
         *,
         attempts: int = 0,
         last_raw: str = "",
-        last_error: Optional[Exception] = None,
+        last_error: Exception | None = None,
         schema_name: str = "",
     ) -> None:
         super().__init__(message)
@@ -73,7 +73,7 @@ class StructuredOutputError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
-def _schema_hint(schema: Type[BaseModel]) -> str:
+def _schema_hint(schema: type[BaseModel]) -> str:
     """Render a JSON Schema string suitable for inlining in the user prompt.
 
     Hermes-3 follows JSON Schema reliably when it's present in the
@@ -86,7 +86,7 @@ def _schema_hint(schema: Type[BaseModel]) -> str:
         return f"<schema {schema.__name__}>"
 
 
-def _build_user_prompt(user: str, schema: Type[BaseModel]) -> str:
+def _build_user_prompt(user: str, schema: type[BaseModel]) -> str:
     """Append the JSON-Schema hint to the user prompt."""
     return (
         f"{user}\n\n"
@@ -98,7 +98,7 @@ def _build_user_prompt(user: str, schema: Type[BaseModel]) -> str:
 
 def _build_retry_prompt(
     original_user: str,
-    schema: Type[BaseModel],
+    schema: type[BaseModel],
     error: Exception,
     last_raw: str,
 ) -> str:
@@ -144,8 +144,8 @@ def _call_ollama_json(
     model: str,
     max_tokens: int,
     temperature: float,
-    base_url: Optional[str] = None,
-    timeout: Optional[float] = None,
+    base_url: str | None = None,
+    timeout: float | None = None,
 ) -> str:
     """POST to Ollama with `format="json"` and return the raw content string.
 
@@ -185,7 +185,7 @@ def _call_ollama_json(
 def _call_anthropic_tool(
     system: str,
     user: str,
-    schema: Type[BaseModel],
+    schema: type[BaseModel],
     *,
     model: str,
     max_tokens: int,
@@ -237,12 +237,12 @@ def chat_structured(
     tier: str,
     system: str,
     user: str,
-    schema: Type[T],
+    schema: type[T],
     max_retries: int = 2,
     *,
     max_tokens: int = 1000,
     temperature: float = 0.2,
-    model: Optional[str] = None,
+    model: str | None = None,
 ) -> T:
     """Send a prompt to the LLM and return a validated `schema` instance.
 
@@ -273,7 +273,7 @@ def chat_structured(
     provider_norm = (provider or "ollama").lower().strip()
     tier_norm = (tier or "deep").lower().strip()
     last_raw = ""
-    last_error: Optional[Exception] = None
+    last_error: Exception | None = None
     user_prompt = _build_user_prompt(user, schema)
 
     total_attempts = 1 + max(0, int(max_retries))

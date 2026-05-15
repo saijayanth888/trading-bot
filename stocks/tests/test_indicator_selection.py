@@ -27,8 +27,6 @@ from unittest.mock import MagicMock
 
 import pytest
 from pydantic import ValidationError
-
-from shark.agents import market_analyst as ma
 from shark.agents.market_analyst import (
     MAX_PICKS,
     IndicatorPick,
@@ -38,7 +36,6 @@ from shark.agents.market_analyst import (
     summarize_bars,
 )
 from shark.data import indicator_selection as adapter
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

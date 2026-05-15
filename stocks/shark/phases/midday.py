@@ -2,17 +2,20 @@ import logging
 from datetime import date
 from pathlib import Path
 
-from shark.data.alpaca_data import get_positions, get_bars
+from shark.agents.trade_reviewer import review_closed_trade, save_lesson
+from shark.data.alpaca_data import get_bars, get_positions
+from shark.data.market_regime import detect_regime
 from shark.data.perplexity import fetch_market_intel
 from shark.data.technical import compute_indicators
-from shark.data.market_regime import detect_regime
+from shark.execution.exit_manager import (
+    check_volatility_expansion,
+    evaluate_exits,
+)
 from shark.execution.orders import close_position, place_order
 from shark.execution.stops import manage_stops
-from shark.execution.exit_manager import evaluate_exits, compute_dynamic_stop, check_volatility_expansion
-from shark.agents.trade_reviewer import review_closed_trade, save_lesson
 from shark.memory import handoff, state
 from shark.memory.journal import log_trade
-from shark.memory.kill_switch import enforce_kill_switch, KillSwitchActive
+from shark.memory.kill_switch import KillSwitchActive, enforce_kill_switch
 from shark.signals.distributor import send_email_digest
 from shark.signals.templates import alert_html
 

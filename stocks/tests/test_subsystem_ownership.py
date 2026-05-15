@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 
 import pytest
-
 from shared import subsystem_ownership as so
 
 

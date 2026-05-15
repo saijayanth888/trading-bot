@@ -25,7 +25,6 @@ from unittest.mock import patch
 import pytest
 from pydantic import ValidationError
 
-
 # Make `import shark.*` resolve when pytest is invoked from the repo root.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
@@ -42,7 +41,6 @@ from shark.schemas import (  # noqa: E402
     TraderProposal,
     WheelDecision,
 )
-
 
 # ---------------------------------------------------------------------------
 # RegimeTag

@@ -25,7 +25,7 @@ import os
 import random
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -92,7 +92,7 @@ def _seed_session_id(suffix: str = "") -> str:
 
 
 def _mock_debate_history() -> list[dict[str, Any]]:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     sessions = []
     for i in range(8):
         ts = now - timedelta(minutes=15 + i * 47)
@@ -303,7 +303,7 @@ def _vote_payload(role: str, pair: str, idx: int) -> dict[str, Any]:
         "rationale": rationale_map.get(role, ""),
         "evidence_keys": [f"feat:{role}:{rng.randrange(100, 999)}" for _ in range(3)],
         "latency_ms": (1800 if role in ("regime", "micro") else 10500) + rng.randrange(-400, 900),
-        "emitted_at": datetime.now(timezone.utc).isoformat(),
+        "emitted_at": datetime.now(UTC).isoformat(),
     }
 
 
@@ -340,7 +340,7 @@ async def _debate_stream(session_id: str) -> AsyncIterator[str]:
     """Yield Server-Sent Events frames mimicking a live 30s debate."""
     rng = random.Random(session_id)
     pair = _DEMO_PAIRS[rng.randrange(len(_DEMO_PAIRS))]
-    setup_ts = datetime.now(timezone.utc).isoformat()
+    setup_ts = datetime.now(UTC).isoformat()
 
     yield _sse({"kind": "session_start", "session_id": session_id, "pair": pair, "setup_ts": setup_ts})
     await asyncio.sleep(0.2)
@@ -359,7 +359,7 @@ async def _debate_stream(session_id: str) -> AsyncIterator[str]:
         votes.append(vote)
         await asyncio.sleep(0.2)
         # heartbeat between heavy roles
-        yield _sse({"kind": "heartbeat", "ts": datetime.now(timezone.utc).isoformat()})
+        yield _sse({"kind": "heartbeat", "ts": datetime.now(UTC).isoformat()})
 
     arbiter = _arbiter_payload(votes)
     yield _sse({"kind": "arbiter", "arbiter": arbiter})
@@ -467,7 +467,7 @@ async def montecarlo(trade_id: str) -> dict[str, Any]:
 @router.get("/adapters")
 async def adapters() -> dict[str, Any]:
     """Recent LoRA promotions across the 6 debate roles."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     rows = []
     for i in range(24):
         role = ("regime", "micro", "bull", "bear", "arbiter", "reflector")[i % 6]
@@ -506,7 +506,7 @@ async def adapter_rollback(adapter_id: str) -> dict[str, Any]:
     return {
         "ok": True,
         "adapter_id": adapter_id,
-        "rolled_back_at": datetime.now(timezone.utc).isoformat(),
+        "rolled_back_at": datetime.now(UTC).isoformat(),
         "note": "stub — wire to mf-api once the registry endpoint is live",
     }
 
@@ -518,7 +518,7 @@ async def adapter_rollback(adapter_id: str) -> dict[str, Any]:
 
 @router.get("/weekly/preview")
 async def weekly_preview() -> dict[str, Any]:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     iso_year, iso_week, _ = now.isocalendar()
     monday = now - timedelta(days=now.weekday())
     sunday = monday + timedelta(days=6)
@@ -593,7 +593,7 @@ arbiter — unanimous LONG; entry approved.
 - **Scheduled events** · CPI Tue 08:30 ET; FOMC minutes Wed 14:00 ET
 
 ---
-_Generated {datetime.now(timezone.utc).isoformat()} by `quanta_core.hermes.weekly_publisher`._
+_Generated {datetime.now(UTC).isoformat()} by `quanta_core.hermes.weekly_publisher`._
 _Bot run-mode this week: **paper**. Paper mode — all values shown as-is._
 """
 
@@ -605,7 +605,7 @@ _Bot run-mode this week: **paper**. Paper mode — all values shown as-is._
 
 def _mock_parity_rows() -> list[dict[str, Any]]:
     rng = random.Random("parity")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     rows = []
     for i in range(36):
         ts = now - timedelta(hours=i * 4)
@@ -748,7 +748,7 @@ async def screening() -> dict[str, Any]:
         traded += int(t)
         names.append(_screen_row(sym, "stock", rng, d, c, t))
     return {
-        "generated_ts": datetime.now(timezone.utc).isoformat(),
+        "generated_ts": datetime.now(UTC).isoformat(),
         "names": names,
         "funnel": {"detected": detected, "converged": converged, "traded": traded},
     }
@@ -763,7 +763,7 @@ def _screen_row(symbol: str, asset_class: str, rng: random.Random, detected: boo
         "detected": detected,
         "converged": converged,
         "traded": traded,
-        "last_setup_ts": (datetime.now(timezone.utc) - timedelta(hours=rng.randrange(1, 96))).isoformat() if detected else None,
+        "last_setup_ts": (datetime.now(UTC) - timedelta(hours=rng.randrange(1, 96))).isoformat() if detected else None,
         "thesis": "Convergence in regime + microstructure; bull/bear panel pending." if detected else None,
     }
 

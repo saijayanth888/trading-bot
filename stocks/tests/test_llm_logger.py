@@ -15,15 +15,12 @@ Run from stocks/:
 from __future__ import annotations
 
 import json
-import os
 import threading
 from pathlib import Path
 
 import pytest
-
 from shark.llm import tracker as tracker_module
 from shark.llm.redaction import redact, redact_messages
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

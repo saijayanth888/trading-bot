@@ -3,11 +3,8 @@ Tests for shark.memory.kill_switch and shark.memory.atomic.
 """
 
 import json
-import tempfile
-from pathlib import Path
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # atomic writes
@@ -97,7 +94,7 @@ class TestKillSwitch:
         flag = tmp_path / "KILL.flag"
         flag.write_text("stop")
         monkeypatch.setattr("shark.memory.kill_switch._KILL_FLAG", flag)
-        from shark.memory.kill_switch import enforce_kill_switch, KillSwitchActive
+        from shark.memory.kill_switch import KillSwitchActive, enforce_kill_switch
         with pytest.raises(KillSwitchActive):
             enforce_kill_switch("market_open")
 

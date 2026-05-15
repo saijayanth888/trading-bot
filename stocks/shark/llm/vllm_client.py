@@ -44,7 +44,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, Optional
+from typing import Any
 
 from shark.llm.client import LLMClient, LLMResponse
 
@@ -368,7 +368,7 @@ def register_adapter(
     name: str,
     path: str,
     *,
-    base_url: Optional[str] = None,
+    base_url: str | None = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
     """POST /v1/load_lora_adapter to register a LoRA adapter at runtime.

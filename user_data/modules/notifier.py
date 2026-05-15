@@ -27,7 +27,6 @@ so the caller can log without crashing.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from .slack_alerts import SlackAlerter
 from .telegram_alerts import TelegramAlerter

@@ -15,9 +15,8 @@ try:
 except ImportError:
     _anthropic_lib = None
 
-from shark.config import get_settings
 from shark.llm.client import chat_json
-from shark.risk_floors import min_confidence, min_risk_reward
+from shark.risk_floors import min_confidence
 
 logger = logging.getLogger(__name__)
 

@@ -7,10 +7,11 @@ Never widens or lowers an existing stop.
 """
 
 from __future__ import annotations
+
 import logging
 from typing import Any
 
-from shark.execution.orders import _get_client, place_trailing_stop, cancel_order
+from shark.execution.orders import _get_client, cancel_order, place_trailing_stop
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +33,8 @@ def _get_existing_trailing_stop(
     Returns (trail_percent, order_id) or (None, None) if no trailing stop exists.
     """
     try:
-        from alpaca.trading.requests import GetOrdersRequest  # type: ignore[import]
         from alpaca.trading.enums import QueryOrderStatus  # type: ignore[import]
+        from alpaca.trading.requests import GetOrdersRequest  # type: ignore[import]
 
         orders = api.get_orders(
             filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=200)

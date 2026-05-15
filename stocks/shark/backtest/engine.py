@@ -18,6 +18,7 @@ from typing import Any
 import pandas as pd
 
 from shark.backtest.data_loader import HistoricalDataLoader, get_default_symbols
+from shark.backtest.metrics import compute_metrics
 from shark.backtest.strategy import (
     Trade,
     TradeStatus,
@@ -28,7 +29,6 @@ from shark.backtest.strategy import (
     compute_shares,
     detect_regime_at,
 )
-from shark.backtest.metrics import compute_metrics
 
 logger = logging.getLogger(__name__)
 

@@ -53,7 +53,7 @@ import os
 import tempfile
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -148,7 +148,7 @@ class RiskConfig:
     starting_equity_for_pct_limits: float | None = None
 
     @classmethod
-    def from_dict(cls, d: Mapping[str, Any] | None) -> "RiskConfig":
+    def from_dict(cls, d: Mapping[str, Any] | None) -> RiskConfig:
         if not d:
             return cls()
         kwargs = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
@@ -225,7 +225,7 @@ class RiskGovernor:
         runmode: str | None = None,
     ) -> None:
         self.config = config or RiskConfig()
-        self._now = now_fn or (lambda: datetime.now(timezone.utc))
+        self._now = now_fn or (lambda: datetime.now(UTC))
         # Bug 2 (2026-05-12): in backtest/hyperopt/edge we MUST NOT touch
         # the live anchor file. Stash the runmode so every _anchor_path()
         # call here resolves to the transient /tmp path for this PID.
@@ -303,7 +303,7 @@ class RiskGovernor:
                 anchor = datetime.fromisoformat(anchor_iso)
                 # Tolerate naive timestamps in legacy files
                 if anchor.tzinfo is None:
-                    anchor = anchor.replace(tzinfo=timezone.utc)
+                    anchor = anchor.replace(tzinfo=UTC)
                 self._day_anchor_utc = anchor
 
             starting = data.get("starting_equity_today")
@@ -381,7 +381,7 @@ class RiskGovernor:
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any]) -> "RiskGovernor":
+    def from_config(cls, config: Mapping[str, Any]) -> RiskGovernor:
         # Bug 2 (2026-05-12): extract freqtrade's runmode so the governor
         # writes to a transient anchor when invoked under backtest /
         # hyperopt / edge. The config["runmode"] value is normally a
@@ -397,7 +397,7 @@ class RiskGovernor:
         )
 
     @classmethod
-    def from_config_file(cls, path: str | Path) -> "RiskGovernor":
+    def from_config_file(cls, path: str | Path) -> RiskGovernor:
         return cls.from_config(json.loads(Path(path).read_text()))
 
     # ------------------------------------------------------------------
@@ -491,7 +491,7 @@ class RiskGovernor:
         equity: float,
         model_confidence: float | None = None,
         open_positions: Iterable[tuple[str, float]] | None = None,
-        pair_returns: Mapping[str, "pd.Series"] | None = None,
+        pair_returns: Mapping[str, pd.Series] | None = None,
         open_unrealised_pnl: float = 0.0,
     ) -> RiskDecision:
         """
@@ -668,7 +668,7 @@ class RiskGovernor:
     # ------------------------------------------------------------------
 
     def _pearson_returns(
-        self, a: "pd.Series", b: "pd.Series",
+        self, a: pd.Series, b: pd.Series,
     ) -> float | None:
         """Pearson correlation over the most recent `correlation_lookback_days`.
 

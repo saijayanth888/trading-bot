@@ -37,7 +37,7 @@ import json
 import logging
 import os
 import shutil
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
@@ -118,7 +118,7 @@ def should_rotate(
         return True, f"size {size} > {size_limit_bytes}"
     first_ts = first_record_timestamp(path)
     if first_ts is not None:
-        cur = now or datetime.now(timezone.utc)
+        cur = now or datetime.now(UTC)
         age = cur - first_ts
         if age > timedelta(days=age_limit_days):
             return True, f"age {age.days}d > {age_limit_days}d"
@@ -136,7 +136,7 @@ def archive_path_for(path: Path, when: datetime | None = None) -> Path:
     If a same-day archive already exists (e.g. two rotations in one
     day) we suffix ``.N`` to avoid clobbering.
     """
-    stamp = (when or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
+    stamp = (when or datetime.now(UTC)).strftime("%Y-%m-%d")
     base = path.with_name(f"llm-calls.{stamp}.jsonl.gz")
     if not base.exists():
         return base
@@ -197,7 +197,7 @@ def prune_archives(
 ) -> list[Path]:
     """Delete archives older than ``retention_days`` based on the date
     embedded in the filename. Returns the list of deleted paths."""
-    cur = now or datetime.now(timezone.utc)
+    cur = now or datetime.now(UTC)
     cutoff = cur - timedelta(days=retention_days)
     deleted: list[Path] = []
     for arch in list_archives(path):
@@ -205,7 +205,7 @@ def prune_archives(
         stem = arch.name.removeprefix("llm-calls.")
         date_part = stem.split(".", 1)[0]  # "YYYY-MM-DD"
         try:
-            ts = datetime.strptime(date_part, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            ts = datetime.strptime(date_part, "%Y-%m-%d").replace(tzinfo=UTC)
         except ValueError:
             continue
         if ts < cutoff:

@@ -14,8 +14,6 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
-
 from datetime import date
 
 from shark.backtest.data_loader import get_default_symbols

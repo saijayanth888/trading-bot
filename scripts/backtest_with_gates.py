@@ -51,13 +51,11 @@ import argparse
 import json
 import logging
 import math
-import os
 import shutil
 import subprocess
 import sys
-import time
 import zipfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -204,7 +202,7 @@ def extract_trade_open_dates(strategy_block: dict[str, Any]) -> list[datetime]:
             continue
         if isinstance(ts, (int, float)):
             # freqtrade open_timestamp is ms-since-epoch
-            out.append(datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc))
+            out.append(datetime.fromtimestamp(ts / 1000.0, tz=UTC))
         else:
             try:
                 # ISO8601, may have trailing Z
@@ -494,7 +492,7 @@ def evaluate_gates(
 
     return {
         "strategy": None,  # filled in by caller
-        "evaluated_at": datetime.now(timezone.utc).isoformat(),
+        "evaluated_at": datetime.now(UTC).isoformat(),
         "n_trades": n,
         "trades_per_year_estimate": _json_safe(trades_per_year),
         "gates": gates,
@@ -557,7 +555,7 @@ def run_freqtrade_backtest(
 def write_report(report: dict[str, Any], results_dir: Path, strategy: str) -> tuple[Path, Path]:
     """Drop a timestamped copy + a stable *_latest.json pointer."""
     results_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     timestamped = results_dir / f"gates_report_{strategy}_{ts}.json"
     latest = results_dir / f"gates_report_{strategy}_latest.json"
     timestamped.write_text(json.dumps(report, indent=2, default=str))

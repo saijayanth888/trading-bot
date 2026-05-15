@@ -7,12 +7,10 @@ Tests for the multi-agent enhancements:
   - Multi-provider LLM client (Priority 5)
 """
 
-import json
 import os
-import pytest
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
+import pytest
 
 # ── Priority 2: Schemas ──────────────────────────────────────────────
 
@@ -59,7 +57,7 @@ class TestSchemas:
         assert len(d["risks"]) == 2
 
     def test_trade_decision_valid(self):
-        from shark.agents.schemas import TradeDecision, TradeAction, render_trade_decision
+        from shark.agents.schemas import TradeAction, TradeDecision, render_trade_decision
         dec = TradeDecision(
             decision=TradeAction.BUY,
             symbol="NVDA",

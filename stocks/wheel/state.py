@@ -18,10 +18,9 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from dataclasses import asdict, dataclass
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
 
 # Reuse shark's atomic write (already battle-tested with file locking)
 from shark.memory.atomic import atomic_write_text
@@ -46,7 +45,7 @@ class Position:
     kind: str  # "short_put" | "short_call" | "long_shares"
     qty: int  # positive number; convention: 1 contract = 100 shares
     strike: float = 0.0  # 0 for shares
-    expiry: Optional[str] = None  # ISO date for options, None for shares
+    expiry: str | None = None  # ISO date for options, None for shares
     entry_credit: float = 0.0  # premium collected (puts/calls)
     entry_price: float = 0.0  # cost basis (shares) — also strike when assigned
     opened_at: str = ""  # ISO8601
@@ -67,7 +66,7 @@ class TradeRecord:
 # ── Positions ───────────────────────────────────────────────────────────────
 
 
-def load_positions() -> List[Position]:
+def load_positions() -> list[Position]:
     if not _POSITIONS_FILE.exists():
         return []
     try:
@@ -78,7 +77,7 @@ def load_positions() -> List[Position]:
         return []
 
 
-def save_positions(positions: List[Position]) -> None:
+def save_positions(positions: list[Position]) -> None:
     _ensure_dir()
     payload = json.dumps([asdict(p) for p in positions], indent=2)
     atomic_write_text(_POSITIONS_FILE, payload)
@@ -116,7 +115,7 @@ def update_position(contract_symbol: str, **changes) -> bool:
     return changed
 
 
-def find_open_csp(underlying: str) -> Optional[Position]:
+def find_open_csp(underlying: str) -> Position | None:
     """Find any currently-open short put on this underlying."""
     for p in load_positions():
         if p.kind == "short_put" and p.underlying == underlying:
@@ -124,7 +123,7 @@ def find_open_csp(underlying: str) -> Optional[Position]:
     return None
 
 
-def find_open_cc(underlying: str) -> Optional[Position]:
+def find_open_cc(underlying: str) -> Position | None:
     for p in load_positions():
         if p.kind == "short_call" and p.underlying == underlying:
             return p
@@ -148,7 +147,7 @@ def append_trade(rec: TradeRecord) -> None:
         f.write(line + "\n")
 
 
-def cumulative_pnl(since: Optional[date] = None) -> float:
+def cumulative_pnl(since: date | None = None) -> float:
     if not _TRADES_FILE.exists():
         return 0.0
     total = 0.0
@@ -165,7 +164,7 @@ def cumulative_pnl(since: Optional[date] = None) -> float:
     return total
 
 
-def cumulative_pnl_for(underlying: str, since: Optional[date] = None) -> float:
+def cumulative_pnl_for(underlying: str, since: date | None = None) -> float:
     """Per-ticker cumulative realized P&L since `since` (date).
 
     Used by the wheel runner's kill_loss_per_cycle gate (P1-S5) to walk
@@ -192,7 +191,7 @@ def cumulative_pnl_for(underlying: str, since: Optional[date] = None) -> float:
 # ── Per-ticker kill flags ──────────────────────────────────────────────────
 
 
-def _load_kill_flags() -> Dict[str, str]:
+def _load_kill_flags() -> dict[str, str]:
     """Returns {underlying: ISO date when flag expires}."""
     if not _KILL_FLAGS_FILE.exists():
         return {}
@@ -202,7 +201,7 @@ def _load_kill_flags() -> Dict[str, str]:
         return {}
 
 
-def _save_kill_flags(flags: Dict[str, str]) -> None:
+def _save_kill_flags(flags: dict[str, str]) -> None:
     _ensure_dir()
     atomic_write_text(_KILL_FLAGS_FILE, json.dumps(flags, indent=2))
 
@@ -226,4 +225,4 @@ def kill_ticker(underlying: str, days: int = 90) -> None:
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()

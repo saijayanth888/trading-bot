@@ -6,10 +6,9 @@ Run from stocks/:
 
 from __future__ import annotations
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
-
 from shark.llm import circuit_breaker as cb_module
 from shark.llm import client as client_module
 
