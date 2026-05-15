@@ -4027,6 +4027,23 @@
     const regimeKlass = regime.startsWith("BULL") ? "up"
                       : regime.startsWith("BEAR") ? "down" : "info";
     const macroKlass = macro === "CLEAR" ? "up" : macro === "ELEVATED" ? "warn" : "info";
+    // STALENESS DETECTION — the handoff file is overwritten by each day's
+    // pre-market phase at 09:00 ET. If the handoff_date isn't TODAY (in ET),
+    // every "Skipped: AMD, GOOGL..." line is from a prior session and should
+    // not be read as a current-state block. Operator hit this 2026-05-15:
+    // saw yesterday's BEAR_VOLATILE skip list and thought tickers were stuck.
+    const todayET = (() => {
+      try {
+        const fmt = new Intl.DateTimeFormat("en-CA", {
+          timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
+        });
+        return fmt.format(new Date());  // YYYY-MM-DD
+      } catch (_e) { return null; }
+    })();
+    const isStale = dateLabel !== "—" && todayET && dateLabel !== todayET;
+    const staleNote = isStale
+      ? "yesterday's session (" + dateLabel + ") · next pre-market 09:00 ET"
+      : null;
 
     if (slot.phase !== "ok") {
       return h(Card, {
@@ -4045,10 +4062,16 @@
 
     return h(Card, {
       num: "13c", title: "Shark briefing · " + dateLabel,
-      sub: phases.length + " phase" + (phases.length === 1 ? "" : "s") + " logged",
+      sub: isStale
+        ? staleNote
+        : phases.length + " phase" + (phases.length === 1 ? "" : "s") + " logged",
       right: cardRight(slot.fetchedAt,
         h(F, null,
-          h("span", { className: "pill " + regimeKlass, title: "Shark's market regime classifier (ATR + trend_score)" }, regime),
+          isStale
+            ? h("span", { className: "pill warn", title: "Showing the previous trading session — today's pre-market has not run yet (09:00 ET)" }, "STALE")
+            : null,
+          isStale ? " " : null,
+          h("span", { className: "pill " + regimeKlass, title: "Shark's market regime classifier (ATR + trend_score)" + (isStale ? " — from " + dateLabel : "") }, regime),
           " ",
           h("span", { className: "pill " + macroKlass, title: "Macro calendar (CPI/FOMC/NFP today or next day)" }, "MACRO " + macro)
         )
