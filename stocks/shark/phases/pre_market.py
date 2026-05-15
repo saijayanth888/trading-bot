@@ -1,20 +1,22 @@
 from __future__ import annotations
+
 import logging
 import re
 from datetime import date
 from pathlib import Path
 
+from shark.agents.trade_reviewer import get_pattern_stats, get_recent_lessons
 from shark.data.alpaca_data import get_account, get_positions
-from shark.data.perplexity import fetch_market_intel
-from shark.data.market_regime import detect_regime
-from shark.data.relative_strength import compute_relative_strength
+from shark.data.kb_scoring import HistoricalEdge
 from shark.data.macro_calendar import check_macro_calendar
+from shark.data.market_regime import detect_regime
+from shark.data.perplexity import fetch_market_intel
+from shark.data.relative_strength import compute_relative_strength
 from shark.data.watchlist import get_full_watchlist
-from shark.agents.trade_reviewer import get_recent_lessons, get_pattern_stats
-from shark.memory.journal import log_research
 from shark.memory import handoff, state
+from shark.memory.journal import log_research
 from shark.signals.distributor import send_email_digest
-from shark.signals.templates import premarket_briefing_html, alert_html
+from shark.signals.templates import alert_html, premarket_briefing_html
 
 _RESEARCH_LOG = Path(__file__).resolve().parents[2] / "memory" / "RESEARCH-LOG.md"
 
@@ -27,7 +29,7 @@ def _score(
     regime_str: str = "",
     symbol: str = "",
     today: date | None = None,
-) -> tuple[int, "HistoricalEdge | None"]:
+) -> tuple[int, HistoricalEdge | None]:
     """Score a ticker based on intel, relative strength, regime context, and KB history.
 
     Returns
@@ -102,7 +104,9 @@ def _score(
     if symbol:
         try:
             from shark.data.pead import (
-                find_active_pead_setup, compute_pead_score_bonus, save_pead_setup,
+                compute_pead_score_bonus,
+                find_active_pead_setup,
+                save_pead_setup,
             )
             pead_setup = find_active_pead_setup(symbol, today=today)
             if pead_setup is not None:
@@ -281,7 +285,7 @@ def run(dry_run: bool = False) -> bool:
     scored: list[tuple[int, str, dict]] = []
     today_dt = date.today()
     rejected_by_kb: list[tuple[str, str]] = []  # [(ticker, reason)]
-    edge_map: dict[str, "HistoricalEdge"] = {}
+    edge_map: dict[str, HistoricalEdge] = {}
     for ticker in watchlist:
         ticker_intel = intel_map.get(ticker, {})
         ticker_rs = rs_map.get(ticker)

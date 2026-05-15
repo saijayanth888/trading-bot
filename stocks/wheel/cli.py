@@ -17,19 +17,26 @@ import argparse
 import json
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Ensure stocks/ is on sys.path so imports work from any cwd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # Triggers .env loader on import (via shark.run)
+from shark.memory.atomic import atomic_write_text
+
 from wheel import runner
 from wheel.broker import from_env
 from wheel.config import load_config
 from wheel.state import (
-    Position, add_position, cumulative_pnl, kill_ticker,
-    load_positions, now_iso, remove_position,
+    Position,
+    add_position,
+    cumulative_pnl,
+    kill_ticker,
+    load_positions,
+    now_iso,
+    remove_position,
 )
 
 _STATE_DIR = Path(__file__).resolve().parent / "state"
@@ -139,16 +146,14 @@ def cmd_candles(args: argparse.Namespace) -> int:
         print(json.dumps({"error": "no bars returned", "symbol": args.symbol}))
         return 1
     payload = {
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": datetime.now(UTC).isoformat(),
         "symbol": args.symbol.upper(),
         "timeframe": args.timeframe,
         "bars": bars,
     }
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
     out_file = _STATE_DIR / f"candles_{args.symbol.upper()}_{args.timeframe}.json"
-    tmp = out_file.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload))
-    tmp.replace(out_file)
+    atomic_write_text(out_file, json.dumps(payload))
     last = bars[-1]
     print(json.dumps({
         "wrote": str(out_file.name),
@@ -294,7 +299,7 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
     reconcile_summary = _reconcile_positions_with_broker(broker)
     pnl = cumulative_pnl()
     payload = {
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": datetime.now(UTC).isoformat(),
         "cash": round(acct.cash, 2),
         "buying_power": round(acct.buying_power, 2),
         "portfolio_value": round(acct.portfolio_value, 2),
@@ -304,9 +309,7 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
         "reconcile": reconcile_summary,
     }
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = _ACCOUNT_SNAPSHOT_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload, indent=2))
-    tmp.replace(_ACCOUNT_SNAPSHOT_FILE)
+    atomic_write_text(_ACCOUNT_SNAPSHOT_FILE, json.dumps(payload, indent=2))
     print(json.dumps(payload, indent=2))
     return 0
 
