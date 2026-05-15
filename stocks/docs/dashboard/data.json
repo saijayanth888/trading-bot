@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-14T17:30:43.226982",
+  "generated_at": "2026-05-15T17:30:00.982867",
   "state": {
     "peak_equity": 100528.31,
     "circuit_breaker_triggered": false,
@@ -95,6 +95,12 @@
       "equity": 100528.31,
       "cash": 100974.31,
       "day_pnl": 1008.85
+    },
+    {
+      "date": "2026-05-15",
+      "equity": 100241.17,
+      "cash": 100831.17,
+      "day_pnl": -287.14
     }
   ],
   "daily_snapshots": [
@@ -284,6 +290,28 @@
       ],
       "trades_today": 0,
       "trades_this_week": 5
+    },
+    {
+      "date": "2026-05-15",
+      "equity": 100241.17,
+      "cash": 100831.17,
+      "day_pnl_dollars": -287.1399999999994,
+      "day_pnl_pct": -0.2856309829539554,
+      "positions": [
+        {
+          "symbol": "NVDA260522P00220000",
+          "qty": -1.0,
+          "avg_entry_price": 6.2,
+          "current_price": 5.9,
+          "unrealized_pl": 30.0,
+          "unrealized_plpc": 0.04839,
+          "market_value": -590.0,
+          "side": "short",
+          "asset_class": "us_option"
+        }
+      ],
+      "trades_today": 0,
+      "trades_this_week": 5
     }
   ],
   "open_trades": {},
@@ -369,9 +397,9 @@
     "worst_trade": 0.0,
     "avg_r_multiple": 0.0,
     "max_drawdown_pct": 0.48,
-    "current_drawdown_pct": 0.0
+    "current_drawdown_pct": 0.29
   },
   "handoff": {
-    "raw": "# Daily Handoff \u2014 2026-05-14\n\n## pre-market | 09:02 EDT\nconfirmed: NVDA\nskipped: AMD, GOOGL, CRDO, AVGO, ORCL\nmarket: bullish=12 bearish=0 of 30\nregime: BEAR_VOLATILE\nmacro: NORMAL\nlessons: C | -45.7% | stop_hunt | Consider tightening stop-losses earlier in volatile bear markets to limit downside risk.; C | -28.5% | thesis_decay | Avoid holding bearish options trades through major market declines.; C | -35.3% | thesis_decay | In volatile bearish regimes, prioritize protecting gains over trying to capture remaining upside.\n\n## pre-execute | 09:32 EDT\nvalidated: NVDA\nrejected: none\n\n## market-open | 09:35 EDT\ntraded: none\ncount: 0\nregime: BEAR_VOLATILE\nmacro: No major macro events nearby\n\n## midday | 13:00 EDT\ncuts: none\nstops_tightened: 0\nthesis_breaks: none\nregime: BEAR_VOLATILE\nactions: no actions\n\n## daily-summary | 17:30 EDT\nequity: $100,528.31\ncash: $100,974.31\nday_pnl: +1.01%\nopen_positions: 2\ncircuit_breaker: OK\n"
+    "raw": "# Daily Handoff \u2014 2026-05-15\n\n## pre-market | 09:02 EDT\nconfirmed: GOOGL\nskipped: AMD, NVDA, MSFT, META, AVGO\nmarket: bullish=15 bearish=0 of 30\nregime: BEAR_VOLATILE\nmacro: NORMAL\nlessons: C | -45.7% | stop_hunt | Consider tightening stop-losses earlier in volatile bear markets to limit downside risk.; C | -28.5% | thesis_decay | Avoid holding bearish options trades through major market declines.; C | -35.3% | thesis_decay | In volatile bearish regimes, prioritize protecting gains over trying to capture remaining upside.\n\n## pre-execute | 09:30 EDT\nvalidated: GOOGL\nrejected: none\n\n## market-open | 09:35 EDT\ntraded: none\ncount: 0\nregime: BEAR_VOLATILE\nmacro: No major macro events nearby\n\n## market-open | 09:38 EDT\ntraded: none\ncount: 0\nregime: BEAR_VOLATILE\nmacro: No major macro events nearby\n\n## midday | 13:00 EDT\ncuts: none\nstops_tightened: 0\nthesis_breaks: none\nregime: BEAR_VOLATILE\nactions: no actions\n\n## midday | 13:01 EDT\ncuts: none\nstops_tightened: 0\nthesis_breaks: none\nregime: BEAR_VOLATILE\nactions: no actions\n\n## daily-summary | 17:30 EDT\nequity: $100,241.17\ncash: $100,831.17\nday_pnl: -0.29%\nopen_positions: 1\ncircuit_breaker: OK\n"
   }
 }
