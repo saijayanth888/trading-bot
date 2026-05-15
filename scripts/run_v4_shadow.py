@@ -1302,8 +1302,15 @@ async def run_cycle(cfg: Cfg, session: aiohttp.ClientSession, conn: psycopg.Asyn
 
     regime_payload = await fetch_regime(session, cfg.regime_url)
     regime_label = regime_payload.get("current") or "unknown"
-    log.info("cycle start · regime=%s · n_symbols=%d · mode=%s",
-             regime_label, len(cfg.symbols), cfg.mode)
+    # 2026-05-15: also forward HMM posterior probability so strategies can
+    # require high-confidence regime before firing. Today's -$1,010 loss
+    # came largely from a single BTC trade opened during a regime period
+    # that was classified mean_reverting (p=0.65) and flipped to
+    # trending_down (p=0.99) two hours later. Strategies now require
+    # p >= 0.85 for entry (and exit if regime flips adversarial).
+    regime_probability = float(regime_payload.get("probability") or 0.0)
+    log.info("cycle start · regime=%s p=%.3f · n_symbols=%d · mode=%s",
+             regime_label, regime_probability, len(cfg.symbols), cfg.mode)
 
     # Per-strategy positions: each strategy only sees positions IT opened.
     # This is the ownership rule that fixes the MeanRevBB <-> TrendFollow
@@ -1359,7 +1366,9 @@ async def run_cycle(cfg: Cfg, session: aiohttp.ClientSession, conn: psycopg.Asyn
         ctx_mr.set_positions(positions_by_strategy.get("mean_rev_bb") or {})
         roster.append(("mean_rev_bb", MeanRevBB(
             ctx=ctx_mr,
-            config={"symbol": symbol, "timeframe": "5m", "state": {"regime": regime_label}},
+            config={"symbol": symbol, "timeframe": "5m",
+                    "state": {"regime": regime_label,
+                              "regime_probability": regime_probability}},
         )))
 
         if _TRENDFOLLOW_AVAILABLE:
@@ -1368,7 +1377,9 @@ async def run_cycle(cfg: Cfg, session: aiohttp.ClientSession, conn: psycopg.Asyn
             ctx_tf.set_positions(positions_by_strategy.get("trend_follow") or {})
             roster.append(("trend_follow", TrendFollow(
                 ctx=ctx_tf,
-                config={"symbol": symbol, "timeframe": "5m", "state": {"regime": regime_label}},
+                config={"symbol": symbol, "timeframe": "5m",
+                        "state": {"regime": regime_label,
+                                  "regime_probability": regime_probability}},
             )))
 
         latest_bar = bars[-1]

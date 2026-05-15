@@ -88,6 +88,15 @@ _CONV_MAX = 0.95
 
 # Regimes that permit a fresh long entry.
 _PERMISSIVE_REGIMES = frozenset({"trending_up", "mean_reverting"})
+# Regimes that force an exit on any open BUY position (regime-flip exit).
+# Match trend_follow's exit set so behavior is symmetric across strategies.
+_EXIT_REGIMES = frozenset({"trending_down", "high_volatility"})
+# Minimum HMM posterior probability required to permit entry. 2026-05-15
+# tightening after today's -$1,010 loss on a BTC trade opened during a
+# mean_reverting classification with p=0.65 that flipped to trending_down
+# p=0.99 two hours later. 0.85 keeps us out of low-confidence regimes
+# where the HMM is essentially guessing.
+_MIN_ENTRY_PROBABILITY = 0.85
 
 
 class MeanRevBB(Strategy):
@@ -138,18 +147,37 @@ class MeanRevBB(Strategy):
 
         position = self.ctx.get_position(symbol)
         regime = self.state.get("regime", "unknown")
+        regime_prob = float(self.state.get("regime_probability") or 0.0)
 
-        # ----- Exit first: if long, check both the recovery path and the
-        # stop-loss gate.  Either path emits SELL; they differ only in the
-        # exit_reason embedded in the rationale string.
+        # ----- Exit first: if long, check (a) regime flipped adversarial,
+        # (b) stop-loss hit, or (c) recovery path. All paths emit SELL;
+        # they differ only in the exit_reason embedded in the rationale.
         if position is not None and position.side == "BUY" and position.qty > 0:
-            entry_price = float(position.avg_entry)
+            # Engine's _P shim exposes avg_price (run_v4_shadow.py:186);
+            # legacy/test contexts may use avg_entry. Try both.
+            entry_price = float(
+                getattr(position, "avg_price", None)
+                or getattr(position, "avg_entry", 0.0)
+            )
             stop_level = entry_price * (1.0 - self.max_loss_pct)
+
+            # (a) regime-flip exit — added 2026-05-15. Matches trend_follow's
+            # behavior: when regime turns trending_down or high_volatility,
+            # exit immediately. Don't wait for the BB mean to recover; the
+            # strategy's edge has evaporated.
+            if regime in _EXIT_REGIMES:
+                return (
+                    self._build_proposal(
+                        symbol, "SELL", position.qty, close, mean, lower, bar,
+                        exit_reason="regime_flip",
+                        extra=f"entry={entry_price:.6f} regime={regime} p={regime_prob:.2f}",
+                    ),
+                )
+
+            # (b) stop-loss — price fell more than max_loss_pct from entry.
+            # exit_reason embedded in rationale so it round-trips into the
+            # intent JSONB column written by write_proposal_and_order.
             if close <= stop_level:
-                # Stop-loss triggered: price has fallen more than max_loss_pct
-                # below entry.  Exit immediately regardless of regime.
-                # exit_reason is embedded in rationale so it round-trips into
-                # the intent JSONB column written by write_proposal_and_order.
                 loss_pct = (entry_price - close) / entry_price * 100.0
                 return (
                     self._build_proposal(
@@ -158,6 +186,8 @@ class MeanRevBB(Strategy):
                         extra=f"entry={entry_price:.6f} stop={stop_level:.6f} loss={loss_pct:.2f}%",
                     ),
                 )
+
+            # (c) recovery exit — close back above the middle band (SMA).
             if close > middle:
                 return (
                     self._build_proposal(
@@ -167,8 +197,14 @@ class MeanRevBB(Strategy):
                 )
             return ()
 
-        # ----- Entry: long only, regime-gated.
+        # ----- Entry: long only, regime-gated AND confidence-gated.
         if regime not in _PERMISSIVE_REGIMES:
+            return ()
+        if regime_prob < _MIN_ENTRY_PROBABILITY:
+            # Low-confidence regime — HMM is uncertain. Don't fire entries
+            # we can't justify. Added 2026-05-15 after today's BTC trade
+            # opened during mean_reverting p=0.65 and lost $1,056 when
+            # regime flipped to trending_down p=0.99 within 2 hours.
             return ()
 
         if close < lower:

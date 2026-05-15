@@ -25,7 +25,13 @@ RUN pip install --no-cache-dir "uv==0.11.11" \
         "psycopg[binary]>=3.1,<4" \
         "pydantic>=2.6,<3" \
         "anyio>=4,<5" \
-        "numpy>=1.26,<3"
+        "numpy>=1.26,<3" \
+        "pandas>=2.0,<3"
+# pandas added 2026-05-15 — quanta_core.risk.governor imports at module
+# level (line 58). Without it the RG fail-closed code shipped earlier
+# today blocks ALL BUY proposals with RISK_MODULE_UNAVAILABLE. Discovered
+# during regime-gate rollout — RG was silently failing to load on every
+# rebuild since governor.py grew the pandas import.
 
 # Copy the V4 core package + the strategy. `src` is the import root.
 COPY src /app/src

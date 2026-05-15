@@ -131,6 +131,7 @@ class TrendFollow(Strategy):
 
         position = self.ctx.get_position(symbol)
         regime = self.state.get("regime", "unknown")
+        regime_prob = float(self.state.get("regime_probability") or 0.0)
         has_long = (
             position is not None
             and position.side == "BUY"
@@ -155,8 +156,11 @@ class TrendFollow(Strategy):
                 )
             return ()
 
-        # ----- Entry: strict trending_up + bullish MA cross + close above short.
+        # ----- Entry: strict trending_up + bullish MA cross + close above short
+        # + high-confidence regime (2026-05-15 — match mean_rev_bb gate).
         if regime != _ENTRY_REGIME:
+            return ()
+        if regime_prob < _MIN_ENTRY_PROBABILITY:
             return ()
         if not (close > short_ma and short_ma > long_ma):
             return ()
