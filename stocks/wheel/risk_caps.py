@@ -35,14 +35,37 @@ opt in to a bigger ceiling.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 
-# Equity-fraction policy. Ratios mirror the pilot $50k → static dollar
-# defaults so the $50k case is a no-op. Tighter than the pilot would
-# require an explicit env-var override on the cfg ceilings.
-PCT_TOTAL_COLLATERAL: float = 0.100
-PCT_RISK_PER_TICKER: float = 0.034
-PCT_KILL_LOSS_PER_CYCLE: float = 0.010
+
+def _pct_env(key: str, default: float) -> float:
+    """Read an env override for a PCT_* constant; fall back to default."""
+    raw = os.environ.get(key)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+# Equity-fraction policy. Defaults updated 2026-05-15 to "Config A" per
+# audit/2026-05-15-wheel-sizing-research.md after the discovery that the
+# previous values (0.100 / 0.034) were $50k-pilot artifacts blocking every
+# trade today on a $100k account. New defaults are literature-backed:
+# - 25% total deployment (was 10%); spintwig 17-yr SPY backtest + tastytrade
+#   target 70-80% but Config A is the conservative on-ramp.
+# - 10% per-ticker (was 3.4%); arxiv 2508.16598 quarter-Kelly midpoint,
+#   options.cafe + quantwheel.com practitioner consensus.
+# - 1% kill_loss/cycle preserved — emergency stop, not a strategy knob.
+#
+# Each constant is env-overridable via WHEEL_PCT_* without a code change
+# so future tuning (Config B after 4-week paper validation: 40% / 15%)
+# is a .env edit, not a recompile.
+PCT_TOTAL_COLLATERAL: float = _pct_env("WHEEL_PCT_TOTAL_COLLATERAL", 0.250)
+PCT_RISK_PER_TICKER: float = _pct_env("WHEEL_PCT_RISK_PER_TICKER", 0.100)
+PCT_KILL_LOSS_PER_CYCLE: float = _pct_env("WHEEL_PCT_KILL_LOSS_PER_CYCLE", 0.010)
 
 
 logger = logging.getLogger(__name__)

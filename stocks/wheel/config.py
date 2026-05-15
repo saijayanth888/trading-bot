@@ -51,9 +51,15 @@ class WheelConfig:
     min_open_interest: int = 500
     min_yield_per_week: float = 0.008  # bid/strike, e.g. 0.008 = 0.8%/wk
 
-    # Capital limits.
-    max_risk_per_ticker_usd: float = 1700.0  # 1 contract = 100 sh × $17 = $1700
-    max_total_collateral_usd: float = 5000.0  # pilot cap
+    # Capital limits — DEFENSIVE CEILINGS. Effective per-cycle caps are
+    # min(equity_pct * portfolio_value, this_dollar_ceiling) so the cfg
+    # number wins ONLY when equity_pct would over-allocate at small
+    # account sizes. 2026-05-15: raised from pilot $1,700 / $5,000 to
+    # $30k / $75k so a $100k account follows the equity_pct policy
+    # (10%/25% per Config A in audit/2026-05-15-wheel-sizing-research.md)
+    # without silently pinning at the old pilot dollars.
+    max_risk_per_ticker_usd: float = 30000.0  # was 1700 (pilot $50k era)
+    max_total_collateral_usd: float = 75000.0  # was 5000 (pilot $50k era)
 
     # Lifecycle.
     profit_take_fraction: float = 0.50  # close at 50% of credit collected
