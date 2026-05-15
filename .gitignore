@@ -44,6 +44,11 @@ user_data/nfix6-*.json
 user_data/backtest_results/backtest-result-*.zip
 user_data/backtest_results/backtest-result-*.meta.json
 user_data/backtest_results/.last_result.json
+# 2026-05-15: gates_report_*.json are weekly cron output (regenerated
+# every Sunday by quanta_core.backtest.harness). _ohlcv_cache is
+# multi-MB historical bars cache. Both derived; keep out of git.
+user_data/backtest_results/gates_report_*.json
+user_data/backtest_results/_ohlcv_cache/
 # Historical candle data — downloaded by freqtrade on startup
 user_data/data/coinbase/*.feather
 user_data/data/coinbase/*.json
