@@ -219,14 +219,26 @@ def _v4_realised_pnl_usd() -> float:
 
 
 def _v4_unrealised_pnl_usd() -> float:
-    """Mark V4 open paper positions to current Coinbase REST mid.
+    """Mark V4 open paper positions to the latest known fill price.
 
-    For each pair with net BUY qty > 0 in quanta_schema.fills:
-      unrealised = qty * (current_close - avg_buy_px)
+    Single all-SQL query — no external HTTP. For each pair with net BUY
+    qty > 0 in quanta_schema.fills, compute:
+        unrealised = net_qty × (latest_fill_price − avg_buy_px)
+
+    BEFORE (until 2026-05-15): this function hit Coinbase's public
+    ``/products/<id>/ticker`` REST endpoint per symbol. Coinbase started
+    returning HTTP 403 to requests from this container (likely default
+    urllib User-Agent block — verified at the bash level inside the
+    container). Exceptions were silently swallowed, so the scoreboard's
+    Unrealized cell read $0.00 forever despite open positions.
+
+    AFTER: read the mark straight from the most recent fill per symbol.
+    Cadence is the V4 cycle (~5 min), good enough for the scoreboard;
+    matches the source ops_routes.py uses for the Open positions table
+    (the two cards now agree by construction).
     """
     try:
         import psycopg
-        import urllib.request, json as _json
     except ImportError:
         return 0.0
     dsn = (
@@ -241,33 +253,37 @@ def _v4_unrealised_pnl_usd() -> float:
             with conn.cursor() as cur:
                 cur.execute(
                     """
+                    WITH latest_fill AS (
+                        SELECT DISTINCT ON (p.symbol)
+                               p.symbol AS symbol,
+                               f.price  AS mark_price
+                        FROM quanta_schema.fills f
+                        JOIN quanta_schema.proposals p
+                          ON p.client_order_id = f.client_order_id
+                        ORDER BY p.symbol, f.ts DESC
+                    )
                     SELECT p.symbol,
                            SUM(CASE WHEN f.side='BUY'  THEN f.qty ELSE 0 END) -
                            SUM(CASE WHEN f.side='SELL' THEN f.qty ELSE 0 END)            AS net_qty,
                            SUM(CASE WHEN f.side='BUY' THEN f.qty * f.price ELSE 0 END) /
-                           NULLIF(SUM(CASE WHEN f.side='BUY' THEN f.qty ELSE 0 END), 0)  AS avg_buy_px
+                           NULLIF(SUM(CASE WHEN f.side='BUY' THEN f.qty ELSE 0 END), 0)  AS avg_buy_px,
+                           MAX(lf.mark_price)                                            AS mark_price
                     FROM quanta_schema.fills f
                     JOIN quanta_schema.proposals p USING (client_order_id)
+                    LEFT JOIN latest_fill lf ON lf.symbol = p.symbol
                     GROUP BY p.symbol
                     HAVING SUM(CASE WHEN f.side='BUY' THEN f.qty ELSE 0 END) -
                            SUM(CASE WHEN f.side='SELL' THEN f.qty ELSE 0 END) > 0
                     """
                 )
                 rows = cur.fetchall()
-        if not rows:
-            return 0.0
         total = 0.0
-        for sym, net_qty, avg_buy in rows:
+        for sym, net_qty, avg_buy, mark in rows or []:
             try:
-                product = str(sym).replace("/", "-")
-                url = f"https://api.exchange.coinbase.com/products/{product}/ticker"
-                with urllib.request.urlopen(url, timeout=2) as r:
-                    ticker = _json.loads(r.read())
-                px = float(ticker.get("price") or 0)
-                if px > 0:
-                    total += float(net_qty) * (px - float(avg_buy or 0))
-            except Exception as exc:
-                logger.debug("unified_risk: ticker fetch %s failed: %s", sym, exc)
+                if mark is None or avg_buy is None:
+                    continue
+                total += float(net_qty) * (float(mark) - float(avg_buy))
+            except (TypeError, ValueError):
                 continue
         return total
     except Exception as exc:
