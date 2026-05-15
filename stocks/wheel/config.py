@@ -71,8 +71,12 @@ class WheelConfig:
     ivr_filter_enabled: bool = True
     ivr_threshold: float = 35.0  # IV-Rank % floor; spintwig sweet spot
 
-    # Risk killers.
-    kill_loss_per_cycle_usd: float = 500.0  # walk away from a ticker for 90d
+    # Risk killers — defensive ceiling. Effective per-cycle floor is
+    # min(0.010 * pv, kill_loss_per_cycle_usd). 2026-05-15: ceiling raised
+    # from $500 to $5000 so the PCT arm (1 % of portfolio) controls up to
+    # a $500k account; below that, pct tightens automatically. Same
+    # anti-pinned-dollar pattern fix as max_total / max_risk_per_ticker.
+    kill_loss_per_cycle_usd: float = 5000.0  # was $500 (pilot $50k era)
 
     # Mode.
     paper: bool = True

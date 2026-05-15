@@ -39,15 +39,37 @@ import os
 from dataclasses import dataclass
 
 
-def _pct_env(key: str, default: float) -> float:
-    """Read an env override for a PCT_* constant; fall back to default."""
+def _pct_env(
+    key: str,
+    default: float,
+    lo: float = 0.001,
+    hi: float = 0.50,
+) -> float:
+    """Read an env override for a PCT_* constant; clamp to [lo, hi].
+
+    Fail-safe: any unparseable, out-of-range, or empty value falls back to
+    the compiled default with a WARNING log. Prevents fat-finger footguns
+    like ``WHEEL_PCT_TOTAL_COLLATERAL=2.5`` (250 % deployment — would
+    obliterate the wheel) from silently sticking.
+    """
     raw = os.environ.get(key)
     if raw is None or not raw.strip():
         return default
     try:
-        return float(raw)
+        val = float(raw)
     except (TypeError, ValueError):
+        logger.warning(
+            "wheel.risk_caps: env %s=%r not a float — using compiled default %s",
+            key, raw, default,
+        )
         return default
+    if not (lo <= val <= hi):
+        logger.warning(
+            "wheel.risk_caps: env %s=%s outside safe range [%s, %s] — using default %s",
+            key, val, lo, hi, default,
+        )
+        return default
+    return val
 
 
 # Equity-fraction policy. Defaults updated 2026-05-15 to "Config A" per

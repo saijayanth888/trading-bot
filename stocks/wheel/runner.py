@@ -198,6 +198,14 @@ def sell_csps(symbols_override: list[str] | None = None) -> dict:
     # Stagnant-config audit Wave 1.4 (2026-05-14): wheel risk caps now
     # scale with equity. Compute once per cycle so all candidates see a
     # stable cap-of-record even if portfolio_value drifts between fills.
+    # 2026-05-15: also fingerprint the active PCT_* config + persist
+    # applied_at so the dashboard can show "Config A is N days old".
+    # Prevents the same anti-pattern that left $50k-pilot caps stuck for
+    # weeks after the account doubled.
+    try:
+        record_config_if_changed()
+    except Exception as _exc:  # noqa: BLE001 — tracking is best-effort
+        logger.warning("wheel: config_tracker failed: %s", _exc)
     caps = derive_caps(acct.portfolio_value, cfg)
     summary["risk_caps"] = caps_as_dict(caps)
     summary["max_total_collateral_usd"] = caps.max_total_collateral_usd

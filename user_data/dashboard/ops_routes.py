@@ -2178,6 +2178,54 @@ def _wheel_cumulative_pnl(trades_file: Path) -> tuple[float, str | None]:
     return round(total, 2), last_ts
 
 
+@router.get("/wheel_config")
+async def wheel_config():
+    """Active wheel risk-cap config + days-since-applied + Config-B
+    eligibility timer. Reads stocks/wheel/state/risk_config.json which
+    is auto-updated by wheel.config_tracker on every wheel cron fire.
+
+    Surfaces the "Config A is N days old, Config B promotion eligible in
+    M days" insight on the dashboard so the operator never again has
+    silently-stale risk caps (the $50k-pilot anti-pattern that triggered
+    audit/2026-05-15-wheel-sizing-research.md).
+    """
+    cfg_file = STOCKS_ROOT / "wheel" / "state" / "risk_config.json"
+    if not cfg_file.exists():
+        return _envelope(
+            "degraded",
+            data={"config_label": "unknown"},
+            error="risk_config.json not yet written — wheel cron has not fired since config_tracker shipped",
+        )
+    snap = _read_json(cfg_file) or {}
+    # Compute days_active + eligibility window here so the dashboard
+    # endpoint stays self-contained (no import from stocks/ needed).
+    from datetime import datetime, timezone, timedelta as _td
+    applied_iso = snap.get("applied_at")
+    days_active = None
+    eligible_at = None
+    eligible_in_days = None
+    eligible_now = False
+    if applied_iso:
+        try:
+            applied_dt = datetime.fromisoformat(applied_iso)
+            now = datetime.now(timezone.utc)
+            days_active = round((now - applied_dt).total_seconds() / 86400.0, 2)
+            eligible_dt = applied_dt + _td(days=28)
+            eligible_at = eligible_dt.isoformat(timespec="seconds")
+            eligible_in_days = round((eligible_dt - now).total_seconds() / 86400.0, 2)
+            eligible_now = eligible_in_days <= 0
+        except Exception:
+            pass
+    return _envelope("ok", data={
+        **snap,
+        "days_active": days_active,
+        "config_b_eligible_at": eligible_at,
+        "config_b_eligible_in_days": eligible_in_days,
+        "config_b_eligible_now": eligible_now,
+        "promotion_window_days": 28,
+    })
+
+
 @router.get("/stocks")
 async def stocks_status():
     """Unified shark + wheel + Alpaca state for the /ops Stocks card.
