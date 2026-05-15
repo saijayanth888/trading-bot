@@ -55,6 +55,8 @@ from .state import (
     shares_held,
     update_position,
 )
+from .filters import earnings_blackout as _earnings_blackout_filter
+from .filters import iv_rank_filter as _iv_rank_filter
 from .strategy import (
     OptionContract,
     filter_calls,
@@ -263,14 +265,35 @@ def _try_sell_csp(
         return
 
     # P1-S5a: earnings blackout — refuse new CSP if next earnings is within
-    # cfg.earnings_blackout_days. Source of truth is state/earnings.json
-    # (operator-written); missing entry = no blackout enforced for that sym.
-    next_earn = _next_earnings_for(sym)
-    if is_earnings_blackout(next_earn, blackout_days=cfg.earnings_blackout_days):
-        summary["skipped"].append(
-            f"{sym}: earnings blackout — next earnings {next_earn.isoformat()} within {cfg.earnings_blackout_days}d"
+    # cfg.earnings_blackout_days, OR if the option's DTE window spans an
+    # earnings event. Uses filters.earnings_blackout() which tries yfinance
+    # live calendar first and falls back to state/earnings.json.
+    # Controlled by WHEEL_EARNINGS_FILTER_ENABLED (default True).
+    if cfg.earnings_filter_enabled:
+        _blocked, _reason = _earnings_blackout_filter(
+            sym,
+            target_dte=cfg.dte_max,
+            blackout_days=cfg.earnings_blackout_days,
         )
-        return
+        if _blocked:
+            logger.info("wheel: skip %s", _reason)
+            summary["skipped"].append(_reason)
+            return
+        else:
+            logger.debug("wheel: earnings filter pass — %s", _reason)
+
+    # P1-S5c: IV-Rank filter — only sell when IV is in the top 65% of its
+    # 252-day range (IVR >= 35). Selling low-IV premium collects little
+    # credit while retaining full assignment risk.
+    # Controlled by WHEEL_IVR_FILTER_ENABLED (default True).
+    if cfg.ivr_filter_enabled:
+        _ivr_pass, _ivr_reason = _iv_rank_filter(sym, threshold=cfg.ivr_threshold)
+        if not _ivr_pass:
+            logger.info("wheel: skip %s", _ivr_reason)
+            summary["skipped"].append(_ivr_reason)
+            return
+        else:
+            logger.debug("wheel: IVR filter pass — %s", _ivr_reason)
 
     # P1-S5b: per-cycle kill — walk away from this ticker for 90 days if its
     # realized P&L over the last 30 days is below -kill_loss_per_cycle_usd.

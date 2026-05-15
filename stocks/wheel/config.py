@@ -21,7 +21,13 @@ Env vars (all optional; defaults below are the pilot values):
     WHEEL_DELTA_ROLL_TRIGGER       roll the put when |delta| crosses, default 0.50
     WHEEL_KILL_LOSS_PER_CYCLE      cycle-level dollar loss to kill bot, default 500
     WHEEL_EARNINGS_BLACKOUT_DAYS   skip new CSPs within N days of earnings,
-                                   default 3
+                                   default 7
+    WHEEL_EARNINGS_FILTER_ENABLED  enable/disable the earnings blackout filter,
+                                   default true
+    WHEEL_IVR_FILTER_ENABLED       enable/disable the IV-Rank entry filter,
+                                   default true
+    WHEEL_IVR_THRESHOLD            IV-Rank % floor for new CSPs (0–100),
+                                   default 35.0
     WHEEL_PAPER                    "true" / "false", default true (read from
                                    trading-bot/.env's TRADING_MODE)
 """
@@ -52,7 +58,12 @@ class WheelConfig:
     # Lifecycle.
     profit_take_fraction: float = 0.50  # close at 50% of credit collected
     delta_roll_trigger: float = 0.50  # roll if short put delta exceeds this
-    earnings_blackout_days: int = 3  # skip CSPs within N days of earnings
+    earnings_blackout_days: int = 7  # skip CSPs within N days of earnings
+    # Filter on/off switches — both default ON per strategy research.
+    # Operator can disable individually via WHEEL_*_FILTER_ENABLED=false.
+    earnings_filter_enabled: bool = True
+    ivr_filter_enabled: bool = True
+    ivr_threshold: float = 35.0  # IV-Rank % floor; spintwig sweet spot
 
     # Risk killers.
     kill_loss_per_cycle_usd: float = 500.0  # walk away from a ticker for 90d
@@ -174,7 +185,10 @@ def load_config() -> WheelConfig:
         max_total_collateral_usd=_env_float("WHEEL_MAX_TOTAL_COLLATERAL", 5000.0),
         profit_take_fraction=_env_float("WHEEL_PROFIT_TAKE_PCT", 0.50),
         delta_roll_trigger=_env_float("WHEEL_DELTA_ROLL_TRIGGER", 0.50),
-        earnings_blackout_days=_env_int("WHEEL_EARNINGS_BLACKOUT_DAYS", 3),
+        earnings_blackout_days=_env_int("WHEEL_EARNINGS_BLACKOUT_DAYS", 7),
+        earnings_filter_enabled=_env_bool("WHEEL_EARNINGS_FILTER_ENABLED", True),
+        ivr_filter_enabled=_env_bool("WHEEL_IVR_FILTER_ENABLED", True),
+        ivr_threshold=_env_float("WHEEL_IVR_THRESHOLD", 35.0),
         kill_loss_per_cycle_usd=_env_float("WHEEL_KILL_LOSS_PER_CYCLE", 500.0),
         paper=_env_bool("WHEEL_PAPER", _env_str("TRADING_MODE", "paper") == "paper"),
         **rg_kwargs,

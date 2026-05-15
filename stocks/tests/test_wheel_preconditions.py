@@ -35,6 +35,11 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr("wheel.state._KILL_FLAGS_FILE", state_dir / "kill_flags.json")
     # Runner caches the earnings.json path at import time — redirect it too.
     monkeypatch.setattr("wheel.runner._EARNINGS_FILE", state_dir / "earnings.json")
+    # filters.py has its own _EARNINGS_FILE reference — redirect it as well.
+    monkeypatch.setattr("wheel.filters._EARNINGS_FILE", state_dir / "earnings.json")
+    # Disable IVR filter for all precondition tests: avoids live yfinance
+    # calls and keeps these tests fast and network-free.
+    monkeypatch.setenv("WHEEL_IVR_FILTER_ENABLED", "false")
     return state_dir
 
 
@@ -48,6 +53,7 @@ def _build_mock_broker():
     broker.get_account.return_value = AccountSnapshot(
         cash=100_000.0, buying_power=100_000.0,
         portfolio_value=100_000.0, paper=True,
+        options_buying_power=100_000.0,
     )
     # One sane put: SOFI strike 15 delta 0.30, $0.40 mid → collateral $1500.
     contract = OptionContract(
@@ -62,16 +68,31 @@ def _build_mock_broker():
         open_interest=1500,
     )
     broker.list_put_contracts.return_value = [contract]
-    broker.sell_to_open.return_value = {"id": "test-order-1", "status": "accepted"}
+    # sell_to_open must return an object with an .id attribute (not a plain
+    # dict) so _try_sell_csp's getattr(order, "id", None) finds "test-order-1"
+    # and the 30s fill-poll loop can call broker.trading.get_order_by_id.
+    sell_resp = MagicMock()
+    sell_resp.id = "test-order-1"
+    sell_resp.get = lambda key, default=None: {"id": "test-order-1"}.get(key, default)
+    broker.sell_to_open.return_value = sell_resp
+    # Stub the fill-poll: status.value == "filled" exits the loop immediately.
+    fill_resp = MagicMock()
+    fill_resp.status.value = "filled"
+    fill_resp.filled_avg_price = 0.40
+    broker.trading.get_order_by_id.return_value = fill_resp
     return broker, contract
 
 
-def test_total_collateral_cap_blocks_new_csp(isolated_state):
+def test_total_collateral_cap_blocks_new_csp(isolated_state, monkeypatch):
     """P1-S4: when the journal already has $4500 of open CSP collateral,
     a $1500 candidate that would push the total past $5000 must be
     skipped — not silently executed."""
     pytest.importorskip("alpaca")
     from wheel import runner, state
+
+    # Pin the collateral ceiling to $5000 so this test is independent of any
+    # WHEEL_MAX_TOTAL_COLLATERAL value set in .env (which may be much larger).
+    monkeypatch.setenv("WHEEL_MAX_TOTAL_COLLATERAL", "5000")
 
     # Pre-seed: a SOFI short_put at strike 45 (so collateral = $4500).
     state.add_position(Position(
@@ -81,7 +102,6 @@ def test_total_collateral_cap_blocks_new_csp(isolated_state):
         entry_credit=100.0, opened_at="2026-05-10T11:00:00Z",
     ))
     broker, _ = _build_mock_broker()
-    cfg = WheelConfig(max_total_collateral_usd=5000.0)
 
     with patch.object(runner, "_shark_kill_active", return_value=False), \
          patch.object(runner, "_fetch_spy_regime", return_value="mean_reverting"), \
@@ -115,15 +135,17 @@ def test_total_collateral_cap_allows_when_room_remains(isolated_state):
 def test_earnings_blackout_skips_csp(isolated_state):
     """P1-S5a: next-earnings within cfg.earnings_blackout_days → skip."""
     pytest.importorskip("alpaca")
-    from wheel import runner
+    from wheel import filters, runner
 
-    # Pin earnings 2 days out → inside the default 3-day blackout.
+    # Pin earnings 2 days out → inside the default 7-day blackout.
     (isolated_state / "earnings.json").write_text(
         json.dumps({"SOFI": (date.today() + timedelta(days=2)).isoformat()})
     )
 
     broker, _ = _build_mock_broker()
-    with patch.object(runner, "_shark_kill_active", return_value=False), \
+    # Silence yfinance so the test falls back to the static earnings.json.
+    with patch.object(filters, "yf", None), \
+         patch.object(runner, "_shark_kill_active", return_value=False), \
          patch.object(runner, "_fetch_spy_regime", return_value="mean_reverting"), \
          patch.object(runner, "from_env", return_value=broker):
         result = runner.sell_csps(symbols_override=["SOFI"])
@@ -135,16 +157,18 @@ def test_earnings_blackout_skips_csp(isolated_state):
 
 
 def test_earnings_blackout_far_out_passes(isolated_state):
-    """Earnings 10 days out is well outside the 3-day blackout → no skip."""
+    """Earnings 30 days out is outside the 7-day blackout and option DTE → no skip."""
     pytest.importorskip("alpaca")
-    from wheel import runner
+    from wheel import filters, runner
 
     (isolated_state / "earnings.json").write_text(
-        json.dumps({"SOFI": (date.today() + timedelta(days=10)).isoformat()})
+        json.dumps({"SOFI": (date.today() + timedelta(days=30)).isoformat()})
     )
 
     broker, _ = _build_mock_broker()
-    with patch.object(runner, "_shark_kill_active", return_value=False), \
+    # Silence yfinance so the test falls back to the static earnings.json.
+    with patch.object(filters, "yf", None), \
+         patch.object(runner, "_shark_kill_active", return_value=False), \
          patch.object(runner, "_fetch_spy_regime", return_value="mean_reverting"), \
          patch.object(runner, "from_env", return_value=broker):
         result = runner.sell_csps(symbols_override=["SOFI"])
