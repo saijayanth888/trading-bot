@@ -44,7 +44,7 @@ import signal
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -80,14 +80,22 @@ except Exception:  # pragma: no cover — bootstrapping path
 # Kelly sizing). Lazy import so the runner still boots if the risk module
 # fails — better than failing-closed in a way that takes the bot dark.
 try:
-    from quanta_core.risk.governor import RiskGovernor, RiskConfig, RiskDecision
+    from quanta_core.risk.governor import RiskConfig, RiskDecision, RiskGovernor
     _RISK_GOVERNOR_AVAILABLE = True
 except Exception as _rg_exc:  # pragma: no cover
+    import traceback as _tb
     RiskGovernor = None  # type: ignore[assignment]
     RiskConfig = None  # type: ignore[assignment]
     RiskDecision = None  # type: ignore[assignment]
     _RISK_GOVERNOR_AVAILABLE = False
     _RG_IMPORT_ERROR = repr(_rg_exc)
+    # audit/2026-05-14-night/07-architecture-review.md§P1 — fail-CLOSED: surface import failure loudly so restart-policy triggers investigation.
+    logging.getLogger("quanta.shadow").critical(
+        "RISK GOVERNOR UNAVAILABLE — all BUY proposals will be BLOCKED until the"
+        " module is importable. Import error: %s\n%s",
+        _RG_IMPORT_ERROR,
+        _tb.format_exc(),
+    )
 
 logging.basicConfig(
     level=logging.INFO,
@@ -110,7 +118,7 @@ class Cfg:
     mode: str  # "shadow" | "live"
 
     @classmethod
-    def from_env(cls) -> "Cfg":
+    def from_env(cls) -> Cfg:
         # Prefer keyword-style env vars over QUANTA_DB_DSN — passwords with
         # `@` (which we have) break the URL parser. Compose with explicit
         # POSTGRES_* vars so psycopg gets clean key=val DSN strings.
@@ -163,7 +171,7 @@ class _InProcessContext:
         self._positions: dict[str, Any] = {}
 
     def now(self) -> datetime:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
     def get_position(self, symbol: str) -> Any | None:  # type: ignore[override]
         pos = self._positions.get(str(symbol))
@@ -221,7 +229,7 @@ async def fetch_coinbase_candles(
                 low=Decimal(str(low)),
                 close=Decimal(str(close)),
                 volume=Decimal(str(vol)),
-                timestamp_utc=datetime.fromtimestamp(int(t), tz=timezone.utc),
+                timestamp_utc=datetime.fromtimestamp(int(t), tz=UTC),
                 timeframe="5m",  # type: ignore[arg-type]
             ))
         except Exception as exc:
@@ -457,10 +465,10 @@ async def _read_run_state(conn: psycopg.AsyncConnection) -> tuple[bool, str | No
 # gate, governor.record_trade_close() on fill, real-time equity tracking.
 # ---------------------------------------------------------------------------
 
-_GOVERNOR: "RiskGovernor | None" = None
+_GOVERNOR: RiskGovernor | None = None
 
 
-def _get_governor() -> "RiskGovernor | None":
+def _get_governor() -> RiskGovernor | None:
     """Lazy-init the process-wide RiskGovernor. Returns None if the risk
     module wasn't importable — callers must treat None as 'fail-open'."""
     global _GOVERNOR
@@ -501,7 +509,13 @@ def _rg_gate_buy(
     """
     gov = _get_governor()
     if gov is None:
-        return True, None, {}
+        # audit/2026-05-14-night/07-architecture-review.md§P1 — fail-CLOSED: block BUY; SELL/exit path never calls this function so exits are unaffected.
+        log.error(
+            "RISK_MODULE_UNAVAILABLE: blocking BUY for %s — risk governor could not be loaded (import error: %s).",
+            symbol,
+            globals().get("_RG_IMPORT_ERROR", "unknown"),
+        )
+        return False, "RISK_MODULE_UNAVAILABLE: risk governor failed to import; BUY blocked until module is restored", {"unavailable": True}
     try:
         base_stake = float(abs(Decimal(str(qty)))) * float(signal_price)
         # Flatten per-strategy positions to (sym, stake_quote_ccy) tuples.
@@ -566,8 +580,8 @@ async def fetch_regime(session: aiohttp.ClientSession, url: str) -> dict[str, An
                     # Accept naive + tz-aware; treat naive as UTC.
                     expiry = datetime.fromisoformat(until_raw.replace("Z", "+00:00"))
                     if expiry.tzinfo is None:
-                        expiry = expiry.replace(tzinfo=timezone.utc)
-                    expired = datetime.now(timezone.utc) >= expiry
+                        expiry = expiry.replace(tzinfo=UTC)
+                    expired = datetime.now(UTC) >= expiry
                 except Exception as exc:
                     log.error(
                         "REGIME_OVERRIDE_UNTIL=%r invalid (%s) — refusing override; "

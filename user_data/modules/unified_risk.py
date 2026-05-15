@@ -45,10 +45,9 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +104,7 @@ _RISK_GATE_DEFAULTS = {
 # ---------------------------------------------------------------------------
 
 
-def _load_json(path: Path) -> Optional[dict]:
+def _load_json(path: Path) -> dict | None:
     try:
         if not path.is_file():
             return None
@@ -443,7 +442,7 @@ def _dd(equity: float, ref: float) -> float:
     return max(0.0, (ref - equity) / ref)
 
 
-def _load_peaks() -> tuple[Optional[float], Optional[float], Optional[float]]:
+def _load_peaks() -> tuple[float | None, float | None, float | None]:
     """Return (combined_peak, crypto_peak, stocks_peak). Any may be None
     on first call (no peak recorded yet)."""
     p = _load_json(_PEAK_FILE) or {}
@@ -461,7 +460,7 @@ def _save_peak(
     combined: float,
     crypto: float = 0.0,
     stocks: float = 0.0,
-    components: Optional[dict] = None,
+    components: dict | None = None,
 ) -> None:
     """Persist all three peaks (combined + per-side) so a single-side dip
     doesn't reset the other side's peak. components is the live snapshot
@@ -471,7 +470,7 @@ def _save_peak(
         "combined_peak_equity": combined,
         "crypto_peak_equity": crypto,
         "stocks_peak_equity": stocks,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
         "components": components or {},
     }
     tmp = _PEAK_FILE.with_suffix(".json.tmp")
@@ -481,7 +480,7 @@ def _save_peak(
 
 # Backward-compat alias — older callers used _load_peak (singular) returning
 # just the combined peak. Kept so existing code doesn't break.
-def _load_peak() -> Optional[float]:
+def _load_peak() -> float | None:
     combined, _crypto, _stocks = _load_peaks()
     return combined
 
@@ -514,7 +513,7 @@ STOCKS_UNTRUSTED_SECONDS = int(os.environ.get("UNIFIED_STOCKS_UNTRUSTED_S", "720
 def evaluate_loss_size_factor(
     daily_pnl_pct: float,
     weekly_pnl_pct: float,
-    gates: Optional[dict] = None,
+    gates: dict | None = None,
 ) -> dict:
     """Return how the daily / weekly loss gates should size positions.
 
@@ -558,7 +557,7 @@ def evaluate_loss_size_factor(
 def evaluate_vix_size_factor(
     vix_now: float,
     vix_historical: float,
-    gates: Optional[dict] = None,
+    gates: dict | None = None,
 ) -> dict:
     """Return the VIX-driven size factor.
 
@@ -585,7 +584,7 @@ def evaluate_vix_size_factor(
 def evaluate_single_name_cap(
     intended_notional: float,
     portfolio_equity: float,
-    gates: Optional[dict] = None,
+    gates: dict | None = None,
 ) -> dict:
     """Cap a single-name notional at ``single_name_cap_pct`` of equity.
 
@@ -613,7 +612,7 @@ def evaluate_single_name_cap(
 
 def evaluate_correlation_cap(
     candidate_corr: float,
-    gates: Optional[dict] = None,
+    gates: dict | None = None,
 ) -> dict:
     """Reject a candidate position whose correlation with the existing book
     exceeds ``correlation_cap`` (default 0.85)."""
@@ -650,7 +649,7 @@ class RiskStatus:
     stocks_open_positions: int
     circuit_breaker_active: bool
     threshold_pct: float
-    snapshot_age_seconds: Optional[int]
+    snapshot_age_seconds: int | None
     stocks_data_stale: bool
     stocks_data_untrusted: bool   # P0-J: snapshot too old to trust at all
     market_open_now: bool         # Lets the dashboard suppress
@@ -706,17 +705,20 @@ def get_combined_risk_status() -> dict:
     if snap_ts:
         try:
             snap_dt = datetime.fromisoformat(snap_ts.replace("Z", "+00:00"))
-            snap_age = int((datetime.now(timezone.utc) - snap_dt).total_seconds())
+            snap_age = int((datetime.now(UTC) - snap_dt).total_seconds())
         except (ValueError, TypeError):
             snap_age = None
-    stocks_stale = snap_age is not None and snap_age > STOCKS_STALE_SECONDS
+    # Gate stale/untrusted on market hours — outside open, frozen snapshot is BY DESIGN.
+    # audit/2026-05-14-night/05-cron-notify.md§P1-2
+    market_open_now = _is_nyse_open_now()
+    stocks_stale = (snap_age is not None and snap_age > STOCKS_STALE_SECONDS) and market_open_now
 
     # P0-J: when the stocks snapshot is *very* stale (>2 h by default), we
     # don't trust its equity figure for the combined-DD math at all. Using
     # the last seen value silently shifts the combined peak/now ratio in
     # whichever direction stale data flatters or worsens. Treat the stocks
     # side as a zero contribution: combined_dd is then crypto-only.
-    stocks_untrusted = snap_age is not None and snap_age > STOCKS_UNTRUSTED_SECONDS
+    stocks_untrusted = (snap_age is not None and snap_age > STOCKS_UNTRUSTED_SECONDS) and market_open_now
 
     crypto_dd = _dd(crypto_equity, crypto_peak)
     stocks_dd = _dd(stocks_equity, stocks_peak)
@@ -733,7 +735,7 @@ def get_combined_risk_status() -> dict:
     # fires during market hours — outside the open, the wheel_snapshot
     # cron isn't firing by design (Mon-Fri 9-16 ET) so a stale snapshot
     # is expected, not dangerous. Inside market hours, stale = fail-safe.
-    market_open_now = _is_nyse_open_now()
+    # (market_open_now already set above when gating stocks_stale/untrusted)
     breaker = (
         combined_dd >= COMBINED_DD_THRESHOLD_PCT
         or (stocks_stale and market_open_now)
@@ -846,7 +848,6 @@ def check_and_trip() -> dict:
 
 def main() -> int:
     """Run from cron: prints JSON status, exits 0 always."""
-    import sys
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",

@@ -10,7 +10,18 @@ Signal logic
 ------------
 * Enter LONG when ``close < lower_bb`` AND ``regime`` is in the
   permissive set ``{"trending_up", "mean_reverting"}``.
-* Exit LONG when a position is open AND ``close > middle_bb`` (the SMA).
+* Exit LONG (recovery) when a position is open AND ``close > middle_bb``
+  (the SMA). ``exit_reason`` = ``"mean_reversion"``.
+* Exit LONG (stop-loss) when ``close < entry_price * (1 - max_loss_pct)``.
+  ``exit_reason`` = ``"stop_loss"``. This gate was added in response to
+  audit/2026-05-14-night/07-architecture-review.md §P2 + Hard Requirements §2
+  which identified that a lower-band entry in a trending-down market had NO
+  exit path until recovery — a structurally unbounded-loss scenario. The
+  ``max_loss_pct`` default (0.04) caps the loss at 4 % of entry price, wide
+  enough to survive typical BB-channel noise but tight enough to cut a
+  trending move before it becomes catastrophic. Operators may override it via
+  config (key ``"max_loss_pct"``). Do NOT remove this gate without a
+  replacement risk control in place.
 * All other states -> FLAT (empty sequence).
 * No short side. We will add it after we've watched the long side
   behave for at least one trading day.
@@ -66,6 +77,10 @@ _DEFAULT_WINDOW = 20
 _DEFAULT_STD_MULT = 2.0
 _DEFAULT_BASE_QTY = Decimal("1")
 _DEFAULT_ASSET_CLASS = "crypto"
+# Maximum tolerated loss from entry before a forced stop-loss exit.
+# 4 % is conservative enough to survive BB-channel noise yet short enough
+# to cut a trending-down move.  Override via config key ``"max_loss_pct"``.
+_DEFAULT_MAX_LOSS_PCT = 0.04
 
 # Conviction is clamped to this band per the spec.
 _CONV_MIN = 0.4
@@ -86,6 +101,8 @@ class MeanRevBB(Strategy):
         self.std_mult: float = float(self.config.get("std_mult", _DEFAULT_STD_MULT))
         self.base_qty: Decimal = Decimal(str(self.config.get("base_qty", _DEFAULT_BASE_QTY)))
         self.asset_class: str = str(self.config.get("asset_class", _DEFAULT_ASSET_CLASS))
+        # Fractional stop-loss distance from entry price (e.g. 0.04 = 4 %).
+        self.max_loss_pct: float = float(self.config.get("max_loss_pct", _DEFAULT_MAX_LOSS_PCT))
         # Symbol the engine wires this instance to. Falls back to the bar's
         # own symbol when not present (single-symbol shortcut).
         symbol_cfg = self.config.get("symbol")
@@ -122,11 +139,32 @@ class MeanRevBB(Strategy):
         position = self.ctx.get_position(symbol)
         regime = self.state.get("regime", "unknown")
 
-        # ----- Exit first: if long and price has reverted to the mean,
-        # close the position regardless of regime (risk-managed exit).
+        # ----- Exit first: if long, check both the recovery path and the
+        # stop-loss gate.  Either path emits SELL; they differ only in the
+        # exit_reason embedded in the rationale string.
         if position is not None and position.side == "BUY" and position.qty > 0:
+            entry_price = float(position.avg_entry)
+            stop_level = entry_price * (1.0 - self.max_loss_pct)
+            if close <= stop_level:
+                # Stop-loss triggered: price has fallen more than max_loss_pct
+                # below entry.  Exit immediately regardless of regime.
+                # exit_reason is embedded in rationale so it round-trips into
+                # the intent JSONB column written by write_proposal_and_order.
+                loss_pct = (entry_price - close) / entry_price * 100.0
+                return (
+                    self._build_proposal(
+                        symbol, "SELL", position.qty, close, mean, lower, bar,
+                        exit_reason="stop_loss",
+                        extra=f"entry={entry_price:.6f} stop={stop_level:.6f} loss={loss_pct:.2f}%",
+                    ),
+                )
             if close > middle:
-                return (self._build_proposal(symbol, "SELL", position.qty, close, mean, lower, bar),)
+                return (
+                    self._build_proposal(
+                        symbol, "SELL", position.qty, close, mean, lower, bar,
+                        exit_reason="mean_reversion",
+                    ),
+                )
             return ()
 
         # ----- Entry: long only, regime-gated.
@@ -185,6 +223,9 @@ class MeanRevBB(Strategy):
         mean: float,
         lower: float,
         bar: Bar,
+        *,
+        exit_reason: str | None = None,
+        extra: str | None = None,
     ) -> OrderProposal:
         """Construct an OrderProposal with a JSON-friendly rationale.
 
@@ -194,12 +235,22 @@ class MeanRevBB(Strategy):
         ``execution_idempotency`` unique constraint then rejects — preventing
         duplicate proposals and double-counted paper fills. Replaces the
         previous ``uuid.uuid4()`` per-call randomness.
+
+        ``exit_reason`` (optional) is embedded verbatim into the rationale
+        string so it round-trips through the ``intent`` JSONB column in
+        ``write_proposal_and_order`` without requiring a schema change to
+        ``OrderProposal``. Downstream readers can extract it with a simple
+        string search or by parsing the rationale field.
         """
         rationale = (
             f"mean_rev_bb side={side} close={close:.6f} mean={mean:.6f} "
             f"lower={lower:.6f} conviction={self.last_conviction:.4f} "
             f"regime={self.state.get('regime', 'unknown')}"
         )
+        if exit_reason is not None:
+            rationale += f" exit_reason={exit_reason}"
+        if extra is not None:
+            rationale += f" {extra}"
         coid_seed = f"mean_rev_bb|{symbol}|{side}|{bar.timestamp_utc.isoformat()}"
         coid = uuid.uuid5(self._COID_NAMESPACE, coid_seed)
         return OrderProposal(
