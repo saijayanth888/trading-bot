@@ -41,7 +41,7 @@ import re
 import threading
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
@@ -255,7 +255,7 @@ def _dedup_dicts_by_title(items: list[dict[str, Any]], threshold: float = 0.80) 
 
 
 def _ts_to_iso(ts: float) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(timespec="seconds")
+    return datetime.fromtimestamp(ts, tz=UTC).isoformat(timespec="seconds")
 
 
 def _extract_json_array(text: str) -> list[dict[str, Any]]:
@@ -300,7 +300,7 @@ async def _fetch_perplexity_news(
 
     user = _PERPLEXITY_USER_TEMPLATE.format(
         window=PERPLEXITY_RECENCY,
-        now=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        now=datetime.now(UTC).isoformat(timespec="seconds"),
     )
     payload = {
         "model": PERPLEXITY_MODEL,
@@ -369,6 +369,35 @@ async def _fetch_perplexity_news(
 # ---------------------------------------------------------------------------
 
 
+def _sanitize_items_for_fast_model(
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Strip summaries for user-generated-content sources before feeding to 8B model.
+
+    Reddit self-posts and StockTwits messages frequently contain personal
+    narratives ("I borrowed money from my wife", security warnings, raw DB
+    JSON echoes, etc.) that are long enough to push hermes3:8b into its
+    built-in content-moderation path. When that happens the model outputs a
+    content-policy schema  {"version","statement","explanation","confidence"}
+    instead of the sentiment schema, _coerce_result sees a missing
+    "sentiment_score" key, returns None, and the fast-model slot goes dark.
+
+    Fix: for sources that produce user-generated summaries (reddit:*, stocktwits:*),
+    pass only the title to the fast model. The title is written by the poster
+    and is typically short / topical. The deep model (70B) handles the full
+    summary just fine and continues to use them.
+    """
+    _UGC_PREFIXES = ("reddit:", "stocktwits:")
+    out = []
+    for it in items:
+        src = str(it.get("source") or "")
+        if any(src.startswith(p) for p in _UGC_PREFIXES):
+            out.append({**it, "summary": ""})
+        else:
+            out.append(it)
+    return out
+
+
 async def _analyze_ollama(
     session: aiohttp.ClientSession,
     items: list[dict[str, Any]],
@@ -377,6 +406,7 @@ async def _analyze_ollama(
     num_ctx: int = 4096,
     timeout_total: float = 180,
     keep_alive: str = "30s",
+    strip_ugc_summaries: bool = False,
 ) -> dict | None:
     """
     Score `items` with the given Ollama model. Returns None on failure.
@@ -386,14 +416,20 @@ async def _analyze_ollama(
     follow-up, short enough that the 70B (~91 GB allocation) doesn't park
     in GPU between 15-min poll cycles. Override to "0s" to evict
     immediately (good for one-shot tools).
+
+    `strip_ugc_summaries` — when True, strip summary fields for
+    reddit/stocktwits items before building the prompt. Use for 8B models
+    that get confused by long personal-narrative post bodies. The 70B
+    model handles full summaries correctly and does not need this.
     """
     from .sentiment_prompts import OLLAMA_SYSTEM_PROMPT, build_user_prompt
 
     target = model or OLLAMA_MODEL_FAST
+    prompt_items = _sanitize_items_for_fast_model(items) if strip_ugc_summaries else items
     user_prompt = build_user_prompt(
-        items=items,
+        items=prompt_items,
         window_minutes=POLL_INTERVAL_S // 60,
-        now_iso=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        now_iso=datetime.now(UTC).isoformat(timespec="seconds"),
     )
 
     payload = {
@@ -447,6 +483,20 @@ async def _analyze_ollama(
     except json.JSONDecodeError as exc:
         logger.warning("ollama[%s] non-JSON content: %s | snippet=%s",
                        target, exc, content[:200])
+        return None
+    # Detect wrong-schema responses: hermes3:8b's built-in content-moderation
+    # path outputs {"version","statement","explanation","confidence"} when it
+    # treats the prompt as a policy-review request rather than a sentiment task.
+    # This happens when reddit/stocktwits summaries contain personal narratives
+    # long enough to trigger the model's safety classifier. Log prominently so
+    # the operator can see the mode-flip without digging into raw responses.
+    if isinstance(data, dict) and "sentiment_score" not in data and "market_impact" not in data:
+        logger.warning(
+            "ollama[%s] wrong schema — model switched to content-moderation mode "
+            "(keys=%s). Prompt may contain personal narratives or policy-triggering "
+            "content. strip_ugc_summaries should be True for 8B models.",
+            target, sorted(data.keys()),
+        )
         return None
     return _coerce_result(data)
 
@@ -639,15 +689,17 @@ async def _poll_once() -> dict | None:
         fast, deep = await asyncio.gather(
             _analyze_ollama(session, items, OLLAMA_MODEL_FAST,
                             num_ctx=4096, timeout_total=120,
-                            keep_alive="5m"),
+                            keep_alive="5m",
+                            strip_ugc_summaries=True),
             _analyze_ollama(session, items, OLLAMA_MODEL_DEEP,
                             num_ctx=8192, timeout_total=300,
-                            keep_alive="0s"),
+                            keep_alive="0s",
+                            strip_ugc_summaries=False),
             return_exceptions=False,
         )
 
     final = _trust_the_majority(fast, deep)
-    ts_dt = datetime.now(timezone.utc)
+    ts_dt = datetime.now(UTC)
     final["ts"] = int(ts_dt.timestamp())
 
     # ── Multi-source side-channel signals (no LLM scoring) ──
@@ -758,7 +810,7 @@ async def _poll_once() -> dict | None:
 
 
 class SentimentEngine:
-    _instance: "SentimentEngine | None" = None
+    _instance: SentimentEngine | None = None
     _instance_lock = threading.Lock()
 
     def __init__(self) -> None:
@@ -767,7 +819,7 @@ class SentimentEngine:
         self.last_poll_ts: float = 0.0
 
     @classmethod
-    def instance(cls) -> "SentimentEngine":
+    def instance(cls) -> SentimentEngine:
         with cls._instance_lock:
             if cls._instance is None:
                 cls._instance = cls()
@@ -876,7 +928,7 @@ def get_sentiment_features(pair: str) -> pd.DataFrame:
     """
     SentimentEngine.instance().start()                   # lazy start
 
-    cutoff = datetime.now(timezone.utc) - pd.Timedelta(days=HISTORY_DAYS)
+    cutoff = datetime.now(UTC) - pd.Timedelta(days=HISTORY_DAYS)
     try:
         rows = db.fetch_all(
             """
