@@ -251,11 +251,8 @@
         // Source: /api/ops/combined_portfolio {stocks_data_untrusted,
         //         market_open_now} (already polled every 10s for equity).
         (function() {
-          const m = envelopeData(marketHours) || {};
-          const isOpen = !!(m.is_open || m.session === "regular");
           const cp = envelopeData(combined) || {};
-          if (!isOpen) return null;
-          if (!cp.stocks_data_untrusted && !cp.stocks_data_stale) return null;
+          if (!cp.market_open_now || (!cp.stocks_data_untrusted && !cp.stocks_data_stale)) return null;
           const ageS = cp.stocks_snapshot_age_s;
           const ageTxt = ageS != null ? Math.round(ageS / 60) + "m" : "—";
           const cls = cp.stocks_data_untrusted ? "down" : "warn";
