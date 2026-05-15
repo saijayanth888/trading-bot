@@ -170,11 +170,14 @@
     const modeD = envelopeData(mode) || {};
     const svc = envelopeData(services) || {};
     const equity = cp.total_equity != null ? Number(cp.total_equity) : null;
+    // Day-delta pill: prefer `day_pnl_pct` (today's realised P&L vs day-start
+    // equity — can be positive or negative). Fall back to `-combined_drawdown_pct`
+    // only when day P&L is missing — drawdown is structurally different
+    // (always ≥0, measured from a peak that may be days old) and showing it
+    // labelled as PnL produces a permanent red number even on green days.
     const dd = cp.combined_drawdown_pct != null ? Number(cp.combined_drawdown_pct) : null;
-    // Drawdown is reported as a positive % from peak. For the day-pill we
-    // surface a signed delta vs peak (negative = below peak; sign matches the
-    // legacy `/ops` topbar's day-delta convention).
-    const dayPct = dd != null ? -dd : null;
+    const dayPnlPct = cp.day_pnl_pct != null ? Number(cp.day_pnl_pct) : null;
+    const dayPct = dayPnlPct != null ? dayPnlPct : (dd != null ? -dd : null);
     const modeLabel = (modeD.mode || "unknown").toUpperCase() + (modeD.dry_run ? " · DRY-RUN" : "");
     const modeCls = modeD.mode === "live" ? "up" : modeD.mode === "paused" ? "warn" : "info";
     // Engine label + probe — quanta_core is the only engine post-cutover.

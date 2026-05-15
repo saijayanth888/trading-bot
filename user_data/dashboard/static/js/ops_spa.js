@@ -4396,16 +4396,24 @@
       else { pillCls = "down"; pillText = "NONE ELIGIBLE"; }
     }
 
-    if (slot.phase !== "ok") {
-      return h(Card, {
-        num: "16b", title: "Backtest quality gates",
-        sub: slot.phase === "loading" ? "loading…" : "endpoint unavailable",
-        right: cardRight(slot.fetchedAt)
-      },
-        slot.phase === "loading" ? h(LoadingState)
-          : h(EmptyState, { reason: slot.reason, fetchedAt: slot.fetchedAt, period: 10 })
-      );
+    // Distinguish "endpoint down" (genuine 5xx / unreachable) from "endpoint
+    // alive but no data yet" (degraded — typically: weekly cron has not run
+    // OR results dir is empty). Lumping them as "endpoint unavailable" was a
+    // lie — the route is up, just waiting for the Sun-04:00-ET bt_quality_gates
+    // cron to write its first gates_report_*_latest.json.
+    if (slot.phase === "loading") {
+      return h(Card, { num: "16b", title: "Backtest quality gates",
+        sub: "loading…", right: cardRight(slot.fetchedAt) },
+        h(LoadingState));
     }
+    if (slot.phase === "down") {
+      return h(Card, { num: "16b", title: "Backtest quality gates",
+        sub: "endpoint unavailable", right: cardRight(slot.fetchedAt) },
+        h(EmptyState, { reason: slot.reason, fetchedAt: slot.fetchedAt, period: 10 }));
+    }
+    // phase === "ok" OR "degraded" — fall through. The render path below
+    // already handles strategies.length === 0 with a "no reports yet — weekly
+    // cron has not run" sub-line, which is the right message for degraded.
 
     return h(Card, {
       num: "16b", title: "Backtest quality gates",
