@@ -1,8 +1,43 @@
-# Hermes Scheduler Friday-Skip Bug — 2026-05-15
+# Hermes Scheduler Friday-Skip "Bug" — 2026-05-15 — **MISDIAGNOSIS**
+
+> **CORRECTION 2026-05-15 09:36 ET:** This was a misdiagnosis. The Hermes
+> scheduler did NOT skip Friday's run. `shark_pre_market` fired today at
+> 09:02:25 ET and completed successfully — see `stocks/memory/cron-shark-pre_market.log`
+> and `stocks/memory/DAILY-HANDOFF.md` (which now shows `# Daily Handoff — 2026-05-15`).
+> The `next_run_at=2026-05-18 09:00:00 ET` I observed in jobs.json was the
+> POST-fire computation: after today's 09:00 cron match fired, the next
+> match for `0 9 * * 1-5` is Monday because Saturday (day-of-week 6) and
+> Sunday (day-of-week 0) don't match the `1-5` filter. That's correct cron
+> math, not a bug.
+>
+> I read jobs.json AFTER Hermes had already incremented `next_run_at` and
+> misread the post-fire state as evidence of a Friday skip. Hermes is fine.
+>
+> **What did happen:** the dashboard's SharkBriefing card showed yesterday's
+> handoff data at 09:01 ET because the endpoint reads `DAILY-HANDOFF.md`
+> from disk and the file isn't atomically overwritten until the new
+> pre-market run completes (09:02:27 ET). For ~26 seconds between
+> 09:02:01 (Hermes fires) and 09:02:27 (handoff written), the dashboard
+> shows yesterday's data. The STALE pill I added today (commit `63a471b`)
+> correctly flagged this in the 26-second window.
+>
+> **Mitigation rollback:** the host-crontab entry `0 9 * * 1-5
+> shark_pre_market.sh` added at 09:03 ET was redundant with the working
+> Hermes cron. Removed at 09:36 ET. `stocks_tft_smoke` similarly is
+> healthy (will fire correctly Monday 08:30 ET — same post-fire math).
+>
+> **Lesson learned:** when validating cron health, check the actual log
+> files for the timestamp first, not the scheduler's `next_run_at` field.
+> `next_run_at` reflects POST-fire state; absence of a log file is
+> evidence of skip, not a future date in next_run_at.
+
+---
+
+**Original (incorrect) diagnosis follows for historical record:**
 
 **Discovered:** 2026-05-15 09:01 ET while running pre-market battle checklist.
 
-## Symptom
+## Symptom (as I originally read it — incorrectly)
 
 Two Hermes cron jobs whose last run was Thursday 2026-05-14 had their
 `next_run_at` set to **Monday 2026-05-18**, skipping Friday entirely:
