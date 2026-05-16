@@ -322,9 +322,15 @@
     const closedPnl = Number(cp.day_pnl_usd ?? 0);
     const srcs = cp.sources || {};
     const cryptoUnrl = Number(srcs.crypto_unrealised_pnl ?? 0);
-    const stocksEq = Number(cp.stocks_equity ?? 0);
-    const stocksPeak = Number(cp.stocks_peak_equity ?? stocksEq);
-    const stocksMove = stocksEq - stocksPeak;
+    // B1 fix (2026-05-16): the previous `stocksMove = stocksEq - stocksPeak`
+    // was the all-time peak-to-current DRAWDOWN, NOT today's stocks move.
+    // It poisoned LIVE DAY P&L (e.g. on 2026-05-16 it spuriously added
+    // −$287.14 to a $0 day). Until the producer exposes a real intraday
+    // stocks day-PnL (Alpaca `last_equity` → `stocks.day_pnl_usd`), prefer
+    // that field when present, else 0. NEVER reuse the drawdown as a move.
+    const stocksMove = (cp.stocks && typeof cp.stocks.day_pnl_usd === "number")
+      ? Number(cp.stocks.day_pnl_usd)
+      : 0;
     const liveDayPnl = closedPnl + cryptoUnrl + stocksMove;
     const baseCap = peak > 0 ? peak : equity;
     const liveDayPct = baseCap > 0 ? (liveDayPnl / baseCap) * 100 : 0;
