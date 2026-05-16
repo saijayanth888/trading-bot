@@ -249,8 +249,17 @@ def _benchmark_return_pct(benchmark: str,
         )
         if df is None or df.empty or "Close" not in df.columns:
             return None
-        first = float(df["Close"].iloc[0])
-        last = float(df["Close"].iloc[-1])
+        # yfinance ≥0.2 returns a MultiIndex column DataFrame even for a
+        # single ticker (Close, BTC-USD). df["Close"] then returns a
+        # DataFrame, not a Series — and float(DataFrame_row) raises
+        # "float() argument must be a string or a real number, not 'Series'".
+        # squeeze("columns") collapses the single-column DataFrame back to
+        # a Series; if the response was already a Series this is a no-op.
+        close = df["Close"]
+        if hasattr(close, "squeeze"):
+            close = close.squeeze("columns") if hasattr(close, "columns") else close
+        first = float(close.iloc[0])
+        last = float(close.iloc[-1])
         if first <= 0:
             return None
         return (last - first) / first * 100.0
