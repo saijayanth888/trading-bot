@@ -16,8 +16,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TRADE_LOG_PATH = PROJECT_ROOT / "memory" / "TRADE-LOG.md"
 
 CIRCUIT_BREAKER_THRESHOLD = 0.85
+# Match a dated EOD block so we can pick the most recent snapshot strictly
+# before today. The old un-dated match-last-line approach silently treated
+# this run's just-written snapshot as "yesterday" on same-day reruns,
+# producing a 0% day P&L (see 2026-05-15 incident).
 EOD_SNAPSHOT_PATTERN = re.compile(
-    r"\*\*Portfolio:\*\*\s+\$([0-9,]+(?:\.[0-9]+)?)"
+    r"^###\s+(\d{4}-\d{2}-\d{2})\s+—\s+EOD Snapshot\s*\n"
+    r"\*\*Portfolio:\*\*\s+\$([0-9,]+(?:\.[0-9]+)?)",
+    re.MULTILINE,
 )
 
 
@@ -27,10 +33,11 @@ def _parse_yesterday_equity(current_equity: float) -> float:
 
     try:
         content = TRADE_LOG_PATH.read_text()
-        matches = EOD_SNAPSHOT_PATTERN.findall(content)
-        if matches:
-            raw = matches[-1].replace(",", "")
-            return float(raw)
+        today = date.today().isoformat()
+        prior = [(d, eq) for d, eq in EOD_SNAPSHOT_PATTERN.findall(content) if d < today]
+        if prior:
+            prior.sort(key=lambda x: x[0])
+            return float(prior[-1][1].replace(",", ""))
     except Exception:
         logger.exception("Failed to parse yesterday equity from TRADE-LOG.md")
 

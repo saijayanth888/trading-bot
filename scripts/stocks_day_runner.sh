@@ -83,7 +83,12 @@ schedule=(
     "15:30:wheel_candles.sh"        # final candle refresh before close
     "15:45:wheel_snapshot.sh"
     "16:00:wheel_snapshot.sh"       # market close snapshot
-    "17:30:shark_daily_summary.sh"
+    # 17:30:shark_daily_summary.sh — REMOVED 2026-05-16.
+    # Hermes cron (~/.hermes/cron/jobs.json: shark_daily_summary @ 30 17 * * 1-5)
+    # is the authoritative fire. Double-scheduling here caused two runs ~7s apart
+    # on 2026-05-15, corrupting that day's EOD snapshot (day P&L flipped
+    # -0.29% → +0.00%). Hermes-side fire + flock guard inside
+    # shark_daily_summary.sh now prevents re-introduction.
     "21:30:shark_kb_update.sh"
 )
 

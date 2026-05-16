@@ -6,6 +6,7 @@ Files are created with headers if they do not exist.
 """
 
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -185,10 +186,26 @@ def write_daily_summary(summary: dict[str, Any]) -> None:
 
     section += "\n"
 
-    with _TRADE_LOG_FILE.open("a", encoding="utf-8") as f:
-        f.write(section)
+    # Idempotent upsert: if today's EOD block already exists in TRADE-LOG.md,
+    # replace it in-place. Without this, a same-day re-run of the daily-summary
+    # phase appends a second block and corrupts the next run's "yesterday
+    # equity" lookup (see _parse_yesterday_equity).
+    existing_block = re.compile(
+        rf"\n### {re.escape(date)} — EOD Snapshot\n"
+        rf"\*\*Portfolio:\*\*[^\n]*\n"
+        rf"(?:\*\*Notes:\*\*[^\n]*\n)?"
+        rf"\n",
+    )
 
-    logger.info("Daily summary written for %s", date)
+    content = _TRADE_LOG_FILE.read_text(encoding="utf-8")
+    if existing_block.search(content):
+        new_content = existing_block.sub(section, content, count=1)
+        _TRADE_LOG_FILE.write_text(new_content, encoding="utf-8")
+        logger.info("Daily summary updated (in-place) for %s", date)
+    else:
+        with _TRADE_LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(section)
+        logger.info("Daily summary written for %s", date)
 
 
 def write_weekly_review(review: dict[str, Any]) -> None:
