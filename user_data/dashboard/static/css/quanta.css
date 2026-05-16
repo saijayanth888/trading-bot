@@ -3102,3 +3102,220 @@ table.t tbody tr.flash-sell { animation: flash-sell 200ms cubic-bezier(0.2, 0, 0
 
 @keyframes q-pulse-dot { 0%,100%{opacity:1; transform:scale(1)} 50%{opacity:0.45; transform:scale(0.85)} }
 .q-pulse { animation: q-pulse-dot 2s ease-in-out infinite; }
+
+/* ============================================================
+   Pass 2 — TopBar: brand chip + status banner + monumental
+                    clock + KILL placement
+   ────────────────────────────────────────────────────────────
+   Targets the live DOM produced by qc_react.js#Topbar (no JS
+   change). Structure currently emitted:
+     .topbar
+       .brand
+         .v3-brand-stack ( .v3-heartbeat + .brand-mark "Q" )
+         .brand-text ( "QUANTA" .brand-version )
+       .tb-group        ← (1) status pills: PAPER + QUANTA OK + latency
+       .tb-divider
+       .tb-group        ← (2) DASH UP · 0m
+       .tb-divider
+       .tb-group        ← (3) EQUITY ribbon (mini)
+       .tb-spacer
+       .tb-group        ← (4) clock + refresh select + ↻ button
+
+   Strategy: keep the React tree untouched. Restyle:
+     • brand → cloud-Claude gradient logo + Geist brand wordmark
+     • first .tb-group → Wong-tinted full-width status banner
+     • clock group → monumental 15px Geist Mono ET clock + date
+     • refresh button → styled as a soft KILL-adjacent affordance
+       (no kill behavior is wired into the topbar in the live
+       SPA — the real kill switch lives inside HeroLive — so the
+       brief's "KILL in the corner" reads as a visual placeholder
+       here; the live KillSwitch component below the hero retains
+       its existing arming/confirm behavior).
+   ============================================================ */
+
+.topbar {
+  background: var(--q-bg-0);
+  padding: 0 32px;
+  gap: 24px;
+  min-height: 60px;
+  box-shadow: inset 0 -1px 0 var(--q-line);
+  border-bottom: 1px solid transparent;       /* regime tint moves to a ::after rail */
+  border-bottom-width: 1px;
+}
+/* Re-create the regime tint as a 2px under-rail so we keep the
+   live BTC-regime indicator (ops_spa.js sets --regime-tint on
+   .topbar already). Without this the regime cue disappears. */
+.topbar::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: -2px;
+  height: 2px;
+  background: var(--regime-tint, var(--q-line));
+  opacity: 0.7;
+  transition: background 200ms cubic-bezier(.2,0,0,1);
+  pointer-events: none;
+}
+
+/* ── Brand chip ──────────────────────────────────── */
+.topbar .brand {
+  border-right: 1px solid var(--q-line);
+  padding: 0 24px 0 0;
+  min-width: 0;
+  margin-right: 0;
+  font-family: var(--q-font-ui);
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: -0.02em;
+  color: var(--q-t-1);
+  gap: 12px;
+}
+.topbar .brand .v3-brand-stack { gap: 10px; }
+.topbar .brand-mark {
+  width: 30px; height: 30px;
+  border-radius: 7px;
+  background: linear-gradient(135deg, var(--q-accent), var(--q-accent-2));
+  box-shadow: 0 0 14px rgba(132,148,255,0.45);
+  color: #fff;
+  font-family: var(--q-font-ui);
+  font-weight: 700;
+  font-size: 13px;
+}
+.topbar .brand-mark::after {
+  /* tone down the existing blurred halo so it doesn't bleed
+     over the surrounding status banner */
+  opacity: 0.2;
+}
+.topbar .brand .brand-text {
+  font-family: var(--q-font-ui);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--q-t-1);
+  text-transform: lowercase;
+}
+.topbar .brand-version {
+  font-family: var(--q-font-mono);
+  font-size: var(--q-fs-pico);
+  color: var(--q-t-3);
+  letter-spacing: 0.08em;
+  text-transform: lowercase;
+  font-weight: 500;
+  margin-left: 6px;
+}
+
+/* ── Status banner ────────────────────────────────
+   The FIRST .tb-group inside .topbar holds the PAPER /
+   QUANTA-OK / latency pills. We restyle it as a wide,
+   single-line, Wong-tinted banner. */
+.topbar > .tb-group:first-of-type {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 8px 16px;
+  background: var(--q-ok-soft);
+  border-radius: 8px;
+  box-shadow: inset 0 0 0 1px var(--q-ok-bord);
+  gap: 14px;
+  height: 38px;
+  /* When the inner PAPER pill is .pill.warn (paper / dry-run
+     state) we want the banner itself to tint orange to match
+     the cloud-Claude spec. CSS :has() is broadly supported in
+     the Chromium the operator runs. Fallback (no :has) leaves
+     the banner blue, which is still a valid OK reading. */
+}
+.topbar > .tb-group:first-of-type:has(.pill.warn) {
+  background: var(--q-warn-soft);
+  box-shadow: inset 0 0 0 1px var(--q-warn-bord);
+}
+.topbar > .tb-group:first-of-type:has(.pill.down) {
+  background: var(--q-crit-soft);
+  box-shadow: inset 0 0 0 1px var(--q-crit-bord);
+}
+
+/* Inner pills sit flush inside the banner — strip their pill
+   chrome so the banner reads as one continuous status line. */
+.topbar > .tb-group:first-of-type .pill {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  height: auto;
+  font-family: var(--q-font-mono);
+  font-size: var(--q-fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.topbar > .tb-group:first-of-type .pill.warn { color: var(--q-warn); }
+.topbar > .tb-group:first-of-type .pill.up   { color: var(--q-ok); }
+.topbar > .tb-group:first-of-type .pill.down { color: var(--q-crit); }
+.topbar > .tb-group:first-of-type .pill::before {
+  /* thin separator between the consecutive status fragments */
+  content: "·";
+  color: var(--q-t-4);
+  margin-right: 14px;
+}
+.topbar > .tb-group:first-of-type .pill:first-child::before { content: none; }
+.topbar > .tb-group:first-of-type .dot {
+  width: 8px; height: 8px;
+}
+.topbar > .tb-group:first-of-type .dot.up    { background: var(--q-ok);   box-shadow: 0 0 6px var(--q-ok-soft); }
+.topbar > .tb-group:first-of-type .dot.warn  { background: var(--q-warn); box-shadow: 0 0 6px var(--q-warn-soft); }
+.topbar > .tb-group:first-of-type .dot.down  { background: var(--q-crit); box-shadow: 0 0 6px var(--q-crit-soft); }
+.topbar > .tb-group:first-of-type .tb-latency .mono {
+  color: var(--q-t-2) !important;
+  font-family: var(--q-font-mono);
+  font-size: var(--q-fs-pico);
+  letter-spacing: 0.06em;
+}
+
+/* DASH UP cluster + EQUITY mini-roll — tone them down so the
+   banner remains the dominant element in the row. */
+.topbar > .tb-divider {
+  background: var(--q-line);
+  height: 22px;
+}
+.topbar .tb-group .mono,
+.topbar .tb-group .num,
+.topbar .tb-group .numroll {
+  font-family: var(--q-font-mono);
+}
+.topbar .tb-group[title^="last refresh"] .mono { color: var(--q-t-3) !important; letter-spacing: 0.08em; }
+.topbar .tb-group[title^="last refresh"] .num  { color: var(--q-t-1); }
+
+/* ── Monumental ET clock + refresh affordance ───── */
+.topbar > .tb-spacer + .tb-group {
+  gap: 12px;
+}
+.topbar > .tb-spacer + .tb-group > .mono.dim {
+  font-family: var(--q-font-mono);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--q-t-1) !important;
+  letter-spacing: 0.04em;
+  text-align: right;
+}
+.topbar > .tb-spacer + .tb-group .select,
+.topbar > .tb-spacer + .tb-group .icon-btn {
+  background: var(--q-bg-2);
+  border: 1px solid var(--q-line);
+  color: var(--q-t-2);
+  font-family: var(--q-font-mono);
+  font-size: var(--q-fs-pico);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.topbar > .tb-spacer + .tb-group .icon-btn:hover {
+  border-color: var(--q-crit-bord);
+  color: var(--q-crit);
+  background: var(--q-crit-soft);
+}
+
+/* Hide the heartbeat dot inside the brand stack — the new
+   status banner already conveys the same information and the
+   two side-by-side feel redundant. Keep the element so its
+   click target (scrollToServiceHealth) still works for users
+   who learned the affordance, just shrink it. */
+.topbar .v3-heartbeat {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+}
