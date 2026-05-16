@@ -108,8 +108,11 @@ async def status() -> dict[str, Any]:
         state = "amber"
         reasons.append("hermes: amber")
 
+    # `banner` is the human label the TopBar shows next to the status dot.
+    banner = {"green": "all clear", "amber": "needs attention", "red": "intervene"}.get(state, state)
     return {
         "state": state,
+        "banner": banner,
         "reasons": reasons,
         "detect_counts": {
             "critical": critical_24h,

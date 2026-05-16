@@ -177,13 +177,15 @@ export default function App() {
           <div className="col-span-12 lg:col-span-3 space-y-2">
             <RegimeChip
               kind="crypto"
-              regime={strategies.crypto.data?.regime ?? null}
+              regime={strategies.crypto.data?.regime?.current ?? null}
+              confidence={strategies.crypto.data?.regime?.probability ?? null}
               meta={strategies.crypto.data?._meta ?? null}
               polling={polling}
             />
             <RegimeChip
               kind="stocks"
-              regime={strategies.stocks.data?.regime ?? null}
+              regime={strategies.stocks.data?.regime?.current ?? null}
+              confidence={strategies.stocks.data?.regime?.probability ?? null}
               meta={strategies.stocks.data?._meta ?? null}
               polling={polling}
             />
@@ -213,7 +215,7 @@ export default function App() {
               openPositions={strategies.crypto.data?.open_positions ?? null}
               sharpe={metrics.data?.sharpe ?? null}
               winRatePct={metrics.data?.win_rate_pct ?? null}
-              regime={strategies.crypto.data?.regime ?? null}
+              regime={strategies.crypto.data?.regime?.current ?? null}
               status={
                 strategies.crypto.data == null
                   ? "unknown"
@@ -232,7 +234,7 @@ export default function App() {
               openPositions={strategies.stocks.data?.open_positions ?? null}
               sharpe={metrics.data?.sharpe ?? null}
               winRatePct={metrics.data?.win_rate_pct ?? null}
-              regime={strategies.stocks.data?.regime ?? null}
+              regime={strategies.stocks.data?.regime?.current ?? null}
               status={
                 strategies.stocks.data == null
                   ? "unknown"
@@ -251,7 +253,7 @@ export default function App() {
               openPositions={strategies.shark.data?.open_positions ?? null}
               sharpe={metrics.data?.sharpe ?? null}
               winRatePct={metrics.data?.win_rate_pct ?? null}
-              regime={strategies.shark.data?.regime ?? null}
+              regime={strategies.shark.data?.regime?.current ?? null}
               status={
                 strategies.shark.data == null
                   ? "unknown"

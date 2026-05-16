@@ -201,6 +201,10 @@ services:
       # the default at `/`). FastAPI mounts it via app.py's _V5SpaStaticFiles
       # block. Rebuild on host with `cd frontend-v5 && npm run build`.
       - ./frontend-v5/dist:/frontend-v5/dist:ro
+      # Hermes cron state + run history — surfaced via /api/v5/hermes/*.
+      # Read-only: dashboard never writes here (acks goes to a separate file
+      # the operator can choose to expose later).
+      - /home/saijayanthai/.hermes/cron:/root/.hermes/cron:ro
     environment:
       - USER_DATA_ROOT=/app/user_data
       - STOCKS_ROOT=/app/stocks

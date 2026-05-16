@@ -110,7 +110,9 @@ export type StrategyKind = "crypto-v4" | "stocks-wheel" | "shark";
 export interface StrategyPayload {
   kind: StrategyKind;
   enabled: boolean;
-  regime: string | null; // e.g. "bull-trend" | "chop" | "bear-crash"
+  // Producer returns full regime row from regime_log/stock_regime — label,
+  // confidence, and freshness. Not just the label.
+  regime: { current: string; probability: number | null; ts: string | null } | null;
   equity_usd: number;
   day_pnl_usd: number;
   day_pnl_pct: number;

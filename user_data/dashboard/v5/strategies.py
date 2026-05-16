@@ -167,7 +167,15 @@ async def get_strategy(kind: str = FastPath(..., description="crypto-v4 | stocks
             },
         )
     try:
-        return _DISPATCH[kind]()
+        out = _DISPATCH[kind]()
+        # Frontend-v5 types (StrategyPayload) expect `equity_usd`; producer
+        # emits `equity`. Alias additively so both names work.
+        if isinstance(out, dict) and "equity" in out and "equity_usd" not in out:
+            out["equity_usd"] = out["equity"]
+        # `enabled` defaults to True unless the producer set otherwise — the
+        # UI uses this to decide "running" vs "paused".
+        out.setdefault("enabled", True)
+        return out
     except Exception as exc:
         logger.exception("v5/strategies/%s: %s", kind, exc)
         raise HTTPException(

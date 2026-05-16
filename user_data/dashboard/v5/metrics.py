@@ -127,6 +127,16 @@ async def get_metrics(lookback_days: int = Query(30, ge=1, le=365)) -> dict:
             stocks_returns=stocks_rets,
         )
         snap["_meta"]["lookback_days"] = lookback_days
+        # Top-level aggregates for the v1 hero strips — the frontend reads
+        # `metrics.sharpe` and `metrics.win_rate_pct` directly. Prefer the
+        # combined/stocks side when both exist; fall back to crypto.
+        for side_name in ("stocks", "crypto"):
+            side = snap.get(side_name) or {}
+            if side.get("sharpe") is not None:
+                snap.setdefault("sharpe", side.get("sharpe"))
+                snap.setdefault("max_dd_pct", side.get("max_dd_pct"))
+                snap.setdefault("win_rate_pct", side.get("win_rate_pct"))
+                break
         return snap
     except Exception as exc:
         logger.exception("v5/metrics: %s", exc)
