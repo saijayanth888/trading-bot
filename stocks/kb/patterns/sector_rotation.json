@@ -1,218 +1,218 @@
 {
-  "computed_at": "2026-05-01T21:15:13.952503Z",
+  "computed_at": "2026-05-16T15:01:05.201544Z",
   "lookback_days": 60,
   "sectors": {
     "Technology": {
       "etf": "XLK",
-      "return_1d_pct": 1.5213,
-      "return_5d_pct": 0.9734,
-      "return_20d_pct": 19.0233,
-      "return_60d_pct": 17.3021,
-      "return_126d_pct": 6.7058
+      "return_1d_pct": -1.7857,
+      "return_5d_pct": 0.4273,
+      "return_20d_pct": 14.2191,
+      "return_60d_pct": 25.8963,
+      "return_126d_pct": 20.2374
     },
     "Financials": {
       "etf": "XLF",
-      "return_1d_pct": -0.4027,
-      "return_5d_pct": 0.9622,
-      "return_20d_pct": 4.8446,
-      "return_60d_pct": -3.2234,
-      "return_126d_pct": 0.5809
+      "return_1d_pct": -0.3217,
+      "return_5d_pct": -0.2342,
+      "return_20d_pct": -2.5172,
+      "return_60d_pct": -1.4649,
+      "return_126d_pct": -3.9278
     },
     "Healthcare": {
       "etf": "XLV",
-      "return_1d_pct": -0.514,
-      "return_5d_pct": 0.6657,
-      "return_20d_pct": -1.1205,
-      "return_60d_pct": -6.5714,
-      "return_126d_pct": 1.6171
+      "return_1d_pct": -1.0537,
+      "return_5d_pct": 1.0834,
+      "return_20d_pct": -2.477,
+      "return_60d_pct": -7.365,
+      "return_126d_pct": -4.2533
     },
     "Energy": {
       "etf": "XLE",
-      "return_1d_pct": -1.3416,
-      "return_5d_pct": 3.4101,
-      "return_20d_pct": -0.7256,
-      "return_60d_pct": 12.1212,
-      "return_126d_pct": 35.678
+      "return_1d_pct": 2.35,
+      "return_5d_pct": 6.7612,
+      "return_20d_pct": 8.1106,
+      "return_60d_pct": 8.4656,
+      "return_126d_pct": 33.7759
     },
     "Consumer Discretionary": {
       "etf": "XLY",
-      "return_1d_pct": 0.2366,
-      "return_5d_pct": -0.059,
-      "return_20d_pct": 9.6667,
-      "return_60d_pct": -1.0676,
-      "return_126d_pct": -0.3612
+      "return_1d_pct": -1.816,
+      "return_5d_pct": -3.0536,
+      "return_20d_pct": -3.2509,
+      "return_60d_pct": 0.4526,
+      "return_126d_pct": -1.6585
     },
     "Communication Services": {
       "etf": "XLC",
-      "return_1d_pct": 0.2447,
-      "return_5d_pct": 1.0254,
-      "return_20d_pct": 4.554,
-      "return_60d_pct": 0.2792,
-      "return_126d_pct": 0.9905
+      "return_1d_pct": -0.9051,
+      "return_5d_pct": -0.7525,
+      "return_20d_pct": -2.5197,
+      "return_60d_pct": 1.0623,
+      "return_126d_pct": 2.8718
     },
     "Industrials": {
       "etf": "XLI",
-      "return_1d_pct": -0.9222,
-      "return_5d_pct": 0.2899,
-      "return_20d_pct": 5.6237,
-      "return_60d_pct": 2.3914,
-      "return_126d_pct": 12.2664
+      "return_1d_pct": -1.7822,
+      "return_5d_pct": -1.0565,
+      "return_20d_pct": -1.1877,
+      "return_60d_pct": -2.575,
+      "return_126d_pct": 11.6984
     },
     "Materials": {
       "etf": "XLB",
-      "return_1d_pct": -0.2138,
-      "return_5d_pct": -1.1169,
-      "return_20d_pct": 1.8748,
-      "return_60d_pct": -0.6001,
-      "return_126d_pct": 18.646
+      "return_1d_pct": -2.6326,
+      "return_5d_pct": -2.5099,
+      "return_20d_pct": -3.0642,
+      "return_60d_pct": -4.3908,
+      "return_126d_pct": 15.2084
     },
     "Utilities": {
       "etf": "XLU",
-      "return_1d_pct": -0.6405,
-      "return_5d_pct": 0.8014,
-      "return_20d_pct": 0.3883,
-      "return_60d_pct": 8.8146,
-      "return_126d_pct": 4.7962
+      "return_1d_pct": -2.3157,
+      "return_5d_pct": -1.8788,
+      "return_20d_pct": -4.9404,
+      "return_60d_pct": -4.214,
+      "return_126d_pct": -1.0153
     },
     "Real Estate": {
       "etf": "XLRE",
-      "return_1d_pct": -0.2252,
-      "return_5d_pct": 1.1182,
-      "return_20d_pct": 6.4377,
-      "return_60d_pct": 7.5747,
-      "return_126d_pct": 10.9414
+      "return_1d_pct": -1.5716,
+      "return_5d_pct": -2.7127,
+      "return_20d_pct": -2.8658,
+      "return_60d_pct": 0.7108,
+      "return_126d_pct": 6.31
     },
     "Consumer Staples": {
       "etf": "XLP",
-      "return_1d_pct": -0.1661,
-      "return_5d_pct": 1.1177,
-      "return_20d_pct": 2.7225,
-      "return_60d_pct": -2.7171,
-      "return_126d_pct": 11.311
+      "return_1d_pct": -0.3766,
+      "return_5d_pct": 0.5583,
+      "return_20d_pct": 2.6496,
+      "return_60d_pct": -2.902,
+      "return_126d_pct": 11.0018
     }
   },
   "leadership_ranking": [
     {
       "rank": 1,
       "sector": "Technology",
-      "return_20d_pct": 19.0233
+      "return_20d_pct": 14.2191
     },
     {
       "rank": 2,
-      "sector": "Consumer Discretionary",
-      "return_20d_pct": 9.6667
+      "sector": "Energy",
+      "return_20d_pct": 8.1106
     },
     {
       "rank": 3,
-      "sector": "Real Estate",
-      "return_20d_pct": 6.4377
+      "sector": "Consumer Staples",
+      "return_20d_pct": 2.6496
     },
     {
       "rank": 4,
       "sector": "Industrials",
-      "return_20d_pct": 5.6237
+      "return_20d_pct": -1.1877
     },
     {
       "rank": 5,
-      "sector": "Financials",
-      "return_20d_pct": 4.8446
+      "sector": "Healthcare",
+      "return_20d_pct": -2.477
     },
     {
       "rank": 6,
-      "sector": "Communication Services",
-      "return_20d_pct": 4.554
+      "sector": "Financials",
+      "return_20d_pct": -2.5172
     },
     {
       "rank": 7,
-      "sector": "Consumer Staples",
-      "return_20d_pct": 2.7225
+      "sector": "Communication Services",
+      "return_20d_pct": -2.5197
     },
     {
       "rank": 8,
-      "sector": "Materials",
-      "return_20d_pct": 1.8748
+      "sector": "Real Estate",
+      "return_20d_pct": -2.8658
     },
     {
       "rank": 9,
-      "sector": "Utilities",
-      "return_20d_pct": 0.3883
+      "sector": "Materials",
+      "return_20d_pct": -3.0642
     },
     {
       "rank": 10,
-      "sector": "Energy",
-      "return_20d_pct": -0.7256
+      "sector": "Consumer Discretionary",
+      "return_20d_pct": -3.2509
     },
     {
       "rank": 11,
-      "sector": "Healthcare",
-      "return_20d_pct": -1.1205
+      "sector": "Utilities",
+      "return_20d_pct": -4.9404
     }
   ],
   "momentum_6m_ranking": [
     {
       "rank": 1,
       "sector": "Energy",
-      "return_126d_pct": 35.678
+      "return_126d_pct": 33.7759
     },
     {
       "rank": 2,
-      "sector": "Materials",
-      "return_126d_pct": 18.646
+      "sector": "Technology",
+      "return_126d_pct": 20.2374
     },
     {
       "rank": 3,
-      "sector": "Industrials",
-      "return_126d_pct": 12.2664
+      "sector": "Materials",
+      "return_126d_pct": 15.2084
     },
     {
       "rank": 4,
-      "sector": "Consumer Staples",
-      "return_126d_pct": 11.311
+      "sector": "Industrials",
+      "return_126d_pct": 11.6984
     },
     {
       "rank": 5,
-      "sector": "Real Estate",
-      "return_126d_pct": 10.9414
+      "sector": "Consumer Staples",
+      "return_126d_pct": 11.0018
     },
     {
       "rank": 6,
-      "sector": "Technology",
-      "return_126d_pct": 6.7058
+      "sector": "Real Estate",
+      "return_126d_pct": 6.31
     },
     {
       "rank": 7,
-      "sector": "Utilities",
-      "return_126d_pct": 4.7962
+      "sector": "Communication Services",
+      "return_126d_pct": 2.8718
     },
     {
       "rank": 8,
-      "sector": "Healthcare",
-      "return_126d_pct": 1.6171
+      "sector": "Utilities",
+      "return_126d_pct": -1.0153
     },
     {
       "rank": 9,
-      "sector": "Communication Services",
-      "return_126d_pct": 0.9905
+      "sector": "Consumer Discretionary",
+      "return_126d_pct": -1.6585
     },
     {
       "rank": 10,
       "sector": "Financials",
-      "return_126d_pct": 0.5809
+      "return_126d_pct": -3.9278
     },
     {
       "rank": 11,
-      "sector": "Consumer Discretionary",
-      "return_126d_pct": -0.3612
+      "sector": "Healthcare",
+      "return_126d_pct": -4.2533
     }
   ],
   "top_3_sectors": [
     "Energy",
-    "Materials",
-    "Industrials"
+    "Technology",
+    "Materials"
   ],
   "bottom_3_sectors": [
-    "Communication Services",
+    "Consumer Discretionary",
     "Financials",
-    "Consumer Discretionary"
+    "Healthcare"
   ]
 }

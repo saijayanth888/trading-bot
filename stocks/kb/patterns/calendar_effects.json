@@ -1,37 +1,37 @@
 {
-  "computed_at": "2026-05-01T21:15:13.921440Z",
+  "computed_at": "2026-05-16T15:01:05.189653Z",
   "source_ticker": "SPY",
   "lookback_bars": 503,
   "day_of_week": {
     "Mon": {
       "n": 96,
-      "avg_return_pct": 0.1913,
-      "win_rate": 0.6875,
+      "avg_return_pct": 0.1791,
+      "win_rate": 0.6771,
       "median_return_pct": 0.1952
     },
     "Tue": {
       "n": 105,
-      "avg_return_pct": 0.0536,
+      "avg_return_pct": 0.073,
       "win_rate": 0.5429,
       "median_return_pct": 0.0654
     },
     "Wed": {
       "n": 102,
-      "avg_return_pct": 0.2391,
-      "win_rate": 0.6078,
-      "median_return_pct": 0.242
+      "avg_return_pct": 0.2625,
+      "win_rate": 0.6275,
+      "median_return_pct": 0.3167
     },
     "Thu": {
       "n": 98,
-      "avg_return_pct": -0.1379,
-      "win_rate": 0.4694,
-      "median_return_pct": -0.0182
+      "avg_return_pct": -0.1489,
+      "win_rate": 0.4592,
+      "median_return_pct": -0.038
     },
     "Fri": {
       "n": 102,
-      "avg_return_pct": 0.046,
-      "win_rate": 0.5686,
-      "median_return_pct": 0.1269
+      "avg_return_pct": 0.0289,
+      "win_rate": 0.5588,
+      "median_return_pct": 0.1159
     }
   },
   "month_of_year": {
@@ -51,14 +51,14 @@
       "win_rate": 0.4186
     },
     "Apr": {
-      "n": 43,
-      "avg_return_pct": 0.1981,
-      "win_rate": 0.6279
+      "n": 42,
+      "avg_return_pct": 0.2393,
+      "win_rate": 0.6429
     },
     "May": {
-      "n": 44,
-      "avg_return_pct": 0.2614,
-      "win_rate": 0.6591
+      "n": 45,
+      "avg_return_pct": 0.2313,
+      "win_rate": 0.6222
     },
     "Jun": {
       "n": 39,

@@ -1,1 +1,47 @@
-{}
+{
+  "HOOD260522P00078000": {
+    "BEAR_VOLATILE": {
+      "trades": 1,
+      "wins": 0,
+      "win_rate": 0.0,
+      "avg_pnl": -57.143,
+      "expectancy": -57.143
+    }
+  },
+  "MARA260522P00012000": {
+    "BEAR_VOLATILE": {
+      "trades": 1,
+      "wins": 0,
+      "win_rate": 0.0,
+      "avg_pnl": -105.556,
+      "expectancy": -105.556
+    }
+  },
+  "NVDA260522P00215000": {
+    "BEAR_VOLATILE": {
+      "trades": 1,
+      "wins": 0,
+      "win_rate": 0.0,
+      "avg_pnl": -35.294,
+      "expectancy": -35.294
+    }
+  },
+  "PLTR260522P00130000": {
+    "BEAR_VOLATILE": {
+      "trades": 1,
+      "wins": 0,
+      "win_rate": 0.0,
+      "avg_pnl": -28.505,
+      "expectancy": -28.505
+    }
+  },
+  "SOFI260522P00015500": {
+    "BEAR_VOLATILE": {
+      "trades": 1,
+      "wins": 0,
+      "win_rate": 0.0,
+      "avg_pnl": -45.714,
+      "expectancy": -45.714
+    }
+  }
+}
