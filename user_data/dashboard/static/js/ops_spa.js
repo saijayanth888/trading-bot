@@ -322,6 +322,10 @@
     const closedPnl = Number(cp.day_pnl_usd ?? 0);
     const srcs = cp.sources || {};
     const cryptoUnrl = Number(srcs.crypto_unrealised_pnl ?? 0);
+    // Per-side equity breakdown — surfaces crypto/stocks split next to the
+    // combined CAPITAL tile (operator ask 2026-05-16).
+    const cryptoEquity = Number(cp.crypto_equity ?? 0);
+    const stocksEquity = Number(cp.stocks_equity ?? 0);
     // B1 fix (2026-05-16): the previous `stocksMove = stocksEq - stocksPeak`
     // was the all-time peak-to-current DRAWDOWN, NOT today's stocks move.
     // It poisoned LIVE DAY P&L (e.g. on 2026-05-16 it spuriously added
@@ -343,9 +347,14 @@
     const openCrypto = Number(tr.open_count ?? 0);
     const totalOpen = openCrypto + wheelOpen;
     const dd = Math.abs(Number(cp.combined_drawdown_pct ?? 0));
+    // Expose the top wheel open position so the OPEN tile can show NVDA
+    // strike/credit/DTE inline (operator ask 2026-05-16).
+    const wheelOpenList = ((stocks.wheel || {}).open_positions || []);
+    const wheelTop = wheelOpenList[0] || null;
     return {
       cpSlot, equity, peak, closedPnl, cryptoUnrl, stocksMove, liveDayPnl, liveDayPct,
       haltFrac, closedToday, totalOpen, openCrypto, wheelOpen, dd, baseCap,
+      cryptoEquity, stocksEquity, wheelTop,
     };
   }
 
@@ -458,6 +467,7 @@
     const {
       cpSlot, equity, peak, closedPnl, cryptoUnrl, stocksMove, liveDayPnl, liveDayPct,
       haltFrac, closedToday, totalOpen, openCrypto, wheelOpen, dd,
+      cryptoEquity, stocksEquity, wheelTop,
     } = m;
 
     const dayCls = liveDayPnl >= 0 ? "up" : "down";
@@ -521,14 +531,30 @@
           })
         ),
         h("div", { className: "v3-score-hero-meta" },
-          stat("Capital", h("span", { className: "v3-num " + "mono", style: { fontSize: "var(--t-lg)", fontWeight: 500 } }, "$" + fmtUSD(equity))),
+          stat("Capital", h("div", { style: { display: "flex", flexDirection: "column", gap: 2 } },
+            h("span", { className: "v3-num " + "mono", style: { fontSize: "var(--t-lg)", fontWeight: 500 } }, "$" + fmtUSD(equity)),
+            (cryptoEquity > 0 || stocksEquity > 0)
+              ? h("span", { className: "mono dim", style: { fontSize: "var(--t-2xs)", letterSpacing: ".02em" } },
+                  "crypto $" + fmtUSD(cryptoEquity) + " · stocks $" + fmtUSD(stocksEquity))
+              : null
+          )),
           stat("Realized today", h("span", { className: cls("v3-num", "mono", closedPnl >= 0 ? "up" : "down"), style: { fontSize: "var(--t-md)", fontWeight: 500 } },
             (closedPnl >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(closedPnl)))),
           stat("Unrealized", h("span", { className: cls("v3-num", "mono", (cryptoUnrl + stocksMove) >= 0 ? "up" : "down"), style: { fontSize: "var(--t-md)", fontWeight: 500 } },
             (cryptoUnrl + stocksMove >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(cryptoUnrl + stocksMove)))),
           stat("Drawdown", h("span", { className: cls("v3-num", "mono", ddCls), style: { fontSize: "var(--t-md)", fontWeight: 500 } }, dd.toFixed(2) + "%")),
           stat("Peak", h("span", { className: "v3-num mono", style: { fontSize: "var(--t-md)", fontWeight: 500 } }, "$" + fmtUSD(peak))),
-          stat("Open", h("span", { className: "v3-num mono", style: { fontSize: "var(--t-md)", fontWeight: 500 } }, totalOpen + " (" + openCrypto + "C + " + wheelOpen + "S)")),
+          stat("Open", h("div", { style: { display: "flex", flexDirection: "column", gap: 2 } },
+            h("span", { className: "v3-num mono", style: { fontSize: "var(--t-md)", fontWeight: 500 } }, totalOpen + " (" + openCrypto + "C + " + wheelOpen + "S)"),
+            wheelTop
+              ? h("span", { className: "mono dim", style: { fontSize: "var(--t-2xs)", letterSpacing: ".02em" } },
+                  String(wheelTop.underlying || "?") + " " +
+                  String(wheelTop.kind || "").replace("_", " ") + " " +
+                  String(wheelTop.strike || "?") + " · $" +
+                  fmtUSD(Number(wheelTop.entry_credit || 0)) + " credit" +
+                  (wheelTop.expiry ? " · exp " + String(wheelTop.expiry) : ""))
+              : null
+          )),
           stat("Closed today", h("span", { className: "v3-num mono", style: { fontSize: "var(--t-md)", fontWeight: 500 } }, String(closedToday)))
         ),
         h("div", { className: "v3-regime-edge", style: { background: regimeTint }, title: "BTC regime" }),

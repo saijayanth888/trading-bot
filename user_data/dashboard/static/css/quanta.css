@@ -3615,3 +3615,21 @@ table.t tbody tr.flash-sell { animation: flash-sell 200ms cubic-bezier(0.2, 0, 0
     font-size: var(--v3-t-hero-md, 32px);
   }
 }
+
+/* ────────────────────────────────────────────────────────────────────
+ * 2026-05-16 Phase H — surgical /ops scoreboard fixes
+ * --------------------------------------------------------------------
+ * Issues addressed:
+ *   (1) DDRibbon overlap — the 600px-wide gradient bar was anchored to
+ *       the left edge of the card-body and bled into the middle column
+ *       where the "LIVE DAY P&L" eyebrow lives. Right-align + shrink so
+ *       it sits cleanly over the DRAWDOWN column only (the third one).
+ * ──────────────────────────────────────────────────────────────────── */
+
+.v3-card-scoreboard > .card-body > .v3-dd-ribbon-wrap {
+  max-width: 380px;
+  width: 380px;
+  margin-left: auto;       /* right-align inside card-body */
+  margin-right: 0;
+  margin-bottom: 18px;     /* clearance from the hero grid below */
+}
