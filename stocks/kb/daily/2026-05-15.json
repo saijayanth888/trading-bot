@@ -1,0 +1,22 @@
+{
+  "date": "2026-05-15",
+  "equity": 100241.17,
+  "cash": 100831.17,
+  "day_pnl_dollars": 0.0,
+  "day_pnl_pct": 0.0,
+  "positions": [
+    {
+      "symbol": "NVDA260522P00220000",
+      "qty": -1.0,
+      "avg_entry_price": 6.2,
+      "current_price": 5.9,
+      "unrealized_pl": 30.0,
+      "unrealized_plpc": 0.04839,
+      "market_value": -590.0,
+      "side": "short",
+      "asset_class": "us_option"
+    }
+  ],
+  "trades_today": 0,
+  "trades_this_week": 5
+}
