@@ -31,7 +31,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import ops_routes, v4_routes
+from . import legacy_proxy, ops_routes, v4_routes
 from .data_sources import (
     fetch_champion,
     fetch_coinbase_candles,
@@ -89,6 +89,24 @@ app.include_router(ops_routes.router)
 # /api/v4/* JSON + SSE surfaces for the new debate / Monte Carlo / adapter /
 # weekly / parity / screening pages.
 v4_routes.mount(app)
+
+# V5 dashboard redesign — aggregates portfolio / positions / metrics /
+# strategies (Builder A) + status / alerts / actions / hermes / regime_config /
+# decisions / mcp (Builder B). Imported lazily inside the module so a partial
+# deploy where one builder's routers haven't landed still serves the rest.
+try:
+    from .v5 import v5_router  # noqa: E402  (kept after v4_routes.mount per import order)
+    app.include_router(v5_router)
+    logger.info("v5: router mounted")
+except Exception as exc:  # pragma: no cover — fail-soft for partial deploys
+    logger.warning("v5: router failed to mount: %s", exc)
+
+# Legacy /api/ops/* and /api/v4/* deprecation middleware. Mutating routes are
+# proxied to v5; GET routes pass through with `Deprecation: true` + a
+# `Link: <v5>; rel="successor-version"` header. NEVER 410 a mutating route
+# (spec §5.3 — `unified_risk.py:802` POSTs /api/ops/pause for the circuit
+# breaker; a 410 would silently break the safety brake).
+legacy_proxy.install(app)
 
 
 # ---------------------------------------------------------------------------
