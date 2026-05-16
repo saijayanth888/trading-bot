@@ -121,6 +121,13 @@ legacy_proxy.install(app)
 #                   every Hermes cron per functional-debate G1)
 
 
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request) -> HTMLResponse:
+    """Root redirects to /ops — the operator console is the only surface."""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/ops", status_code=307)
+
+
 @app.get("/legacy", response_class=HTMLResponse)
 async def legacy_dashboard(request: Request) -> HTMLResponse:
     """The original dashboard_spa.html, preserved during the deprecation
@@ -129,29 +136,18 @@ async def legacy_dashboard(request: Request) -> HTMLResponse:
 
 
 # ---------------------------------------------------------------------------
-# V5 SPA static mount at `/`  (MUST be registered after every explicit route
-# above — FastAPI route resolution is order-dependent, and this is a catch-
-# all that falls back to index.html on 404 for client-side routing).
+# /ops-design static assets — serves the cloud-Claude design bundle
+# (tokens.css + shared.jsx + operator.jsx + telemetry.jsx + data.js).
+# Used by /ops (Direction A only) and /ops/design-canvas (both directions).
 # ---------------------------------------------------------------------------
-_V5_DIST = HERE.parents[1] / "frontend-v5" / "dist"
-if _V5_DIST.is_dir():
-    from starlette.exceptions import HTTPException as _StarletteHTTPException
-
-    class _V5SpaStaticFiles(StaticFiles):
-        async def get_response(self, path, scope):
-            try:
-                return await super().get_response(path, scope)
-            except _StarletteHTTPException as exc:
-                if exc.status_code == 404:
-                    return await super().get_response("index.html", scope)
-                raise
-
-    app.mount("/", _V5SpaStaticFiles(directory=str(_V5_DIST), html=True), name="v5_spa")
-    logger.info("v5: SPA mounted at / from %s", _V5_DIST)
+_OPS_DESIGN = HERE.parents[1] / "ops-design"
+if _OPS_DESIGN.is_dir():
+    app.mount("/ops-design", StaticFiles(directory=str(_OPS_DESIGN)), name="ops_design")
+    logger.info("ops-design: assets mounted at /ops-design from %s", _OPS_DESIGN)
 else:
     logger.warning(
-        "frontend-v5/dist not present — run `cd frontend-v5 && npm run build`. "
-        "/api/v5/* endpoints are still live; only the SPA shell is unavailable."
+        "ops-design/ not present — /ops will fall back to the legacy SPA. "
+        "Copy the cloud-Claude design bundle to %s.", _OPS_DESIGN,
     )
 
 

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=1600, initial-scale=1" />
+  <title>Quanta · Operator Console</title>
+  <link rel="stylesheet" href="/ops-design/styles/tokens.css" />
+  <style>
+    html, body { margin: 0; padding: 0; min-height: 100vh; background: var(--q-bg-1); }
+    body { font-family: var(--q-font-ui); color: var(--q-t-1); }
+    #root { min-height: 100vh; background: var(--q-bg-1); }
+  </style>
+
+  <!-- React + Babel pinned (matches the design source). UMD, no build step. -->
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js"></script>
+
+  <!-- Mock state (will be replaced by /api/v5/* hooks in a follow-up). -->
+  <script src="/ops-design/views/data.js"></script>
+
+  <!-- Shared primitives + the Operator (Direction A) view. -->
+  <script type="text/babel" src="/ops-design/views/shared.jsx"></script>
+  <script type="text/babel" src="/ops-design/views/operator.jsx"></script>
+</head>
+<body class="q-root">
+  <div id="root"></div>
+  <script type="text/babel" data-presets="react">
+    // `Operator` is assigned onto window by views/operator.jsx — every Babel
+    // script runs in global scope.
+    function App() {
+      return <Operator />;
+    }
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>

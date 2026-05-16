@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Quanta · Operator Console — Redesign Directions</title>
+  <link rel="stylesheet" href="styles/tokens.css" />
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; background: #f0eee9; }
+    /* canvas-side notes get their own font + look so they read as commentary */
+    .qn-note {
+      font-family: "Geist", system-ui, sans-serif;
+      font-size: 12.5px;
+      line-height: 1.55;
+      color: rgba(40,30,20,0.78);
+      letter-spacing: 0;
+    }
+    .qn-note h4 {
+      margin: 0 0 6px;
+      font-family: "Geist Mono", ui-monospace, monospace;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.10em;
+      text-transform: uppercase;
+      color: rgba(40,30,20,0.55);
+    }
+    .qn-note strong { color: rgba(20,15,10,1); font-weight: 600; }
+    .qn-pill {
+      display: inline-block;
+      padding: 1px 7px;
+      border-radius: 999px;
+      background: rgba(40,30,20,0.06);
+      font-family: "Geist Mono", monospace;
+      font-size: 10.5px;
+      letter-spacing: 0.04em;
+      color: rgba(40,30,20,0.75);
+    }
+  </style>
+
+  <!-- React + Babel (pinned) -->
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+  <!-- shared mock state -->
+  <script src="views/data.js"></script>
+
+  <!-- design canvas + shared primitives + directions -->
+  <script type="text/babel" src="design-canvas.jsx"></script>
+  <script type="text/babel" src="views/shared.jsx"></script>
+  <script type="text/babel" src="views/operator.jsx"></script>
+  <script type="text/babel" src="views/telemetry.jsx"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel" data-presets="react">
+    // DesignCanvas, DCSection, DCArtboard, DCPostIt come in as global
+    // function declarations from design-canvas.jsx; Operator + Telemetry
+    // are assigned onto window from their respective files. Reference them
+    // by name — no need to destructure (would conflict with the existing
+    // top-level bindings).
+
+    function App() {
+      return (
+        <DesignCanvas minScale={0.05} maxScale={3}>
+          {/* ── INTRO SECTION ───────────────────────────────────────── */}
+          <DCSection
+            id="intro"
+            title="Quanta · Operator Console"
+            subtitle="2 directions on the same data. Pick one for the implementation phase. Saturday 13:29 ET · NYSE closed · combined equity $118,292.03 · DD −1.53% · 1 cap-breach on the gate.">
+            <DCArtboard id="spec" label="Brief · visual system · what to compare" width={780} height={620}>
+              <div style={{ padding: 36, background: "#fbfaf6", height: "100%", boxSizing: "border-box",
+                fontFamily: "Geist, system-ui, sans-serif", color: "#1b1812", fontSize: 13, lineHeight: 1.55 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18 }}>
+                  <div style={{ width: 26, height: 26, borderRadius: 6,
+                    background: "linear-gradient(135deg, #8494FF, #6B7DFF)",
+                    boxShadow: "0 0 12px rgba(132,148,255,0.5)",
+                    display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="#fff" strokeWidth="2">
+                      <path d="M2 11 L7 3 L12 11 Z M2 11 H12"/>
+                    </svg>
+                  </div>
+                  <span style={{ fontWeight: 700, fontSize: 15, letterSpacing: "-0.02em" }}>quanta · v2.6 design review</span>
+                  <span style={{ marginLeft: "auto", fontFamily: "Geist Mono, monospace", fontSize: 10, letterSpacing: "0.10em", color: "rgba(20,15,10,0.5)", textTransform: "uppercase" }}>2026-05-16 · sat</span>
+                </div>
+
+                <h1 style={{ fontSize: 24, fontWeight: 600, letterSpacing: "-0.02em", margin: "0 0 14px", lineHeight: 1.2 }}>
+                  Same data, two operator postures.
+                </h1>
+                <p style={{ margin: "0 0 22px", color: "rgba(40,30,20,0.75)" }}>
+                  Replace the current left-sidebar/anchor-scroll ops console with a single scroll-zoned page.
+                  No tabs, no nav, no scrolling away from anything load-bearing. The five questions —
+                  <strong> am I OK</strong>, <strong>what just happened</strong>, <strong>should I intervene</strong>,
+                  <strong> why did the agent do that</strong>, <strong>is this data still real</strong> —
+                  all answerable from the fold.
+                </p>
+
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 22 }}>
+                  <Block letter="A" title="Operator" sub="Stripe Dashboard × Linear × Vercel"
+                    bullets={[
+                      "Monumental ribbon: equity · day · drawdown on one row, big type",
+                      "Per-agent strips, full-width — V4 → Wheel → Shark → Hermes",
+                      "Agent-flow diagram with animated packets in its own section",
+                      "Decisive hierarchy via weight + scale, not borders",
+                      "Generous gutters (40px page, 28px card)",
+                      "Picks: confident operator, fewer eye-jumps, calmer feel",
+                    ]}/>
+                  <Block letter="B" title="Telemetry" sub="Datadog × Grafana × Sentry"
+                    bullets={[
+                      "6-cell KPI strip with sparkline / ribbon / pip-row per cell",
+                      "Agent-flow side-by-side with Hermes next-fire (no row split)",
+                      "V4 · Wheel · Shark in a 3-column grid below the fold-line",
+                      "Risk · runs · ModelForge on a single dense row",
+                      "Inline pill nav · system telemetry footer (CPU / heap / WS)",
+                      "Picks: glance-heavy operator, ~30% more on the fold",
+                    ]}/>
+                </div>
+
+                <h4 style={{ fontFamily: "Geist Mono, monospace", fontSize: 10, fontWeight: 600,
+                  letterSpacing: "0.10em", textTransform: "uppercase",
+                  color: "rgba(40,30,20,0.55)", margin: "26px 0 8px" }}>SHARED VISUAL SYSTEM · BOTH DIRECTIONS</h4>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 18,
+                  color: "rgba(40,30,20,0.75)", fontSize: 12 }}>
+                  <Spec head="Type" body={<>Geist Sans labels · <strong>Geist Mono</strong> for every numeric / entity / tag / eyebrow. Tabular nums everywhere. Display weight via scale (52px → 32px → 22px → 13px) and weight (500 / 600).</>}/>
+                  <Spec head="Status · Wong palette" body={<>Operational status uses Wong colors (color-blind safe). <span style={{color:"#56B4E9"}}>● blue</span> live / healthy. <span style={{color:"#E69F00"}}>● orange</span> degraded. <span style={{color:"#D55E00"}}>● vermillion</span> breach / kill. P&L is muted green/red, secondary.</>}/>
+                  <Spec head="Freshness" body={<>Every data-bearing element carries a chip. <span style={{color:"#56B4E9"}}>LIVE 12s</span> · <span style={{color:"#6E6E88"}}>CLOSED 17h</span> · <span style={{color:"#E69F00"}}>STALE</span> · <span style={{color:"#D55E00"}}>BROKEN</span>. Frozen-because-closed never reads as broken.</>}/>
+                  <Spec head="Agent Flow" body={<>Animated packets travel along edges between agents. Nodes pulse when active. The pipeline visibly breathes — that's the &quot;alive without being chatty&quot; goal.</>}/>
+                  <Spec head="V4 ticking" body={<>Random rows flash green/red briefly to suggest a fresh decision from the 5-min cron. Decision column color-coded by side (LONG / SHORT / FLAT).</>}/>
+                  <Spec head="Kill switch" body={<>Top-right corner. Click → text input → must type <strong>KILL</strong> → FIRE enables. Never accidentally clickable. Reachable in 1 mouse-move on any screen.</>}/>
+                </div>
+              </div>
+            </DCArtboard>
+          </DCSection>
+
+          {/* ── DIRECTION A ─────────────────────────────────────────── */}
+          <DCSection
+            id="dir-a"
+            title="Direction A · Operator"
+            subtitle="Stripe / Linear / Vercel. Monumental ribbon · per-agent strips · big breathing room.">
+            <DCArtboard id="op-full" label="Operator · full page" width={1600} height={3400}>
+              <Operator />
+            </DCArtboard>
+          </DCSection>
+
+          {/* ── DIRECTION B ─────────────────────────────────────────── */}
+          <DCSection
+            id="dir-b"
+            title="Direction B · Telemetry"
+            subtitle="Datadog / Grafana / Sentry. 6-cell KPI strip · 3-col agent grid · ~30% more on the fold.">
+            <DCArtboard id="tel-full" label="Telemetry · full page" width={1600} height={1620}>
+              <Telemetry />
+            </DCArtboard>
+          </DCSection>
+        </DesignCanvas>
+      );
+    }
+
+    function Block({ letter, title, sub, bullets }) {
+      return (
+        <div style={{ padding: 18, background: "#fff", borderRadius: 8,
+          boxShadow: "0 0 0 1px rgba(40,30,20,0.06), 0 4px 12px rgba(40,30,20,0.04)" }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 4 }}>
+            <span style={{ fontFamily: "Geist Mono, monospace", fontWeight: 700,
+              fontSize: 28, color: "#8494FF", letterSpacing: "-0.04em" }}>{letter}</span>
+            <span style={{ fontWeight: 600, fontSize: 17, letterSpacing: "-0.01em" }}>{title}</span>
+          </div>
+          <div style={{ fontFamily: "Geist Mono, monospace", fontSize: 10.5,
+            letterSpacing: "0.06em", color: "rgba(40,30,20,0.5)",
+            textTransform: "uppercase", marginBottom: 12 }}>{sub}</div>
+          <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex",
+            flexDirection: "column", gap: 6, fontSize: 12.5,
+            color: "rgba(40,30,20,0.78)" }}>
+            {bullets.map((b, i) => (
+              <li key={i} style={{ paddingLeft: 14, position: "relative", lineHeight: 1.45 }}>
+                <span style={{ position: "absolute", left: 0, top: 6, width: 5, height: 5,
+                  borderRadius: 3, background: "rgba(40,30,20,0.35)" }}/>
+                {b}
+              </li>
+            ))}
+          </ul>
+        </div>
+      );
+    }
+
+    function Spec({ head, body }) {
+      return (
+        <div>
+          <div style={{ fontWeight: 600, color: "#1b1812", marginBottom: 4, fontSize: 12.5 }}>{head}</div>
+          <div style={{ lineHeight: 1.5 }}>{body}</div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
