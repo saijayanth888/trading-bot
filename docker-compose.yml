@@ -197,6 +197,10 @@ services:
       # because FastAPI StaticFiles re-reads from disk on each request.
       # Path inside container matches v4_routes.py:V4_DIST resolution.
       - ./frontend-v4/dist:/frontend-v4/dist:ro
+      # frontend-v5 — the unified operator console (replaces /ops + /v4 as
+      # the default at `/`). FastAPI mounts it via app.py's _V5SpaStaticFiles
+      # block. Rebuild on host with `cd frontend-v5 && npm run build`.
+      - ./frontend-v5/dist:/frontend-v5/dist:ro
     environment:
       - USER_DATA_ROOT=/app/user_data
       - STOCKS_ROOT=/app/stocks

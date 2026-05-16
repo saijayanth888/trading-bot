@@ -112,11 +112,47 @@ legacy_proxy.install(app)
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
+#
+# Cutover 2026-05-16: the new v5 operator console (frontend-v5/) replaces the
+# legacy dashboard_spa as the default at `/`. The legacy SPAs remain mounted:
+#   /ops          → ops_routes.make_html_route (operator's previous default)
+#   /v4/*         → v4_routes.mount (React-19 wave-2 SPA, deprecated)
+#   /legacy       → the original dashboard_spa.html (kept for one cycle of
+#                   every Hermes cron per functional-debate G1)
 
 
-@app.get("/", response_class=HTMLResponse)
-async def index(request: Request) -> HTMLResponse:
+@app.get("/legacy", response_class=HTMLResponse)
+async def legacy_dashboard(request: Request) -> HTMLResponse:
+    """The original dashboard_spa.html, preserved during the deprecation
+    window. Will be removed in a v1.1 cleanup ticket."""
     return templates.TemplateResponse(request, "dashboard_spa.html", {})
+
+
+# ---------------------------------------------------------------------------
+# V5 SPA static mount at `/`  (MUST be registered after every explicit route
+# above — FastAPI route resolution is order-dependent, and this is a catch-
+# all that falls back to index.html on 404 for client-side routing).
+# ---------------------------------------------------------------------------
+_V5_DIST = HERE.parents[1] / "frontend-v5" / "dist"
+if _V5_DIST.is_dir():
+    from starlette.exceptions import HTTPException as _StarletteHTTPException
+
+    class _V5SpaStaticFiles(StaticFiles):
+        async def get_response(self, path, scope):
+            try:
+                return await super().get_response(path, scope)
+            except _StarletteHTTPException as exc:
+                if exc.status_code == 404:
+                    return await super().get_response("index.html", scope)
+                raise
+
+    app.mount("/", _V5SpaStaticFiles(directory=str(_V5_DIST), html=True), name="v5_spa")
+    logger.info("v5: SPA mounted at / from %s", _V5_DIST)
+else:
+    logger.warning(
+        "frontend-v5/dist not present — run `cd frontend-v5 && npm run build`. "
+        "/api/v5/* endpoints are still live; only the SPA shell is unavailable."
+    )
 
 
 @app.get("/docs", response_class=HTMLResponse, name="docs_page")
