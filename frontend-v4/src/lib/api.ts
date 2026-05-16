@@ -18,6 +18,30 @@ export class ApiError extends Error {
   }
 }
 
+// Legacy `/api/*` and `/api/ops/*` routes wrap responses in a status envelope:
+//   { status: "ok"|"degraded"|"down", data: {...}, error: string|null, checked_at }
+// New `/api/v4/*` routes return the data directly. Both shapes flow through
+// apiGet, so we transparently unwrap the envelope when present — consumers
+// always receive the inner payload regardless of which route they call.
+// If the envelope's `error` field is set, it's surfaced as an ApiError so
+// react-query treats it as a failed fetch.
+function unwrapEnvelope<T>(body: unknown, status: number): T {
+  if (
+    body !== null &&
+    typeof body === "object" &&
+    "status" in body &&
+    "data" in body &&
+    "error" in body
+  ) {
+    const env = body as { status?: string; data: unknown; error?: unknown };
+    if (env.error) {
+      throw new ApiError(status, String(env.error), body);
+    }
+    return env.data as T;
+  }
+  return body as T;
+}
+
 export async function apiGet<T = unknown>(path: string, init?: RequestInit): Promise<T> {
   const url = `${BASE}${path}`;
   const res = await fetch(url, {
@@ -34,7 +58,7 @@ export async function apiGet<T = unknown>(path: string, init?: RequestInit): Pro
     }
     throw new ApiError(res.status, `${res.status} ${res.statusText} on ${path}`, body);
   }
-  return (await res.json()) as T;
+  return unwrapEnvelope<T>(await res.json(), res.status);
 }
 
 export async function apiPost<T = unknown>(
