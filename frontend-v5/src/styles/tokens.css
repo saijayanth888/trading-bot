@@ -1,0 +1,67 @@
+/* owner: builder-C
+ * Wong palette tokens — PRIMARY hue per spec §4.3 + frontend-debate G1.
+ * Severity ramps via opacity (0.5 info / 0.8 warning / 1.0 danger).
+ * P&L muted green/red is SECONDARY and lives only on numerals.
+ */
+
+:root,
+:root.dark,
+:root[data-theme="dark"] {
+  /* ----- surfaces ----- */
+  --bg-page: #07090c;
+  --bg-card: #0d1117;
+  --bg-card-2: #11161d;
+  --bg-inset: #161c25;
+  --bg-overlay: rgba(7, 9, 12, 0.78);
+
+  /* ----- text ----- */
+  --text-1: #e6edf3;
+  --text-2: #c9d1d9;
+  --text-3: #8b949e;
+  --text-4: #6e7681;
+
+  /* ----- strokes ----- */
+  --stroke-1: #1f2937;
+  --stroke-2: #2a3441;
+
+  /* ----- Wong PRIMARY palette ----- */
+  --wong-blue: #0072b2;
+  --wong-orange: #e69f00;
+  --wong-vermillion: #d55e00;
+  --wong-green: #009e73;
+  --wong-yellow: #f0e442;
+  --wong-sky: #56b4e9;
+  --wong-purple: #cc79a7;
+
+  /* ----- severity ramp (Wong-anchored, opacity-driven) ----- */
+  --sev-info-color: var(--wong-blue);
+  --sev-info-bg: rgba(0, 114, 178, 0.5);
+  --sev-warn-color: var(--wong-orange);
+  --sev-warn-bg: rgba(230, 159, 0, 0.8);
+  --sev-danger-color: var(--wong-vermillion);
+  --sev-danger-bg: rgba(213, 94, 0, 1);
+
+  /* ----- status pills ----- */
+  --status-clear: var(--wong-blue);
+  --status-watch: var(--wong-orange);
+  --status-halt: var(--wong-vermillion);
+
+  /* ----- P&L SECONDARY signal (muted, numerals only) ----- */
+  --pnl-up: #4ea882; /* muted green */
+  --pnl-down: #c97373; /* muted red */
+
+  /* ----- flash cell animations (200-400ms) ----- */
+  --flash-accent: rgba(86, 180, 233, 0.28);
+  --flash-up: rgba(78, 168, 130, 0.22);
+  --flash-down: rgba(201, 115, 115, 0.22);
+
+  /* ----- stale-chip ramps ----- */
+  --stale-fresh: var(--text-3);
+  --stale-intentional: var(--text-3);
+  --stale-warn: var(--wong-orange);
+  --stale-danger: var(--wong-vermillion);
+
+  /* ----- typography ----- */
+  --font-sans: "Geist", Inter, system-ui, sans-serif;
+  --font-mono: "Geist Mono", "JetBrains Mono", ui-monospace, monospace;
+}

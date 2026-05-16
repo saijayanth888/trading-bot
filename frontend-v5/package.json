@@ -1,0 +1,41 @@
+{
+  "name": "quanta-frontend-v5",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Quanta Operator Console v5 — monitor / detect / intervene unified console (Vite + React 19 + Tailwind 4 + TanStack Query v5)",
+  "scripts": {
+    "dev": "vite",
+    "codegen": "bash scripts/codegen.sh",
+    "build": "npm run codegen && tsc --noEmit && vite build",
+    "build:nocheck": "vite build",
+    "preview": "vite preview --port 4174",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fontsource/geist-mono": "5.2.7",
+    "@fontsource/geist-sans": "5.2.5",
+    "@radix-ui/react-collapsible": "1.1.2",
+    "@radix-ui/react-dialog": "1.1.4",
+    "@radix-ui/react-slot": "1.1.1",
+    "@tanstack/react-query": "5.62.0",
+    "clsx": "2.1.1",
+    "lucide-react": "0.471.0",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "recharts": "2.15.0",
+    "tailwind-merge": "2.6.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.1.13",
+    "@types/node": "22.10.5",
+    "@types/react": "19.0.4",
+    "@types/react-dom": "19.0.2",
+    "@vitejs/plugin-react": "4.3.4",
+    "openapi-typescript": "7.4.4",
+    "postcss": "8.5.1",
+    "tailwindcss": "4.1.13",
+    "typescript": "5.7.3",
+    "vite": "6.0.7"
+  }
+}
