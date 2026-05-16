@@ -182,32 +182,36 @@ def require_mcp_key(
 # Mounted at app level so / and /ops live side-by-side; the router's prefix
 # is ``/api/ops`` so this view function is registered separately.
 #
-# 2026-05-16 redesign: /ops now serves the cloud-Claude design (Direction A:
-# Operator) from `ops-design/index.html`. The previous `ops_spa.html` template
-# is preserved at /ops/legacy for one cycle of every Hermes cron during
-# transition. The cloud-Claude pan/zoom canvas (both Direction A + B
-# side-by-side) is at /ops/design-canvas for design-team reference.
+# Routing:
+#   /ops               -> the LIVE operator console (ops_spa.html — the working
+#                         application with pair dashboard, live fetches, all
+#                         24 cards). This is the operator's habit; do NOT
+#                         replace with a static mockup.
+#   /ops/preview       -> the cloud-Claude redesign mockup (Direction A,
+#                         static window.Q data — for visual reference while
+#                         we progressively restyle the live SPA).
+#   /ops/design-canvas -> the pan/zoom canvas showing both Direction A
+#                         (Operator) and Direction B (Telemetry) side by side.
 def make_html_route(app):
     from pathlib import Path as _Path
     _OPS_DESIGN = _Path(__file__).resolve().parents[2] / "ops-design"
-    _NEW_INDEX = _OPS_DESIGN / "index.html"
+    _PREVIEW = _OPS_DESIGN / "index.html"
     _CANVAS = _OPS_DESIGN / "Trading Bot Redesign.html"
 
     @app.get("/ops", response_class=HTMLResponse, name="ops_page")
     async def ops_page(request: Request) -> HTMLResponse:
-        if _NEW_INDEX.is_file():
-            return HTMLResponse(_NEW_INDEX.read_text(encoding="utf-8"))
-        # Fallback: serve the legacy SPA if the design bundle is missing.
         return templates.TemplateResponse(request, "ops_spa.html", {})
 
-    @app.get("/ops/legacy", response_class=HTMLResponse, name="ops_page_legacy")
-    async def ops_page_legacy(request: Request) -> HTMLResponse:
-        """The pre-redesign ops_spa.html, preserved during the transition."""
-        return templates.TemplateResponse(request, "ops_spa.html", {})
+    @app.get("/ops/preview", response_class=HTMLResponse, name="ops_page_preview")
+    async def ops_page_preview(request: Request) -> HTMLResponse:
+        """Cloud-Claude redesign mockup — Direction A, static mock data."""
+        if _PREVIEW.is_file():
+            return HTMLResponse(_PREVIEW.read_text(encoding="utf-8"))
+        return HTMLResponse("<h1>design preview not present</h1>", status_code=404)
 
     @app.get("/ops/design-canvas", response_class=HTMLResponse, name="ops_design_canvas")
     async def ops_design_canvas(request: Request) -> HTMLResponse:
-        """Cloud-Claude pan/zoom canvas — both Operator (A) and Telemetry (B)."""
+        """Pan/zoom canvas — both Direction A (Operator) and B (Telemetry)."""
         if _CANVAS.is_file():
             return HTMLResponse(_CANVAS.read_text(encoding="utf-8"))
         return HTMLResponse("<h1>design canvas not present</h1>", status_code=404)
