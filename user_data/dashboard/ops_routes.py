@@ -5873,3 +5873,59 @@ async def cap_violations(hours: int = Query(168, ge=1, le=720)):
         },
         error=None if status == "ok" else f"{len(violations)} cap violation(s) in last {hours}h",
     )
+
+
+# ============================================================================
+# /api/ops/yesterday_pnl — prior trading day's realized P&L
+# Operator ask 2026-05-16: surface the −$1,274.71 from 2026-05-15 prominently
+# so the scoreboard isn't just "$0.00 today, markets closed" on weekends.
+# "Yesterday" = the most recent UTC day with at least one closed trade. Skips
+# empty days (so Sat/Sun shows Friday's number, not Saturday's $0.00).
+# ============================================================================
+@router.get("/yesterday_pnl")
+async def yesterday_pnl():
+    """SUM(pnl) over the most recent UTC trading day with any closed fills."""
+    import psycopg
+    from psycopg.rows import dict_row
+
+    try:
+        with psycopg.connect(ops_db._resolve_dsn(), row_factory=dict_row) as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH last_day AS (
+                  SELECT (closed_at AT TIME ZONE 'UTC')::date AS d
+                  FROM trade_journal
+                  WHERE closed_at IS NOT NULL
+                  ORDER BY closed_at DESC
+                  LIMIT 1
+                )
+                SELECT
+                  (SELECT d FROM last_day) AS day,
+                  COUNT(*) AS n_trades,
+                  COALESCE(SUM(pnl), 0)::float AS pnl_usd,
+                  COALESCE(MIN(pnl), 0)::float AS worst_pnl,
+                  COALESCE(MAX(pnl), 0)::float AS best_pnl,
+                  SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                  SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) AS losses
+                FROM trade_journal
+                WHERE (closed_at AT TIME ZONE 'UTC')::date = (SELECT d FROM last_day)
+                """,
+            )
+            r = cur.fetchone() or {}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("yesterday_pnl: %s", exc)
+        return _envelope("down", error=str(exc))
+
+    day = r.get("day")
+    return _envelope(
+        "ok",
+        data={
+            "day": day.isoformat() if day else None,
+            "n_trades": int(r.get("n_trades") or 0),
+            "pnl_usd": float(r.get("pnl_usd") or 0),
+            "worst_pnl": float(r.get("worst_pnl") or 0),
+            "best_pnl": float(r.get("best_pnl") or 0),
+            "wins": int(r.get("wins") or 0),
+            "losses": int(r.get("losses") or 0),
+        },
+    )

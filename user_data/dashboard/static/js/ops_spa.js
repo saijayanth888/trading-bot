@@ -166,6 +166,10 @@
     // the red banner at the top of TodayScoreboard when any historical
     // trade breached the cap (per Phase H operator ask 2026-05-16).
     cap_violations: "/api/ops/cap_violations",
+    // Most-recent UTC trading day's realized P&L (skips empty days, so
+    // weekends show Friday's number). Drives the YESTERDAY tile in the
+    // scoreboard meta row.
+    yesterday_pnl: "/api/ops/yesterday_pnl",
     sentiment: "/api/ops/sentiment",
     // stocks_sentiment endpoint removed 2026-05-11 — see ops_routes.py
     // comment. Shark Briefing card (data-num 13c) is the source of truth
@@ -504,6 +508,16 @@
     const cvData = envelopeData(cvSlot.env) || {};
     const cvList = Array.isArray(cvData.violations) ? cvData.violations : [];
     const worst = cvList[0] || null;
+
+    // Yesterday's realized PnL — surfaces the most recent UTC trading day's
+    // SUM(pnl) as a sub-row under REALIZED TODAY (operator ask 2026-05-16).
+    // Skips empty days so weekends show Friday's number, not Saturday's $0.
+    const ypSlot = slotState(data, "yesterday_pnl");
+    const yp = envelopeData(ypSlot.env) || {};
+    const ypPnl = Number(yp.pnl_usd ?? 0);
+    const ypDay = String(yp.day || "");
+    const ypN = Number(yp.n_trades ?? 0);
+    const ypShouldShow = ypN > 0 && ypDay;
     const capBanner = worst ? h("div", {
       style: {
         display: "flex", flexDirection: "column", gap: 4,
@@ -587,8 +601,16 @@
                   "crypto $" + fmtUSD(cryptoEquity) + " · stocks $" + fmtUSD(stocksEquity))
               : null
           )),
-          stat("Realized today", h("span", { className: cls("v3-num", "mono", closedPnl >= 0 ? "up" : "down"), style: { fontSize: "var(--t-md)", fontWeight: 500 } },
-            (closedPnl >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(closedPnl)))),
+          stat("Realized today", h("div", { style: { display: "flex", flexDirection: "column", gap: 2 } },
+            h("span", { className: cls("v3-num", "mono", closedPnl >= 0 ? "up" : "down"), style: { fontSize: "var(--t-md)", fontWeight: 500 } },
+              (closedPnl >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(closedPnl))),
+            ypShouldShow
+              ? h("span", { className: "mono dim", style: { fontSize: "var(--t-2xs)", letterSpacing: ".02em" } },
+                  "yday " + ypDay + " · " +
+                  (ypPnl >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(ypPnl)) +
+                  " · " + ypN + " trade" + (ypN === 1 ? "" : "s"))
+              : null
+          )),
           stat("Unrealized", h("span", { className: cls("v3-num", "mono", (cryptoUnrl + stocksMove) >= 0 ? "up" : "down"), style: { fontSize: "var(--t-md)", fontWeight: 500 } },
             (cryptoUnrl + stocksMove >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(cryptoUnrl + stocksMove)))),
           stat("Drawdown", h("span", { className: cls("v3-num", "mono", ddCls), style: { fontSize: "var(--t-md)", fontWeight: 500 } }, dd.toFixed(2) + "%")),
