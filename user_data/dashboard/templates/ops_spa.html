@@ -8,6 +8,12 @@
   <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='6' fill='%237c5cff'/></svg>" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <!-- Cloud-Claude redesign: preload Geist Sans + Geist Mono so the
+       monumental ribbon numerals and topbar eyebrow text avoid FOUT.
+       Both families are also @imported from inside quanta.css; the
+       preload here just front-loads the request. -->
+  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600;700&display=swap">
   <link rel="stylesheet" href="/static/css/quanta.css?v=v3-prod-005" />
 
   <!-- Theme + density boot (B-5) — seed <html> from localStorage BEFORE

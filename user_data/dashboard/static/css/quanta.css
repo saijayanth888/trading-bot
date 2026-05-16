@@ -2976,3 +2976,129 @@ table.t tbody tr.flash-sell { animation: flash-sell 200ms cubic-bezier(0.2, 0, 0
   font-family: var(--mono);
   color: var(--fg-2);
 }
+
+/* ============================================================
+   QUANTA · cloud-Claude redesign (Direction A · Operator)
+   ────────────────────────────────────────────────────────────
+   Pass 1 — design tokens (Wong palette + Geist + helpers).
+   Strictly additive: NO existing :root variable is renamed or
+   revalued; every new token is `--q-*` namespaced so it cannot
+   collide with the existing operator theme system (--bg-*,
+   --t-*, --fg-*, etc.). Helper classes are `.q-*` namespaced
+   for the same reason.
+
+   Spec source: ops-design/styles/tokens.css
+   ============================================================ */
+
+/* Geist Sans + Geist Mono — loaded once, shared by helpers
+   below. Existing surfaces continue to reference the legacy
+   `--mono` token (already Geist Mono); this @import is what
+   makes that token actually resolve to the cloud-Claude font
+   instead of the JetBrains/Menlo fallbacks. */
+@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600;700&display=swap");
+
+:root {
+  /* ── families ─────────────────────────────────── */
+  --q-font-ui:     "Geist", "Inter", system-ui, sans-serif;
+  --q-font-mono:   "Geist Mono", "JetBrains Mono", ui-monospace, Menlo, monospace;
+
+  /* ── surfaces (dark default) ──────────────────── */
+  --q-bg-0:        #06060B;   /* topbar · deepest      */
+  --q-bg-1:        #0A0A12;   /* page                  */
+  --q-bg-2:        #10101A;   /* card                  */
+  --q-bg-3:        #161622;   /* elevated / hover      */
+  --q-bg-inset:    #1C1C2A;   /* slot · track          */
+
+  /* ── borders · alpha-white ────────────────────── */
+  --q-line-subtle: rgba(255,255,255,0.04);
+  --q-line:        rgba(255,255,255,0.07);
+  --q-line-strong: rgba(255,255,255,0.13);
+  --q-line-focus:  rgba(132,148,255,0.55);
+
+  /* ── text ramp ────────────────────────────────── */
+  --q-t-1:         #EDEDF5;   /* primary               */
+  --q-t-2:         #9C9CB2;   /* secondary             */
+  --q-t-3:         #5E5E78;   /* tertiary · eyebrow    */
+  --q-t-4:         #3A3A50;   /* quaternary · staleness*/
+
+  /* ── accent · indigo (interactive, CTA, links) ── */
+  --q-accent:      #8494FF;
+  --q-accent-2:    #6B7DFF;
+  --q-accent-soft: rgba(132,148,255,0.10);
+  --q-accent-bord: rgba(132,148,255,0.28);
+
+  /* ── Wong palette · operational status ─────────
+   *   blue   = live / healthy / synced
+   *   orange = degraded / attention
+   *   vermil = critical / breach / kill
+   *   Color-blind safe at low saturation, pairs cleanly
+   *   with the dark surfaces.                          */
+  --q-ok:          #56B4E9;   /* Wong sky blue        */
+  --q-ok-soft:     rgba(86,180,233,0.10);
+  --q-ok-bord:     rgba(86,180,233,0.32);
+
+  --q-warn:        #E69F00;   /* Wong orange          */
+  --q-warn-soft:   rgba(230,159,0,0.10);
+  --q-warn-bord:   rgba(230,159,0,0.32);
+
+  --q-crit:        #D55E00;   /* Wong vermillion      */
+  --q-crit-soft:   rgba(213,94,0,0.12);
+  --q-crit-bord:   rgba(213,94,0,0.36);
+
+  /* ── P&L · muted, secondary to status ─────────── */
+  --q-pl-pos:      #5EC18A;   /* muted emerald        */
+  --q-pl-pos-soft: rgba(94,193,138,0.10);
+  --q-pl-neg:      #E26B6B;   /* muted coral          */
+  --q-pl-neg-soft: rgba(226,107,107,0.10);
+
+  /* ── stale / paused / off ─────────────────────── */
+  --q-stale:       #6E6E88;
+  --q-stale-soft:  rgba(110,110,136,0.10);
+
+  /* ── sizing & spacing ─────────────────────────── */
+  --q-fs-display:  64px;
+  --q-fs-mono-xl:  52px;
+  --q-fs-mono-lg:  32px;
+  --q-fs-mono-md:  20px;
+  --q-fs-h1:       22px;
+  --q-fs-h2:       15px;
+  --q-fs-body:     13px;
+  --q-fs-small:    12px;
+  --q-fs-micro:    11px;
+  --q-fs-nano:     10px;
+  --q-fs-pico:     9px;
+
+  --q-r-sm:        4px;
+  --q-r-md:        6px;
+  --q-r-lg:        8px;
+  --q-r-xl:        12px;
+  --q-r-full:      9999px;
+
+  --q-elev-flat:   0 0 0 1px var(--q-line);
+  --q-elev-raised: 0 0 0 1px var(--q-line), 0 8px 24px rgba(0,0,0,0.45);
+  --q-elev-crit:   0 0 0 1px var(--q-crit-bord), 0 0 0 4px var(--q-crit-soft);
+}
+
+/* Type helpers — additive. Use alongside existing classes; do
+   not replace `.mono` / `.num` which the live SPA still emits. */
+.q-mono   { font-family: var(--q-font-mono); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+.q-num    { font-family: var(--q-font-mono); font-variant-numeric: tabular-nums; font-weight: 500; letter-spacing: -0.01em; }
+.q-eyebrow {
+  font-family: var(--q-font-mono);
+  font-size: var(--q-fs-pico);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.10em;
+  color: var(--q-t-3);
+}
+.q-label {
+  font-family: var(--q-font-mono);
+  font-size: var(--q-fs-nano);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--q-t-3);
+  font-weight: 500;
+}
+
+@keyframes q-pulse-dot { 0%,100%{opacity:1; transform:scale(1)} 50%{opacity:0.45; transform:scale(0.85)} }
+.q-pulse { animation: q-pulse-dot 2s ease-in-out infinite; }
