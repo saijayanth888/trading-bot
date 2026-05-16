@@ -4129,6 +4129,7 @@ async def combined_portfolio():
     # so the day pct is:
     #     daily_pnl_pct = daily_pnl_usd / day_start_equity * 100
     # which is robust to N-fill inflation.
+    risk: dict = {}
     try:
         risk = await asyncio.wait_for(
             loop.run_in_executor(None, ops_db.trades_risk_summary),
@@ -4146,6 +4147,49 @@ async def combined_portfolio():
         logger.warning("combined_portfolio: day P&L enrichment failed: %s", exc)
         status.setdefault("day_pnl_usd", 0.0)
         status.setdefault("day_pnl_pct", 0.0)
+
+    # === v4 scoreboard contract ============================================
+    # The v4 SPA (frontend-v4/src/components/quanta/HeroScoreboard.tsx + the
+    # CombinedHeader in App.tsx) was designed against a nested {combined,
+    # scoreboard} shape that this endpoint never emitted, so those tiles
+    # silently rendered "—". Add the two objects here as a SUPERSET of the
+    # existing flat fields — the legacy SPA (which reads cp.day_pnl_pct,
+    # cp.crypto_equity, etc.) is unaffected.
+    sources = status.get("sources") or {}
+    risk_gates = sources.get("risk_gates") or {}
+    crypto_unrealised = float(sources.get("crypto_unrealised_pnl") or 0)
+    # Stocks-side unrealized isn't a single number any side exposes yet
+    # (wheel options + shark longs report differently); when one of them
+    # surfaces it cleanly, wire it in here. Today: crypto-only.
+    unrealized_total = crypto_unrealised
+    realized_today = float(status.get("day_pnl_usd") or 0)
+
+    status["combined"] = {
+        "equity": float(status.get("total_equity") or 0),
+        "day_pnl": realized_today,
+        "day_pct": float(status.get("day_pnl_pct") or 0),
+        "crypto": {"equity": float(status.get("crypto_equity") or 0)},
+        "stocks": {"equity": float(status.get("stocks_equity") or 0)},
+        "breaker": "active" if status.get("circuit_breaker_active") else "ok",
+    }
+    status["scoreboard"] = {
+        "capital": float(status.get("total_equity") or 0),
+        "live_pnl": realized_today + unrealized_total,
+        "realized_today": realized_today,
+        "unrealized": unrealized_total,
+        "drawdown": float(status.get("combined_drawdown_pct") or 0),
+        "peak": float(status.get("combined_peak_equity") or 0),
+        "open": {
+            "total": int(status.get("combined_open_positions") or 0),
+            "crypto": int(status.get("crypto_open_positions") or 0),
+            "stocks": int(status.get("stocks_open_positions") or 0),
+        },
+        "closed_today": int(risk.get("closed_today") or 0),
+        # daily_loss_halt_pct is a fraction (0.03 = 3%); UI wants percent.
+        "pause_threshold": round(float(risk_gates.get("daily_loss_halt_pct") or 0) * 100, 2),
+        "kill_threshold": float(status.get("threshold_pct") or 0),
+    }
+    # =======================================================================
 
     # Promote the breaker flag to the envelope status
     return _envelope(
