@@ -3319,3 +3319,299 @@ table.t tbody tr.flash-sell { animation: flash-sell 200ms cubic-bezier(0.2, 0, 0
   height: 8px;
   flex: 0 0 8px;
 }
+
+/* ============================================================
+   Pass 3 — TodayScoreboard hero · EquityRibbon
+   ────────────────────────────────────────────────────────────
+   Targets the live `.v3-card-scoreboard` DOM produced by
+   ops_spa.js#TodayScoreboard (no JS change). Existing tree:
+
+     .v3-card-scoreboard ( .card .mountin )
+       .card-head
+       .card-body
+         <DDRibbon …/>                       ← drawdown ribbon
+         .v3-score-hero
+           .dim2.mono  "LIVE DAY P&L · since …"
+           .down|.up   <NumberRoll v3-hero-num/>
+           .v3-score-hero-meta              ← 7 stat tiles
+             [Capital, Realized today, Unrealized, Drawdown,
+              Peak, Open, Closed today]
+           .v3-regime-edge
+           .mono.dim   "REGIME · …"
+           <_ScoreboardFlashRow/>
+
+   Cloud-Claude target (operator.jsx#EquityRibbon, lines 67-180):
+   three monumental columns — Combined equity · Day P&L ·
+   Drawdown — at 52px tabular Geist Mono, with eyebrow labels
+   and side-by-side sub-rows.
+
+   We can't restructure the DOM, but we CAN:
+     • make the hero a 3-column grid that picks specific stat
+       tiles out of `.v3-score-hero-meta` and elevates them to
+       the same visual weight as the DAY P&L number,
+     • blow the .v3-hero-num up to --q-fs-mono-xl (52px),
+     • style every meta tile as a Geist Mono eyebrow + Geist
+       Mono value, with the muted P&L palette,
+     • turn the existing DDRibbon into the right-column hero
+       ribbon by lifting it INTO the hero via negative top
+       margin so its track aligns with the 52px numerals,
+     • style the regime edge as the bottom hairline of the hero.
+   ============================================================ */
+
+.v3-card-scoreboard {
+  background: var(--q-bg-2);
+  box-shadow: var(--q-elev-flat);
+  border-radius: var(--q-r-xl);
+}
+.v3-card-scoreboard > .card-head {
+  padding: 22px 28px 8px;
+  border-bottom-color: var(--q-line-subtle);
+}
+.v3-card-scoreboard > .card-head h3 {
+  font-family: var(--q-font-ui);
+  font-size: var(--q-fs-h1);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--q-t-1);
+}
+.v3-card-scoreboard > .card-head .card-num,
+.v3-card-scoreboard > .card-head .card-sub {
+  font-family: var(--q-font-mono);
+  color: var(--q-t-3);
+  font-size: var(--q-fs-pico);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.v3-card-scoreboard > .card-body {
+  padding: 28px 32px 32px;
+}
+
+/* ── Hero block — 3 column ribbon ───────────────── */
+.v3-card-scoreboard .v3-score-hero {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr 1.3fr;
+  grid-template-rows: auto auto auto;
+  grid-template-areas:
+    "eyebrowA eyebrowB eyebrowC"
+    "numA     numB     numC"
+    "metaA    metaB    metaC";
+  column-gap: 56px;
+  row-gap: 12px;
+  align-items: end;
+  margin: 8px 0 0;
+}
+
+/* Eyebrow row: take the existing single "LIVE DAY P&L · since…"
+   div and pin it to the MIDDLE column (Day P&L). Wrap the same
+   text styling so the left and right columns get synthesized
+   eyebrows via ::before on their hero values. */
+.v3-card-scoreboard .v3-score-hero > .dim2.mono:first-child {
+  grid-area: eyebrowB;
+  font-family: var(--q-font-mono);
+  font-size: var(--q-fs-pico);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.10em;
+  color: var(--q-t-3);
+  margin: 0;
+}
+.v3-card-scoreboard .v3-score-hero > .dim2.mono:first-child > span:first-child {
+  color: var(--q-t-3);
+}
+.v3-card-scoreboard .v3-score-hero > .dim2.mono:first-child .dim {
+  color: var(--q-t-4) !important;
+}
+
+/* Big DAY P&L NumberRoll — keep it in the middle column */
+.v3-card-scoreboard .v3-score-hero > .up,
+.v3-card-scoreboard .v3-score-hero > .down {
+  grid-area: numB;
+  line-height: 1;
+}
+.v3-card-scoreboard .v3-score-hero .v3-hero-num {
+  font-family: var(--q-font-mono);
+  font-size: var(--q-fs-mono-xl);
+  font-weight: 500;
+  letter-spacing: -0.04em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums slashed-zero;
+}
+.v3-card-scoreboard .v3-score-hero > .up   .v3-hero-num { color: var(--q-pl-pos); }
+.v3-card-scoreboard .v3-score-hero > .down .v3-hero-num { color: var(--q-pl-neg); }
+
+/* Stat row — re-grid the 7 tiles so the FIRST three
+   (Capital, Realized today, Unrealized) line up under the
+   left column ("Combined equity"); the next three (Drawdown,
+   Peak, Open) under the middle ("Day P&L sub-row"); and the
+   remaining go under the right column. */
+.v3-card-scoreboard .v3-score-hero-meta {
+  grid-area: metaA / metaA / metaC / metaC;
+  display: grid;
+  grid-template-columns: 1.2fr 1fr 1.3fr;
+  column-gap: 56px;
+  row-gap: 0;
+  align-items: baseline;
+  flex-wrap: nowrap;
+  margin-top: 8px;
+}
+.v3-card-scoreboard .v3-score-hero-meta > div {
+  display: grid !important;
+  grid-template-columns: auto 1fr;
+  align-items: baseline;
+  column-gap: 8px;
+  row-gap: 0 !important;
+  padding: 6px 0;
+  border-top: 1px solid var(--q-line-subtle);
+  min-width: 0 !important;
+}
+.v3-card-scoreboard .v3-score-hero-meta > div:nth-child(1) { grid-column: 1; }
+.v3-card-scoreboard .v3-score-hero-meta > div:nth-child(2) { grid-column: 1; }
+.v3-card-scoreboard .v3-score-hero-meta > div:nth-child(3) { grid-column: 2; }
+.v3-card-scoreboard .v3-score-hero-meta > div:nth-child(4) { grid-column: 3; }
+.v3-card-scoreboard .v3-score-hero-meta > div:nth-child(5) { grid-column: 1; }
+.v3-card-scoreboard .v3-score-hero-meta > div:nth-child(6) { grid-column: 2; }
+.v3-card-scoreboard .v3-score-hero-meta > div:nth-child(7) { grid-column: 3; }
+
+.v3-card-scoreboard .v3-score-hero-meta > div > .dim2.mono {
+  font-family: var(--q-font-mono);
+  font-size: var(--q-fs-pico);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.10em;
+  color: var(--q-t-3);
+  min-width: 110px;
+}
+.v3-card-scoreboard .v3-score-hero-meta > div > .v3-num,
+.v3-card-scoreboard .v3-score-hero-meta > div > span.v3-num {
+  font-family: var(--q-font-mono) !important;
+  font-size: var(--q-fs-small) !important;
+  font-weight: 500 !important;
+  font-variant-numeric: tabular-nums;
+  color: var(--q-t-1);
+  letter-spacing: -0.01em;
+  justify-self: end;
+  text-align: right;
+}
+.v3-card-scoreboard .v3-score-hero-meta > div > span.v3-num.up   { color: var(--q-pl-pos); }
+.v3-card-scoreboard .v3-score-hero-meta > div > span.v3-num.down { color: var(--q-pl-neg); }
+
+/* Synthesise the LEFT eyebrow + the LEFT hero value out of
+   the existing "Capital" tile by promoting it into eyebrow A
+   and numA position via ::before on `.v3-score-hero-meta`.
+   We don't have a real combined-equity NumberRoll to place
+   in numA, so we lift the Capital figure (which IS the
+   combined equity surfaced by the live envelope) using a
+   simple visual cue: a top synthesised eyebrow + a hairline
+   that ends under it. The actual 52px combined-equity figure
+   stays in the topbar EQUITY group, which already renders
+   the NumberRoll at full precision. */
+.v3-card-scoreboard .v3-score-hero::before {
+  content: "COMBINED EQUITY · USD · LIVE";
+  grid-area: eyebrowA;
+  font-family: var(--q-font-mono);
+  font-size: var(--q-fs-pico);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.10em;
+  color: var(--q-t-3);
+}
+.v3-card-scoreboard .v3-score-hero::after {
+  content: "DRAWDOWN FROM PEAK · KILL @ −10%";
+  grid-area: eyebrowC;
+  font-family: var(--q-font-mono);
+  font-size: var(--q-fs-pico);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.10em;
+  color: var(--q-t-3);
+}
+
+/* ── DDRibbon as right-column hero ────────────────
+   The drawdown ribbon is rendered ABOVE the .v3-score-hero
+   (sibling, not child). To make it visually inhabit the
+   right column of the hero, we lift it via negative margin +
+   right-align it to a max-width that matches the right
+   column's expected width. The component already exposes
+   itself via the `.v3-dd-ribbon` class. */
+.v3-card-scoreboard .v3-dd-ribbon {
+  margin-left: auto;
+  margin-bottom: -64px;       /* lift into the numC slot */
+  max-width: 460px;
+  width: 100%;
+  position: relative;
+  z-index: 1;
+}
+
+/* ── Regime edge → fine separator under hero ────── */
+.v3-card-scoreboard .v3-regime-edge {
+  grid-column: 1 / -1;
+  height: 2px;
+  max-width: 100%;
+  margin: 18px 0 0;
+  opacity: 0.55;
+}
+.v3-card-scoreboard .v3-score-hero > .mono.dim {
+  /* "REGIME · trending_down" line — sit under the regime edge */
+  grid-column: 1 / -1;
+  margin-top: 6px;
+  font-family: var(--q-font-mono);
+  font-size: var(--q-fs-pico);
+  color: var(--q-t-3);
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+}
+.v3-card-scoreboard .v3-score-hero > .mono.dim .v3-num {
+  color: var(--q-t-2);
+}
+
+/* The internal _ScoreboardFlashRow renders into the same
+   .v3-score-hero — anchor it to the bottom of the grid as a
+   wide footer row so it doesn't crash the column alignment. */
+.v3-card-scoreboard .v3-score-hero > div:last-child:not(.v3-regime-edge):not(.mono):not(.dim2):not(.v3-score-hero-meta):not(.up):not(.down) {
+  grid-column: 1 / -1;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--q-line-subtle);
+}
+
+/* ── Right-edge "live" / "ddpct" pills in header ── */
+.v3-card-scoreboard .card-head .pill {
+  background: transparent;
+  border: 0;
+  font-family: var(--q-font-mono);
+  font-size: var(--q-fs-pico);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 600;
+  padding: 0;
+}
+.v3-card-scoreboard .card-head .pill.down { color: var(--q-pl-neg); }
+.v3-card-scoreboard .card-head .pill.up   { color: var(--q-pl-pos); }
+.v3-card-scoreboard .card-head .pill .dot {
+  width: 6px; height: 6px;
+}
+
+/* Narrow viewport — collapse to a single column rather than
+   crashing the monumental numerals. */
+@media (max-width: 1280px) {
+  .v3-card-scoreboard .v3-score-hero {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "eyebrowB"
+      "numB"
+      "eyebrowA"
+      "metaA"
+      "eyebrowC";
+    column-gap: 0;
+  }
+  .v3-card-scoreboard .v3-score-hero-meta {
+    grid-template-columns: 1fr 1fr;
+  }
+  .v3-card-scoreboard .v3-dd-ribbon {
+    margin: 0;
+    max-width: 100%;
+  }
+  .v3-card-scoreboard .v3-score-hero .v3-hero-num {
+    font-size: var(--v3-t-hero-md, 32px);
+  }
+}
