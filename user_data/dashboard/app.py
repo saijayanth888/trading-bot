@@ -123,15 +123,15 @@ legacy_proxy.install(app)
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
-    """Root redirects to /ops — the operator console is the only surface."""
-    from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="/ops", status_code=307)
+    """The Pair Dashboard SPA — drill-down on a single pair (candles, decisions,
+    fills, sentiment). Title: 'Quanta — Pair dashboard (SPA)'. This is a
+    SEPARATE surface from /ops (the operator console). Both live, both used."""
+    return templates.TemplateResponse(request, "dashboard_spa.html", {})
 
 
 @app.get("/legacy", response_class=HTMLResponse)
 async def legacy_dashboard(request: Request) -> HTMLResponse:
-    """The original dashboard_spa.html, preserved during the deprecation
-    window. Will be removed in a v1.1 cleanup ticket."""
+    """Alias of `/` — kept for any link still pointing here."""
     return templates.TemplateResponse(request, "dashboard_spa.html", {})
 
 
