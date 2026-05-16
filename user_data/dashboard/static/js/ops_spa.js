@@ -741,6 +741,129 @@
     );
   }
 
+  // ─────────────── AGENT FLOW — animated pipeline diagram ─────────────────
+  // Ported 2026-05-16 from ops-design/views/shared.jsx (cloud-Claude design,
+  // Direction A). Shows the live agent topology with packets traveling along
+  // edges to convey "the system is breathing" without being chatty.
+  //
+  //   Hermes (cron · 34 jobs) ─→ V4 · Wheel · Shark · ModelForge
+  //                              └→ Risk Governor → Quanta Core → Alpaca
+  //                                  ↑ (training loop dashed back to Shark)
+  //
+  // Live data: pulls cap_violations to color the Risk node vermillion when
+  // any breach is current, and reads the trades_risk pause state to flip
+  // the Core node tone. Otherwise the layout is static (it's a topology
+  // map, not a metric).
+  function AgentFlowCard({ data }) {
+    const cvSlot = slotState(data, "cap_violations");
+    const cvData = envelopeData(cvSlot.env) || {};
+    const cvCount = Array.isArray(cvData.violations) ? cvData.violations.length : 0;
+    const rgSlot = slotState(data, "risk_gates");
+    const rgEnv = envelopeData(rgSlot.env) || {};
+    const trSlot = slotState(data, "trades_risk");
+    const tr = envelopeData(trSlot.env) || {};
+    const breakerActive = !!(tr && tr.circuit_breaker && tr.circuit_breaker.active);
+
+    const width = 1340, height = 280;
+    const N = {
+      hermes:  { x: 0.50, y: 0.10, label: "HERMES",       sub: "cron · 34 jobs",         tone: "accent" },
+      v4:      { x: 0.16, y: 0.40, label: "V4",           sub: "MR + TF · 12 pairs",      tone: "ok" },
+      wheel:   { x: 0.34, y: 0.40, label: "WHEEL",        sub: "short_put · cov_call",    tone: "ok" },
+      shark:   { x: 0.52, y: 0.40, label: "SHARK",        sub: "bull · bear · arbiter",   tone: "ok" },
+      forge:   { x: 0.78, y: 0.40, label: "MODELFORGE",   sub: "adapter v423",            tone: "off" },
+      risk:    { x: 0.34, y: 0.72, label: "RISK GOVERNOR",sub: (cvCount > 0 ? cvCount + " cap breach" + (cvCount === 1 ? "" : "es") + " · 7d" : "cap · DD · weekly"),                                                                       tone: (cvCount > 0 ? "warn" : "ok") },
+      core:    { x: 0.60, y: 0.72, label: "QUANTA CORE",  sub: (breakerActive ? "PAUSED" : "exec · paper"), tone: (breakerActive ? "crit" : "ok") },
+      broker:  { x: 0.86, y: 0.88, label: "ALPACA · CCXT",sub: "paper · dry-run",         tone: "stale" },
+    };
+    const px = (k) => N[k].x * width;
+    const py = (k) => N[k].y * height;
+    const E = [
+      ["hermes","v4"], ["hermes","wheel"], ["hermes","shark"], ["hermes","forge"],
+      ["v4","risk"], ["wheel","risk"], ["shark","risk"],
+      ["risk","core"], ["core","broker"],
+      ["forge","shark", true],   // dashed training loop
+    ];
+    const tone = {
+      ok:     { ring: "var(--q-ok-bord, rgba(86,180,233,0.32))",    dot: "var(--q-ok, #56B4E9)",    text: "var(--q-ok, #56B4E9)",  glow: "rgba(86,180,233,0.12)" },
+      warn:   { ring: "var(--q-warn-bord, rgba(230,159,0,0.32))",   dot: "var(--q-warn, #E69F00)",  text: "var(--q-warn, #E69F00)",glow: "rgba(230,159,0,0.12)" },
+      crit:   { ring: "var(--q-crit-bord, rgba(213,94,0,0.36))",    dot: "var(--q-crit, #D55E00)",  text: "var(--q-crit, #D55E00)",glow: "rgba(213,94,0,0.14)" },
+      accent: { ring: "rgba(132,148,255,0.28)",                     dot: "var(--q-accent, #8494FF)", text:"var(--q-accent, #8494FF)", glow: "rgba(132,148,255,0.12)" },
+      off:    { ring: "var(--q-line, rgba(255,255,255,0.07))",      dot: "var(--q-t-4, #3A3A50)",   text: "var(--q-t-3, #5E5E78)", glow: "transparent" },
+      stale:  { ring: "var(--q-line, rgba(255,255,255,0.07))",      dot: "var(--q-stale, #6E6E88)", text: "var(--q-t-3, #5E5E78)", glow: "transparent" },
+    };
+
+    const svgEdges = E.map(([a, b, dashed], i) => {
+      const x1 = px(a), y1 = py(a) + 22, x2 = px(b), y2 = py(b) - 22;
+      const dy = (y2 - y1) * 0.45;
+      const d = "M " + x1 + " " + y1 + " C " + x1 + " " + (y1 + dy) + ", " + x2 + " " + (y2 - dy) + ", " + x2 + " " + y2;
+      return h("g", { key: "e-" + i },
+        h("path", {
+          d, fill: "none",
+          stroke: "var(--q-line-strong, rgba(255,255,255,0.13))",
+          strokeWidth: 1,
+          strokeDasharray: dashed ? "3 4" : undefined,
+          opacity: dashed ? 0.5 : 1,
+          markerEnd: "url(#qf-arrow)",
+        }),
+        !dashed
+          ? h("circle", { r: 3, fill: tone[N[a].tone].dot,
+              style: { filter: "drop-shadow(0 0 5px " + tone[N[a].tone].dot + ")" } },
+              h("animateMotion", { dur: (3 + (i % 3) * 0.6) + "s", repeatCount: "indefinite", begin: (i * 0.4) + "s", path: d })
+            )
+          : null
+      );
+    });
+
+    const nodeDivs = Object.entries(N).map(([k, n]) => {
+      const t = tone[n.tone];
+      const active = n.tone === "ok" || n.tone === "accent" || n.tone === "warn" || n.tone === "crit";
+      return h("div", { key: k, style: {
+        position: "absolute", left: (px(k) - 80) + "px", top: (py(k) - 22) + "px", width: 160, textAlign: "center",
+      } },
+        h("div", { style: {
+          display: "inline-flex", alignItems: "center", gap: 8, padding: "8px 12px",
+          background: "var(--q-bg-2, var(--bg-card, #10101A))", borderRadius: 8,
+          boxShadow: "inset 0 0 0 1px " + t.ring + (active ? ", 0 0 22px " + t.glow : ""),
+          fontFamily: "var(--mono)", fontSize: 10, letterSpacing: "0.10em", fontWeight: 600,
+          color: t.text, textTransform: "uppercase",
+        } },
+          h("span", { style: {
+            width: 6, height: 6, borderRadius: 3, background: t.dot,
+            boxShadow: active && n.tone !== "off" ? "0 0 6px " + t.dot : "none",
+            animation: active ? "q-pulse-dot 2s ease-in-out infinite" : "none",
+          }}),
+          n.label
+        ),
+        h("div", { style: {
+          marginTop: 5, fontFamily: "var(--mono)", fontSize: 10,
+          color: "var(--q-t-3, #5E5E78)", letterSpacing: "0.04em",
+        } }, n.sub)
+      );
+    });
+
+    return h(Card, {
+      num: "00d", title: "Agent flow · pipeline",
+      sub: "Hermes → V4 · Wheel · Shark · ModelForge → Risk → Core → broker",
+    },
+      h("div", { style: { width: "100%", height: height + "px", position: "relative", overflow: "hidden" } },
+        h("svg", { width: "100%", height,
+          viewBox: "0 0 " + width + " " + height, preserveAspectRatio: "xMidYMid meet",
+          style: { position: "absolute", inset: 0, overflow: "visible" } },
+          h("defs", null,
+            h("marker", { id: "qf-arrow", viewBox: "0 0 10 10", refX: "9", refY: "5",
+              markerWidth: "6", markerHeight: "6", orient: "auto" },
+              h("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: "rgba(255,255,255,0.18)" })
+            )
+          ),
+          svgEdges
+        ),
+        // Node DIVs are absolutely positioned over the SVG, scaled to fit
+        // the same viewBox via a wrapper of width:100% / height:fixed.
+        h("div", { style: { position: "absolute", inset: 0, pointerEvents: "none" } }, nodeDivs)
+      )
+    );
+  }
+
   // ─────────────── SHARK OVERRIDE HEALTH — BEAR_VOLATILE verifier ────────
   // Surfaces ~/.hermes/scripts/shark_override_verify.sh output via
   // /api/ops/shark_override_health. Operator-glance: "did the 0.85
@@ -6548,6 +6671,11 @@
           // V4 flash-status strip in its footer (operator-requested
           // 2026-05-13: "make that addition inside scoreboard").
           h(TodayScoreboard, { data }),
+          // AGENT FLOW — animated pipeline diagram (Hermes → V4/Wheel/Shark/
+          // ModelForge → Risk → Quanta Core → Alpaca). Packets travel along
+          // edges to convey "the system is breathing" without being chatty.
+          // Risk node tints vermillion when cap_violations > 0.
+          h(AgentFlowCard, { data }),
           // SHARK OVERRIDE HEALTH — verifier card for the BEAR_VOLATILE
           // paper-mode override. Sits directly under the scoreboard so a
           // single glance tells the operator "override is healthy" or
