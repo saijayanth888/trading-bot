@@ -162,6 +162,10 @@
     llm_stats: "/api/ops/llm_stats",
     mcp: "/api/ops/mcp",
     risk_gates: "/api/ops/risk_gates",
+    // Single-name-cap violations in trade_journal (last 7 days). Drives
+    // the red banner at the top of TodayScoreboard when any historical
+    // trade breached the cap (per Phase H operator ask 2026-05-16).
+    cap_violations: "/api/ops/cap_violations",
     sentiment: "/api/ops/sentiment",
     // stocks_sentiment endpoint removed 2026-05-11 — see ops_routes.py
     // comment. Shark Briefing card (data-num 13c) is the source of truth
@@ -490,6 +494,50 @@
       valNode
     );
 
+    // Single-name-cap violation banner — surfaces breaches in the last 7d
+    // (operator ask 2026-05-16; closes B8 at the UI level). Reads
+    // /api/ops/cap_violations, which queries trade_journal directly. When
+    // the producer-side at-entry enforcement (src/quanta_core/risk/
+    // single_name_cap.py) prevents future breaches, this banner shows
+    // historical context only.
+    const cvSlot = slotState(data, "cap_violations");
+    const cvData = envelopeData(cvSlot.env) || {};
+    const cvList = Array.isArray(cvData.violations) ? cvData.violations : [];
+    const worst = cvList[0] || null;
+    const capBanner = worst ? h("div", {
+      style: {
+        display: "flex", flexDirection: "column", gap: 4,
+        padding: "10px 14px", marginBottom: 18,
+        background: "rgba(213, 94, 0, 0.10)",
+        boxShadow: "inset 0 0 0 1px rgba(213, 94, 0, 0.36)",
+        borderRadius: 6, width: "100%", boxSizing: "border-box",
+        position: "relative", zIndex: 1,
+      },
+    },
+      // line 1 — urgency header
+      h("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
+        h("span", { className: "dot down pulse" }),
+        h("span", {
+          className: "mono",
+          style: {
+            fontSize: "var(--t-xs)", color: "var(--down)",
+            fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase",
+          },
+        },
+          cvList.length + " single-name cap breach" + (cvList.length === 1 ? "" : "es") + " · last 7d"),
+      ),
+      // line 2 — worst-case detail in a compact one-line mono row
+      h("div", {
+        className: "mono dim",
+        style: { fontSize: "var(--t-2xs)", letterSpacing: ".02em", paddingLeft: 16 },
+      },
+        worst.pair + " · stake $" + fmtUSD(worst.stake_usd) +
+        " / cap $" + fmtUSD(worst.cap_usd) +
+        " · " + worst.cap_multiple + "× over · pnl " +
+        (worst.pnl_usd >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(worst.pnl_usd)) +
+        " · closed " + String(worst.closed_at || "").slice(0, 10))
+    ) : null;
+
     return h(Card, {
       num: "00", title: "Today · scoreboard",
       sub: "live · realized + unrealized · refreshes every 10s",
@@ -499,6 +547,7 @@
           h("span", { className: "dot " + dayCls + (liveDayPnl === 0 ? "" : " pulse") }),
           " ", (liveDayPct >= 0 ? "+" : "") + liveDayPct.toFixed(2) + "% live"))
     },
+      capBanner,
       h(DDRibbon, { dayPct: liveDayPct, haltPct: haltFrac }),
       h("div", { className: "v3-score-hero" },
         // Day-boundary annotation — explicit so the operator never reads

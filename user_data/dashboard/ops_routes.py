@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
@@ -5793,3 +5793,83 @@ async def llm_call_detail(call_id: str):
         )
 
     raise HTTPException(status_code=404, detail=f"call_id {target} not found")
+
+
+# ============================================================================
+# /api/ops/cap_violations — single-name-cap breach surface for the operator
+# (operator ask 2026-05-16). The B8 BTC 34× violation from 2026-05-15 was a
+# real risk-governor bypass: $66,212.89 BTC stake on a $19,000 crypto sleeve
+# with cap_pct=0.10 (allowed: $1,900). This endpoint surfaces any historical
+# violations in `trade_journal` for the configurable lookback window so the
+# scoreboard can render a top-of-card banner.
+# ============================================================================
+@router.get("/cap_violations")
+async def cap_violations(hours: int = Query(168, ge=1, le=720)):
+    """Trades whose stake exceeded the single-name cap on the crypto sleeve.
+
+    Returns the violations sorted by `cap_multiple` desc; the operator gets
+    the worst one front-and-center. `hours` defaults to 7 days; cap to 30.
+    """
+    import psycopg
+    from psycopg.rows import dict_row
+    from datetime import datetime, timedelta, UTC
+
+    # The crypto sleeve starting equity and cap pct match the values the
+    # producer reads from `unified_risk._load_risk_gates()`. Hardcoded here
+    # to avoid coupling this surface to an additional file read on every
+    # poll. If the operator changes the cap, bump the constants here.
+    crypto_sleeve_usd = 19000.0
+    cap_pct = 0.10
+    cap_usd = crypto_sleeve_usd * cap_pct  # $1,900
+
+    since = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
+
+    try:
+        with psycopg.connect(ops_db._resolve_dsn(), row_factory=dict_row) as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT pair, direction, stake, pnl, pnl_pct,
+                       opened_at, closed_at, exit_reason
+                FROM trade_journal
+                WHERE closed_at >= %s
+                  AND stake IS NOT NULL
+                  AND stake > %s
+                ORDER BY stake DESC
+                LIMIT 10
+                """,
+                (since, cap_usd),
+            )
+            rows = cur.fetchall()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("cap_violations: %s", exc)
+        return _envelope("down", error=str(exc))
+
+    violations = [
+        {
+            "pair": r["pair"],
+            "direction": r["direction"],
+            "stake_usd": float(r["stake"]),
+            "cap_usd": cap_usd,
+            "cap_multiple": round(float(r["stake"]) / cap_usd, 1),
+            "pnl_usd": float(r["pnl"] or 0),
+            "pnl_pct": float(r["pnl_pct"] or 0),
+            "opened_at": r["opened_at"].isoformat() if r["opened_at"] else None,
+            "closed_at": r["closed_at"].isoformat() if r["closed_at"] else None,
+            "exit_reason": r["exit_reason"],
+        }
+        for r in rows
+    ]
+
+    status = "ok" if not violations else "degraded"
+    return _envelope(
+        status,
+        data={
+            "violations": violations,
+            "since_hours": hours,
+            "cap_usd": cap_usd,
+            "n_violations": len(violations),
+            "crypto_sleeve_usd": crypto_sleeve_usd,
+            "cap_pct": cap_pct,
+        },
+        error=None if status == "ok" else f"{len(violations)} cap violation(s) in last {hours}h",
+    )
