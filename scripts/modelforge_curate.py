@@ -864,6 +864,7 @@ def curate(
     root: Path,
     accept_rate_lo: float = ACCEPT_RATE_LO_DEFAULT,
     accept_rate_hi: float = ACCEPT_RATE_HI_DEFAULT,
+    role_filter: str | None = None,
 ) -> CurateStats:
     """Run a full curate pass; idempotent thanks to the state-file gate.
 
@@ -871,12 +872,16 @@ def curate(
         target_date: if set, only files matching that day are considered;
             otherwise we curate every raw file we haven't seen before.
         root: ``~/.dgx-train`` root.
+        role_filter: when set, only curate this track_id. Used by
+            BuildTradingDataset action for per-track Sunday workflows.
         accept_rate_lo/hi: out-of-band thresholds for the Slack notifier.
     """
     state = _load_state(root)
     stats = CurateStats(target_date=target_date)
 
-    for role in ALL_ROLES:
+    active_roles = (role_filter,) if role_filter else ALL_ROLES
+
+    for role in active_roles:
         raw_files = _raw_files_for_role(root, role, target_date=target_date)
         already_seen = set(state.get(role, {}).get("source_files", []))
         new_files = [p for p in raw_files if str(p) not in already_seen]
@@ -965,6 +970,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--accept-lo", type=float, default=ACCEPT_RATE_LO_DEFAULT)
     parser.add_argument("--accept-hi", type=float, default=ACCEPT_RATE_HI_DEFAULT)
     parser.add_argument("--quiet", action="store_true")
+    # --role-filter restricts curation to a single trading track (used by
+    # BuildTradingDataset action to run per-track Sunday workflows).
+    parser.add_argument(
+        "--role-filter", default=None,
+        metavar="TRACK_ID",
+        help="Only curate this track_id (e.g. trading-arbiter). Default: curate all roles.",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
@@ -979,6 +991,15 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
     root = Path(args.root) if args.root else _dgx_train_root()
+    role_filter = args.role_filter or None
+
+    if role_filter is not None and role_filter not in ALL_ROLES:
+        print(
+            f"modelforge-curate ERROR unknown role_filter={role_filter!r}. "
+            f"Valid: {sorted(ALL_ROLES)}",
+            file=sys.stderr,
+        )
+        return 1
 
     try:
         stats = curate(
@@ -986,6 +1007,7 @@ def main(argv: list[str] | None = None) -> int:
             root=root,
             accept_rate_lo=args.accept_lo,
             accept_rate_hi=args.accept_hi,
+            role_filter=role_filter,
         )
     except Exception:  # pragma: no cover - defensive top-level catch
         _log_error("curate crashed:\n" + traceback.format_exc())

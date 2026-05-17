@@ -557,28 +557,43 @@ def ingest(
     decisions_md: Path,
     llm_calls_jsonl: Path,
     raw_root: Path,
+    role_filter: str | None = None,
 ) -> IngestStats:
     """Run the full ingest for ``target_date``.
 
     Pure I/O and parsing -- never raises; per-role failures are recorded in
     the returned :class:`IngestStats` so the caller can choose to alert.
+
+    Args:
+        role_filter: when set, only this track_id is processed. Used by the
+            BuildTradingDataset action to run per-track Sunday workflows.
     """
+    # Validate role_filter early so a bad value surfaces loudly before any I/O.
+    if role_filter is not None and role_filter not in ALL_ROLES:
+        raise ValueError(
+            f"role_filter={role_filter!r} is not a valid track_id. "
+            f"Valid roles: {sorted(ALL_ROLES)}"
+        )
+
     stats = IngestStats(target_date=target_date)
+
+    active_roles = [role_filter] if role_filter else list(ALL_ROLES)
 
     # All six roles share one per_role bucket. trading-reflector is special —
     # it draws from BOTH decisions.md (deliberation log) and the JSONL log
     # (Shark's trade_reviewer post-mortems). Without merging, the JSONL
     # branch would KeyError on trade_reviewer rows and swallow as errors=1.
-    per_role: dict[str, list[dict[str, Any]]] = {r: [] for r in ALL_ROLES}
+    per_role: dict[str, list[dict[str, Any]]] = {r: [] for r in active_roles}
 
     # --- Source 1: decisions.md → trading-reflector --------------------------
-    try:
-        for entry in iter_reflector_entries(decisions_md):
-            ex = reflector_example(entry, target_date=target_date)
-            if ex is not None:
-                per_role["trading-reflector"].append(ex)
-    except Exception as exc:  # pragma: no cover - defensive
-        stats.errors.append(f"trading-reflector decisions.md: {exc}")
+    if "trading-reflector" in active_roles:
+        try:
+            for entry in iter_reflector_entries(decisions_md):
+                ex = reflector_example(entry, target_date=target_date)
+                if ex is not None:
+                    per_role["trading-reflector"].append(ex)
+        except Exception as exc:  # pragma: no cover - defensive
+            stats.errors.append(f"trading-reflector decisions.md: {exc}")
 
     # --- Source 2: llm-calls.jsonl → all six roles ---------------------------
     try:
@@ -587,6 +602,8 @@ def ingest(
                 continue
             role = AGENT_TO_ROLE.get(str(record.get("agent") or "").strip())
             if role is None:
+                continue
+            if role not in active_roles:
                 continue
             ex = llm_call_example(record)
             if ex is None:
@@ -654,12 +671,35 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--llm-calls", default=None, help="Override llm-calls.jsonl path")
     parser.add_argument("--raw-root", default=None, help="Override ~/.dgx-train/raw")
     parser.add_argument("--quiet", action="store_true", help="Suppress stdout summary")
+    # --role-filter restricts ingest to a single trading track (used by
+    # BuildTradingDataset action to run per-track Sunday workflows without
+    # triggering all 6 roles simultaneously and hammering the GPU).
+    parser.add_argument(
+        "--role-filter", default=None,
+        metavar="TRACK_ID",
+        help="Only ingest this track_id (e.g. trading-bull). Default: ingest all roles.",
+    )
+    # --since accepts the same formats as the positional date arg PLUS "all"
+    # (which means skip date filtering — ingest every record in the source).
+    # This is an alias for the positional date arg so BuildTradingDataset can
+    # pass both --role-filter and --since in one invocation without positional
+    # arg confusion.
+    parser.add_argument(
+        "--since", default=None,
+        metavar="DATE_OR_ALL",
+        help="ISO date or 'all'. Overrides the positional date arg when set.",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
 
+    # --since takes precedence over positional date; "all" means no date filter.
+    date_arg = args.since if args.since is not None else args.date
+    if date_arg and date_arg.lower() == "all":
+        date_arg = None  # ingest will use yesterday as default — sentinel None
+
     try:
-        target = parse_target_date(args.date)
+        target = parse_target_date(date_arg)
     except ValueError as exc:
         _log_error(f"bad date arg: {exc}")
         print(f"modelforge-ingest ERROR bad-date {exc}", file=sys.stderr)
@@ -669,12 +709,15 @@ def main(argv: list[str] | None = None) -> int:
     llm_calls_jsonl = Path(args.llm_calls) if args.llm_calls else _resolve_default_llm_calls_jsonl()
     raw_root = Path(args.raw_root) if args.raw_root else _raw_root()
 
+    role_filter = args.role_filter or None
+
     try:
         stats = ingest(
             target,
             decisions_md=decisions_md,
             llm_calls_jsonl=llm_calls_jsonl,
             raw_root=raw_root,
+            role_filter=role_filter,
         )
     except Exception:  # pragma: no cover - defensive top-level catch
         _log_error("ingest crashed:\n" + traceback.format_exc())
