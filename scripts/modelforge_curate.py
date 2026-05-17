@@ -990,11 +990,32 @@ def curate(
         already_seen = set(state.get(role, {}).get("source_files", []))
         new_files = [p for p in raw_files if str(p) not in already_seen]
 
-        # If the operator explicitly requests a date we already processed,
-        # `new_files` is empty -- emit a zero result so the summary line is
-        # complete but don't rewrite the Arrow shard.
+        # If `new_files` is empty (either the date was already curated OR no
+        # raw files exist for this role yet), emit an authoritative
+        # `curator_result.json` so downstream readers (e.g. the
+        # ``dataset.build_trading`` action) see a fresh `insufficient_data`
+        # signal instead of a stale prior result. Without this, an action
+        # that runs curate and finds zero new files would read a leftover
+        # success-or-failure file from a previous run and act on stale data.
         if not new_files:
-            stats.by_role[role] = RoleCurationResult(role=role)
+            empty_result = RoleCurationResult(
+                role=role,
+                accept_count=0,
+                reject_count=0,
+                test_set_count=0,
+                source_files=[],
+                out_path=None,
+                test_set_path=None,
+                status="insufficient_data",
+                reject_reasons={"no_new_raw_files": 0},
+            )
+            stats.by_role[role] = empty_result
+            role_dir = root / "datasets" / role
+            try:
+                role_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                logger.warning("[curate] mkdir failed for %s: %s", role_dir, exc)
+            _write_curator_result_json(role_dir, empty_result)
             continue
 
         try:
