@@ -49,6 +49,9 @@ user_data/backtest_results/.last_result.json
 # multi-MB historical bars cache. Both derived; keep out of git.
 user_data/backtest_results/gates_report_*.json
 user_data/backtest_results/_ohlcv_cache/
+# _funding_cache — funding-rate snapshots downloaded per backtest run;
+# multi-MB and regenerated on demand. Same class as _ohlcv_cache.
+user_data/backtest_results/_funding_cache/
 # Historical candle data — downloaded by freqtrade on startup
 user_data/data/coinbase/*.feather
 user_data/data/coinbase/*.json
@@ -57,6 +60,16 @@ user_data/logs/*.log
 user_data/logs/*.log.*
 user_data/logs/evolution.json
 !user_data/logs/.gitkeep
+
+# --- Local-only artefacts (never commit) ----------------------------------
+# Pre-destructive-op DB / file snapshots saved before risky operations
+# (e.g. freqtrade DB drop 2026-05-16). Forensic-only, machine-local.
+.archive/
+# Playwright MCP screenshots + console logs from the local browser session.
+.playwright-mcp/
+# graphifyy 0.7.19 dependency-graph CLI output. Re-runnable on demand;
+# multi-MB cache + report. Tool itself lives in PyPI.
+graphify-out/
 # --- Trained model weights -----------------------------------------------
 # These are reproducible from training runs; don't bloat the repo.
 user_data/models/**

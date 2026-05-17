@@ -187,11 +187,10 @@
     // WeeklyTrainingLive card under TodayScoreboard. Degrades soft when
     // model-forge is offline (card still renders with local-only fields).
     weekly_training: "/api/ops/weekly_training",
-    // Per-pair TFT model.zip validation status — surfaces the
-    // TrainingHealthLive card next to WeeklyTrainingLive. Powered by
-    // pair_dictionary.json + the post-write validation gate. Red
-    // rows when a pair is quarantined (stub/missing); amber when stale.
-    training_health: "/api/ops/training_health",
+    // training_health — REMOVED 2026-05-16 (Batch E2). The card
+    // (TrainingHealthLive) was already pulled from the layout post-V4
+    // cutover; the endpoint was still polled every 10 s for nothing. The
+    // FreqAI per-pair retrain loop it monitors is dead.
     // LLM activity feed — last N calls from stocks/memory/llm-calls.jsonl
     // with summary aggregates (tokens, avg latency, ollama % share).
     // Default page is metadata-only (include_text=0) so the polling payload
@@ -200,7 +199,15 @@
   };
   const SLOW_ENDPOINTS = {
     ept_champion: { url: "/api/ops/mcp/get_champion_genome", method: "POST", body: {} },
-    training: "/api/ops/training",
+    // training — REMOVED 2026-05-16 (Batch E2). TrainingCardLive read this;
+    // both were removed from the layout post-V4 cutover but the endpoint
+    // remained in SLOW_ENDPOINTS firing every 60 s producing nothing.
+    // NYSE session state — changes only at 09:30 / 16:00 ET. Previously
+    // each of 3 components instantiated its own setInterval(60s) fetching
+    // this endpoint independently (Batch E3 fix, 2026-05-16). Pooled here
+    // so we make 1 request / 60s instead of 3, and the visibility guard
+    // (Batch E4) pauses it with the rest of the slow poll.
+    market_hours: "/api/ops/market_hours",
     readiness: "/api/ops/readiness",
     regime_config: "/api/ops/regime_config",
     slack_preview: "/api/ops/slack_preview",
@@ -308,11 +315,43 @@
     useEffect(() => {
       const ctrl = new AbortController();
       ctrlRef.current = ctrl;
-      refetchFast();
-      refetchSlow();
-      const ifast = setInterval(refetchFast, 10_000);
-      const islow = setInterval(refetchSlow, 60_000);
-      return () => { clearInterval(ifast); clearInterval(islow); ctrl.abort(); };
+      let ifast = null, islow = null;
+
+      // Polling lifecycle — gated on document visibility. The previous
+      // implementation ran 10s fast + 60s slow intervals unconditionally,
+      // hammering ~25 endpoints every 10s even when the tab was backgrounded
+      // (Batch E4 fix, 2026-05-16). Pausing on hidden saves ~150 req/min
+      // per backgrounded tab AND prevents the rate-limiter from tripping
+      // when the operator returns after a long away period (Chrome
+      // re-fires every interval that elapsed while hidden).
+      const start = () => {
+        if (ifast || islow) return;
+        // Force a refetch on resume so the operator doesn't see frozen
+        // numbers from the last visibility — fire immediately, then schedule.
+        refetchFast();
+        refetchSlow();
+        ifast = setInterval(refetchFast, 10_000);
+        islow = setInterval(refetchSlow, 60_000);
+      };
+      const stop = () => {
+        if (ifast) { clearInterval(ifast); ifast = null; }
+        if (islow) { clearInterval(islow); islow = null; }
+      };
+      const onVisChange = () => {
+        if (document.visibilityState === "hidden") stop();
+        else start();
+      };
+
+      // Start only if the tab is visible at mount time. visibilitychange
+      // covers backgrounding + foregrounding throughout the session.
+      if (document.visibilityState !== "hidden") start();
+      document.addEventListener("visibilitychange", onVisChange);
+
+      return () => {
+        document.removeEventListener("visibilitychange", onVisChange);
+        stop();
+        ctrl.abort();
+      };
     }, [refetchFast, refetchSlow]);
 
     return { state, refetchFast, refetchSlow };
@@ -395,76 +434,6 @@
     return { points: pts.join(" "), labels: ["Deep", "Fast", "F&G", "Agree"] };
   }
 
-  // ─────────────── FLASH-NEWS STRIP — V4 "what's trading right now" ───────
-  // Single thin row mounted ABOVE TodayScoreboard. Auto-refresh on the
-  // fast-poll tick. Designed to answer "what is V4 doing right now?" in
-  // one glance — engine + open count + open symbols + closed-today P&L
-  // + regime + last fill time. Operator-requested 2026-05-13 post-cutover.
-  function FlashNewsStripLive({ data }) {
-    const env = envelopeData(data.flash_status) || {};
-    const engine = String(env.engine || "—").toUpperCase();
-    const mode = String(env.mode || "").toUpperCase();
-    const openN = Number(env.open_positions || 0);
-    const openSyms = (env.open_symbols || []).slice(0, 6);
-    const openNotional = Number(env.open_notional_usd || 0);
-    const closedN = Number(env.closed_today || 0);
-    const closedPnl = Number(env.closed_today_pnl_usd || 0);
-    const regime = String(env.regime || "—");
-    const regimeProb = Number(env.regime_prob || 0);
-    const lastFillTs = env.last_fill_ts;
-    const lastSym = env.last_fill_symbol;
-    const lastSide = env.last_fill_side;
-
-    const regimeCls =
-      regime === "trending_up" ? "up" :
-      regime === "trending_down" ? "down" :
-      regime === "high_volatility" ? "warn" : "info";
-    const pnlCls = closedPnl > 0 ? "up" : closedPnl < 0 ? "down" : "dim";
-    const engineCls = engine === "QUANTA_CORE" ? "up" : "info";
-
-    const item = (label, value, cls) => h("div", {
-      style: { display: "inline-flex", alignItems: "baseline", gap: 6,
-               padding: "0 12px", borderRight: "1px solid var(--bd-1)",
-               flex: "0 0 auto", whiteSpace: "nowrap" },
-    },
-      h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)", letterSpacing: ".08em" } }, label),
-      h("span", { className: "num " + (cls || ""), style: { fontSize: "var(--t-sm)" } }, value)
-    );
-
-    return h("div", {
-      id: "flash-news",
-      className: "card anchor",
-      style: {
-        padding: "8px 16px",
-        marginBottom: "var(--gap-grid)",
-        display: "flex",
-        flexDirection: "row",
-        flexWrap: "nowrap",
-        alignItems: "center",
-        gap: 0,
-        overflowX: "auto",
-        overflowY: "hidden",
-        whiteSpace: "nowrap",
-      },
-    },
-      h("div", { className: "pill " + engineCls,
-                  style: { flex: "0 0 auto", padding: "2px 10px",
-                           marginRight: 8, whiteSpace: "nowrap" } },
-        h("span", { className: "dot " + engineCls + " pulse" }),
-        " ", engine, " · ", mode || "—"),
-      item("OPEN", openN + (openN > 0 ? " · " + openSyms.join(" ") : ""),
-           openN > 0 ? "up" : "dim"),
-      openN > 0 ? item("NOTIONAL", "$" + openNotional.toLocaleString("en-US", { maximumFractionDigits: 0 }), "accent") : null,
-      item("CLOSED TODAY", closedN, "info"),
-      item("REALIZED", (closedPnl >= 0 ? "+" : "") + "$" + closedPnl.toFixed(2), pnlCls),
-      item("REGIME", regime + " · " + (regimeProb * 100).toFixed(0) + "%", regimeCls),
-      lastFillTs ? item("LAST FILL",
-        (lastSym || "—") + " " + (lastSide || ""), "dim") : null,
-      lastFillTs ? h("div", { style: { marginLeft: "auto", flex: "0 0 auto", paddingLeft: 12 } },
-        h(TimeSince, { ts: lastFillTs, className: "mono dim",
-                       style: { fontSize: "var(--t-2xs)" } })) : null
-    );
-  }
 
   // ─────────────── TODAY SCOREBOARD — single-card at-a-glance summary ─────
   // Operator's stated need (2026-05-11): "top right corner, daily P&L,
@@ -547,9 +516,11 @@
       },
         worst.pair + " · stake $" + fmtUSD(worst.stake_usd) +
         " / cap $" + fmtUSD(worst.cap_usd) +
-        " · " + worst.cap_multiple + "× over · pnl " +
+        " · " + (worst.cap_multiple ?? "?") + "× over · pnl " +
         (worst.pnl_usd >= 0 ? "+$" : "−$") + fmtUSD(Math.abs(worst.pnl_usd)) +
-        " · closed " + String(worst.closed_at || "").slice(0, 10))
+        " · " + (worst.status === "open"
+          ? "OPEN"
+          : "closed " + String(worst.closed_at || "").slice(0, 10)))
     ) : null;
 
     return h(Card, {
@@ -654,7 +625,7 @@
     const lastSide = env.last_fill_side;
     const engineCls = engine === "QUANTA_CORE" ? "up" : "info";
     const pnlCls = closedPnl > 0 ? "up" : closedPnl < 0 ? "down" : "dim";
-    const mh = useMarketHours();
+    const mh = getMarketHours(data);
 
     const sep = h("span", { className: "dim mono", style: { fontSize: "var(--t-2xs)", margin: "0 8px" } }, "·");
 
@@ -755,33 +726,123 @@
   // the Core node tone. Otherwise the layout is static (it's a topology
   // map, not a metric).
   function AgentFlowCard({ data }) {
-    const cvSlot = slotState(data, "cap_violations");
-    const cvData = envelopeData(cvSlot.env) || {};
+    // Pull EVERY value from a live slot. No hardcoded labels.
+    // Tone semantics:
+    //   ok    — service active + producing fresh data
+    //   warn  — degraded (e.g. cap breaches, stale snapshot during market hrs)
+    //   crit  — circuit breaker active OR service down
+    //   stale — frozen but expected (NYSE closed, paper account static)
+    //   accent — the conductor (Hermes) always indigo so the topology reads
+    //   off   — feature exists but no recent activity
+    const cvData = envelopeData(slotState(data, "cap_violations").env) || {};
     const cvCount = Array.isArray(cvData.violations) ? cvData.violations.length : 0;
-    const rgSlot = slotState(data, "risk_gates");
-    const rgEnv = envelopeData(rgSlot.env) || {};
-    const trSlot = slotState(data, "trades_risk");
-    const tr = envelopeData(trSlot.env) || {};
+    const tr = envelopeData(slotState(data, "trades_risk").env) || {};
     const breakerActive = !!(tr && tr.circuit_breaker && tr.circuit_breaker.active);
+    const v4Open = Number(tr.open_count || 0);
+    const v4ClosedToday = Number(tr.closed_today || 0);
+    const svc = envelopeData(slotState(data, "services").env) || {};
+    // Services endpoint shape: { up: bool, via: string, age_s: number, content?: string }
+    // Canonical liveness is the `up` boolean; `content` is a hermes-specific status string.
+    const hermesActive = !!svc.hermes_gateway?.up;
+    const hermesActivating =
+      String(svc.hermes_mcp?.content || "").toLowerCase() === "activating";
+    const coreUp = !!svc.quanta_core?.up;
+    const coreAge = Number(svc.quanta_core?.age_s || 0);
+    const stocksData = envelopeData(slotState(data, "stocks").env) || {};
+    const wheel = stocksData.wheel || {};
+    const wheelOpenList = Array.isArray(wheel.open_positions) ? wheel.open_positions : [];
+    const wheelTop = wheelOpenList[0];
+    const wheelCsp = Number(wheel.open_csps ?? wheelOpenList.filter(p => (p.kind || "").includes("put")).length);
+    const wheelCc = Number(wheel.open_ccs ?? wheelOpenList.filter(p => (p.kind || "").includes("call")).length);
+    const alpacaSnapAge = Number((stocksData.alpaca || {}).age_seconds || 0);
+    const marketOpen = !!(envelopeData(slotState(data, "combined_portfolio").env) || {}).market_open_now;
+    const alpacaStale = alpacaSnapAge > 600 && marketOpen; // 10min, only flag during hours
+    const wt = envelopeData(slotState(data, "weekly_training").env) || {};
+    const mfReachable = !!wt.model_forge_reachable;
+    const mfTracks = Array.isArray(wt.tracks) ? wt.tracks : [];
+    const mfPromoted = mfTracks.filter(t => (t.status || "").toLowerCase().includes("promot")).length;
+    const sb = envelopeData(slotState(data, "shark_briefing").env) || {};
+    const sbPhases = Array.isArray(sb.phases) ? sb.phases : [];
+    const sbLastPhase = sbPhases.length ? sbPhases[sbPhases.length - 1] : null;
+    const sbAge = Number(sb.file_age_s || 0);
+    const sharkFresh = sbAge > 0 && sbAge < 24 * 3600; // any phase in last 24h
 
-    const width = 1340, height = 280;
+    // Sub-labels: REAL state, fallback to "—" only when the producer hasn't emitted
+    const hermesSub = hermesActive
+      ? (hermesActivating ? "active · mcp activating" : "active · cron driving")
+      : (hermesActivating ? "activating…" : "down");
+    const v4Sub = (v4Open + v4ClosedToday) > 0
+      ? v4Open + " open · " + v4ClosedToday + " closed today"
+      : "MR + TF · 12 pairs · idle";
+    const wheelSub = wheelTop
+      ? wheelCsp + " csp · " + wheelCc + " cc · " + (wheelTop.underlying || "") + " " + (wheelTop.strike || "") + " exp " + String(wheelTop.expiry || "").slice(5)
+      : wheelCsp + " csp · " + wheelCc + " cc · idle";
+    const sharkSub = sbLastPhase
+      ? (sbLastPhase.phase || "phase ?") + " · " +
+        (sbLastPhase.confirmed ? "confirmed " + sbLastPhase.confirmed : (sbLastPhase.traded ? "traded " + sbLastPhase.traded : "—"))
+      : "no recent phase";
+    const mfSub = mfReachable
+      ? mfPromoted + "/" + (mfTracks.length || "—") + " promoted · " + (wt.reflections_this_week || 0) + " refls 7d"
+      : (wt.model_forge_error ? "error · " + String(wt.model_forge_error).slice(0, 30) : "unreachable");
+    const riskSub = cvCount > 0
+      ? cvCount + " cap breach" + (cvCount === 1 ? "" : "es") + " · 7d"
+      : (breakerActive ? "BREAKER TRIPPED" : "cap · DD · weekly · all green");
+    const coreSub = breakerActive
+      ? "PAUSED"
+      : (coreUp
+          ? (v4Open > 0
+              ? v4Open + " active · paper"
+              : "live · decision " + (coreAge ? Math.round(coreAge) + "s ago" : "fresh"))
+          : "down");
+    const alpacaSub = alpacaStale
+      ? "stale · " + Math.round(alpacaSnapAge / 60) + "m"
+      : (marketOpen ? "live · paper" : "frozen · NYSE closed");
+
+    // Layout: 5 horizontal lanes on a single vertical spine.
+    //   lane 0 — Hermes (conductor)
+    //   lane 1 — V4 · Wheel · Shark · ModelForge (strategy row)
+    //   lane 2 — Risk Governor (gate)
+    //   lane 3 — Quanta Core (executor)
+    //   lane 4 — Alpaca · CCXT (broker)
+    // Edges route orthogonally through shared "bus" lanes between rows so the
+    // diagram reads top→bottom like a Sankey, not a tangle of bezier arcs.
+    const width = 1340, height = 420;
     const N = {
-      hermes:  { x: 0.50, y: 0.10, label: "HERMES",       sub: "cron · 34 jobs",         tone: "accent" },
-      v4:      { x: 0.16, y: 0.40, label: "V4",           sub: "MR + TF · 12 pairs",      tone: "ok" },
-      wheel:   { x: 0.34, y: 0.40, label: "WHEEL",        sub: "short_put · cov_call",    tone: "ok" },
-      shark:   { x: 0.52, y: 0.40, label: "SHARK",        sub: "bull · bear · arbiter",   tone: "ok" },
-      forge:   { x: 0.78, y: 0.40, label: "MODELFORGE",   sub: "adapter v423",            tone: "off" },
-      risk:    { x: 0.34, y: 0.72, label: "RISK GOVERNOR",sub: (cvCount > 0 ? cvCount + " cap breach" + (cvCount === 1 ? "" : "es") + " · 7d" : "cap · DD · weekly"),                                                                       tone: (cvCount > 0 ? "warn" : "ok") },
-      core:    { x: 0.60, y: 0.72, label: "QUANTA CORE",  sub: (breakerActive ? "PAUSED" : "exec · paper"), tone: (breakerActive ? "crit" : "ok") },
-      broker:  { x: 0.86, y: 0.88, label: "ALPACA · CCXT",sub: "paper · dry-run",         tone: "stale" },
+      // Each node carries a logo glyph in `icon` — a unicode mark that doubles
+      // as the agent's "logo" so an operator scanning the diagram can identify
+      // a role from shape alone (✦=conductor, ▲=shark fin, ⇄=exchange, …).
+      hermes:  { x: 0.50, y: 0.08, label: "HERMES",        icon: "✦",
+                 sub: hermesSub,
+                 tone: hermesActive ? "accent" : (hermesActivating ? "warn" : "crit") },
+      v4:      { x: 0.16, y: 0.30, label: "V4",            icon: "▦",
+                 sub: v4Sub,
+                 tone: (v4Open + v4ClosedToday) > 0 ? "ok" : "off" },
+      wheel:   { x: 0.38, y: 0.30, label: "WHEEL",         icon: "◎",
+                 sub: wheelSub,
+                 tone: wheelTop ? "ok" : "off" },
+      shark:   { x: 0.62, y: 0.30, label: "SHARK",         icon: "▲",
+                 sub: sharkSub,
+                 tone: sharkFresh ? "ok" : "off" },
+      forge:   { x: 0.84, y: 0.30, label: "MODELFORGE",    icon: "◆",
+                 sub: mfSub,
+                 tone: mfReachable ? "ok" : "off" },
+      risk:    { x: 0.50, y: 0.55, label: "RISK GOVERNOR", icon: "▼",
+                 sub: riskSub,
+                 tone: cvCount > 0 ? "warn" : (breakerActive ? "crit" : "ok") },
+      core:    { x: 0.50, y: 0.78, label: "QUANTA CORE",   icon: "◉",
+                 sub: coreSub,
+                 tone: breakerActive ? "crit" : (coreUp ? "ok" : "stale") },
+      broker:  { x: 0.50, y: 0.92, label: "ALPACA · CCXT", icon: "⇄",
+                 sub: alpacaSub,
+                 tone: alpacaStale ? "warn" : (marketOpen ? "ok" : "stale") },
     };
     const px = (k) => N[k].x * width;
     const py = (k) => N[k].y * height;
     const E = [
       ["hermes","v4"], ["hermes","wheel"], ["hermes","shark"], ["hermes","forge"],
-      ["v4","risk"], ["wheel","risk"], ["shark","risk"],
+      ["v4","risk"], ["wheel","risk"], ["shark","risk"], ["forge","risk"],
       ["risk","core"], ["core","broker"],
-      ["forge","shark", true],   // dashed training loop
+      ["forge","shark", true],   // dashed training loop (above the row)
     ];
     const tone = {
       ok:     { ring: "var(--q-ok-bord, rgba(86,180,233,0.32))",    dot: "var(--q-ok, #56B4E9)",    text: "var(--q-ok, #56B4E9)",  glow: "rgba(86,180,233,0.12)" },
@@ -792,23 +853,96 @@
       stale:  { ring: "var(--q-line, rgba(255,255,255,0.07))",      dot: "var(--q-stale, #6E6E88)", text: "var(--q-t-3, #5E5E78)", glow: "transparent" },
     };
 
-    const svgEdges = E.map(([a, b, dashed], i) => {
-      const x1 = px(a), y1 = py(a) + 22, x2 = px(b), y2 = py(b) - 22;
-      const dy = (y2 - y1) * 0.45;
-      const d = "M " + x1 + " " + y1 + " C " + x1 + " " + (y1 + dy) + ", " + x2 + " " + (y2 - dy) + ", " + x2 + " " + y2;
-      return h("g", { key: "e-" + i },
+    // ── Edge router ─────────────────────────────────────────────────────────
+    // Three kinds of edges in this diagram:
+    //   1. Bus fan-out / fan-in   — HERMES → 4 strategies, 4 strategies → RISK.
+    //      Drawn as a single SHARED bus path (one vertical from source, one
+    //      horizontal across all branch x's, one vertical drop per target).
+    //      This is what makes the picture read as a Sankey instead of a
+    //      tangle of overlapping L-shapes.
+    //   2. Straight vertical spine — RISK → CORE → BROKER (all centered).
+    //   3. Overhead training loop — MODELFORGE ⤴ SHARK (dashed arc).
+    // y1/y2 add 42px below source nodes to clear the sub-label and 22px above
+    // target nodes to land on the box border.
+    function srcY(k) { return py(k) + 42; }   // below sub-label
+    function tgtY(k) { return py(k) - 22; }   // top of box
+    function busPath(srcKey, tgtKeys, busY) {
+      const sx = px(srcKey), sy = srcY(srcKey);
+      const xs = tgtKeys.map(k => px(k));
+      const minX = Math.min(sx, ...xs), maxX = Math.max(sx, ...xs);
+      // One spine: source-down, horizontal across full span, then one drop per target.
+      let d = "M " + sx + " " + sy + " V " + busY + " M " + minX + " " + busY + " H " + maxX;
+      for (const k of tgtKeys) {
+        d += " M " + px(k) + " " + busY + " V " + tgtY(k);
+      }
+      return d;
+    }
+    function fanInPath(srcKeys, tgtKey, busY) {
+      const tx = px(tgtKey), ty = tgtY(tgtKey);
+      const xs = srcKeys.map(k => px(k));
+      const minX = Math.min(tx, ...xs), maxX = Math.max(tx, ...xs);
+      let d = "M " + minX + " " + busY + " H " + maxX + " M " + tx + " " + busY + " V " + ty;
+      for (const k of srcKeys) {
+        d += " M " + px(k) + " " + srcY(k) + " V " + busY;
+      }
+      return d;
+    }
+    function vSpine(a, b) {
+      return "M " + px(a) + " " + srcY(a) + " V " + tgtY(b);
+    }
+    function overheadArc(a, b) {
+      const x1 = px(a), y1 = tgtY(a), x2 = px(b), y2 = tgtY(b);
+      const apexY = Math.min(y1, y2) - 28;
+      return "M " + x1 + " " + y1
+        + " C " + x1 + " " + apexY + ", " + x2 + " " + apexY + ", " + x2 + " " + y2;
+    }
+
+    const busTop = (srcY("hermes") + tgtY("v4"))   / 2;
+    const busMid = (srcY("v4")     + tgtY("risk")) / 2;
+    const strategies = ["v4", "wheel", "shark", "forge"];
+
+    // Build edge groups. Each group has its own animated packet.
+    const edgeGroups = [
+      { key: "fanout", d: busPath("hermes", strategies, busTop),
+        targets: strategies.map(k => ({ x: px(k), y: tgtY(k) })), tone: "accent" },
+      { key: "fanin",  d: fanInPath(strategies, "risk", busMid),
+        targets: [{ x: px("risk"), y: tgtY("risk") }], tone: "ok" },
+      { key: "spine-risk-core",  d: vSpine("risk", "core"),
+        targets: [{ x: px("core"), y: tgtY("core") }], tone: N.risk.tone },
+      { key: "spine-core-broker", d: vSpine("core", "broker"),
+        targets: [{ x: px("broker"), y: tgtY("broker") }], tone: N.core.tone },
+      { key: "training-loop", d: overheadArc("forge", "shark"),
+        targets: [{ x: px("shark"), y: tgtY("shark") }], tone: "off", dashed: true },
+    ];
+
+    const svgEdges = edgeGroups.map((g, i) => {
+      const stroke = tone[g.tone] || tone.ok;
+      return h("g", { key: "g-" + g.key },
         h("path", {
-          d, fill: "none",
+          d: g.d, fill: "none",
           stroke: "var(--q-line-strong, rgba(255,255,255,0.13))",
           strokeWidth: 1,
-          strokeDasharray: dashed ? "3 4" : undefined,
-          opacity: dashed ? 0.5 : 1,
-          markerEnd: "url(#qf-arrow)",
+          strokeLinejoin: "round",
+          strokeLinecap: "round",
+          strokeDasharray: g.dashed ? "3 4" : undefined,
+          opacity: g.dashed ? 0.45 : 1,
         }),
-        !dashed
-          ? h("circle", { r: 3, fill: tone[N[a].tone].dot,
-              style: { filter: "drop-shadow(0 0 5px " + tone[N[a].tone].dot + ")" } },
-              h("animateMotion", { dur: (3 + (i % 3) * 0.6) + "s", repeatCount: "indefinite", begin: (i * 0.4) + "s", path: d })
+        // arrow heads — small triangles at each target landing
+        g.targets.map((t, j) => h("polygon", {
+          key: "h-" + j,
+          points: (t.x - 3) + "," + (t.y - 5) + " " + (t.x + 3) + "," + (t.y - 5) + " " + t.x + "," + t.y,
+          fill: "rgba(255,255,255,0.18)",
+        })),
+        // animated packet — visualises liveness; one per edge group, not dashed
+        !g.dashed
+          ? h("circle", { r: 3, fill: stroke.dot,
+              style: { filter: "drop-shadow(0 0 5px " + stroke.dot + ")" } },
+              h("animateMotion", {
+                dur: (3 + (i % 3) * 0.6) + "s",
+                repeatCount: "indefinite",
+                begin: (i * 0.5) + "s",
+                path: g.d,
+              })
             )
           : null
       );
@@ -828,10 +962,12 @@
           color: t.text, textTransform: "uppercase",
         } },
           h("span", { style: {
-            width: 6, height: 6, borderRadius: 3, background: t.dot,
-            boxShadow: active && n.tone !== "off" ? "0 0 6px " + t.dot : "none",
+            display: "inline-flex", alignItems: "center", justifyContent: "center",
+            width: 14, height: 14, fontSize: 12, lineHeight: 1,
+            color: t.dot,
+            textShadow: active && n.tone !== "off" ? "0 0 6px " + t.dot : "none",
             animation: active ? "q-pulse-dot 2s ease-in-out infinite" : "none",
-          }}),
+          }}, n.icon || "•"),
           n.label
         ),
         h("div", { style: {
@@ -1261,255 +1397,6 @@
     );
   }
 
-  // ─────────────── TRAINING HEALTH — per-pair TFT model.zip validation ───────────────
-  //
-  // Sits next to WeeklyTrainingLive. One row per pair in pair_dictionary.json.
-  // Backed by /api/ops/training_health on the 10s fast-poll tick. Red rows
-  // when the model is a stub or missing; amber when stale (>72h). The
-  // existing CSS tokens (up / warn / down + dim, line-1) carry the colour
-  // semantics so this card matches the rest of the dashboard automatically.
-  function TrainingHealthLive({ data }) {
-    const slot = slotState(data, "training_health");
-    const env = envelopeData(slot.env) || {};
-    const pairs = env.pairs || [];
-    const counts = env.counts || {};
-    const staleThreshold = env.stale_hours_threshold || 72;
-
-    if (slot.phase === "down") {
-      return h(Card, {
-        num: "00d", title: "TFT model health · per pair",
-        sub: "endpoint unavailable",
-        right: cardRight(slot.fetchedAt),
-      }, h(EmptyState, { reason: slot.reason, fetchedAt: slot.fetchedAt, period: 10 }));
-    }
-    if (slot.phase === "loading") {
-      return h(Card, {
-        num: "00d", title: "TFT model health · per pair",
-        sub: "loading…",
-        right: cardRight(slot.fetchedAt),
-      }, h(LoadingState));
-    }
-
-    const okN = counts.ok || 0;
-    const stubN = counts.stub || 0;
-    const missingN = counts.missing || 0;
-    const staleN = counts.stale || 0;
-    const errN = counts.error || 0;
-    const badN = stubN + missingN + errN;
-
-    // Pip — same vocabulary as WeeklyTrainingLive.
-    let pillCls, pillText;
-    if (badN > 0) {
-      pillCls = "down"; pillText = badN + " QUARANTINED";
-    } else if (staleN > 0) {
-      pillCls = "warn"; pillText = staleN + " STALE";
-    } else if (pairs.length === 0) {
-      pillCls = "info"; pillText = "NO PAIRS YET";
-    } else {
-      pillCls = "up"; pillText = okN + "/" + pairs.length + " HEALTHY";
-    }
-
-    return h(Card, {
-      num: "00d", title: "TFT model health · per pair",
-      sub: "validates model.zip on every poll · stale = > " + Math.round(staleThreshold) + "h",
-      right: cardRight(slot.fetchedAt,
-        h("span", { className: "pill " + pillCls, style: { height: 18 } },
-          h("span", { className: "dot " + pillCls + (pillCls === "up" ? " pulse" : "") }),
-          " ", pillText))
-    },
-      h("div", {
-        style: {
-          display: "grid",
-          gridTemplateColumns:
-            "minmax(110px, 1.3fr) minmax(80px, .9fr) minmax(90px, 1fr) minmax(70px, .8fr) minmax(90px, 1fr)",
-          gap: 0,
-          marginTop: "var(--s-2)",
-          borderTop: "1px solid var(--line-1)",
-        }
-      },
-        h(F, null,
-          h(WeeklyTrainingHeaderCell, { label: "Pair" }),
-          h(WeeklyTrainingHeaderCell, { label: "Status" }),
-          h(WeeklyTrainingHeaderCell, { label: "Last train" }),
-          h(WeeklyTrainingHeaderCell, { label: "Age" }),
-          h(WeeklyTrainingHeaderCell, { label: "Size", align: "right" }),
-        ),
-        pairs.length === 0
-          ? h("div", {
-              className: "dim mono",
-              style: {
-                gridColumn: "span 5", padding: "var(--s-3)",
-                fontSize: "var(--t-xs)", textAlign: "center",
-              }
-            }, "FreqAI TFT retired post-cutover · quanta-core training-health producer not yet wired (Wave D)")
-          : pairs.map(p => h(TrainingHealthRow, { key: p.pair, p })),
-      ),
-      h("div", {
-        className: "dim mono",
-        style: { fontSize: "var(--t-2xs)", padding: "var(--s-2) 0 0",
-                 letterSpacing: ".06em" }
-      },
-        badN > 0
-          ? "stub = size < 1 MB or no data.pkl · missing = trained_ts = 0 (last save failed) · investigate before next retrain"
-          : staleN > 0
-            ? "stale rows have not retrained in the last " + Math.round(staleThreshold) + "h — check freqai live_retrain_hours"
-            : "all artifacts pass: size > 1 MB · data.pkl present · tensor blobs > 0"),
-      // Fix 6: TFT-blind fallback footer line. Shown only when at least
-      // one pair is eligible so the operator knows their config setting
-      // is actively governing live trading behaviour.
-      (function() {
-        const tbf = env.tft_blind_fallback || {};
-        const eligible = tbf.eligible_count || 0;
-        if (eligible <= 0) return null;
-        const mult = Math.round((tbf.position_size_multiplier || 0.5) * 100);
-        const active = tbf.active_count || 0;
-        // Paper-mode default 2026-05-12+: tft_blind_fallback.enabled is now
-        // ON by default. When ON, banner names how many pairs are actively
-        // trading via the BollingerRSI MR signal — no "DARK" wording. When
-        // OFF (operator override), banner warns that quarantined pairs are
-        // dark until retrain.
-        const cls = tbf.enabled ? "warn" : "down";
-        const txt = tbf.enabled
-          ? "tft-blind fallback ON · " + active + " pair(s) trading on BollingerRSI MR at " + mult + "% size"
-          : "tft-blind fallback OFF · " + eligible + " eligible pair(s) DARK until next TFT retrain · flip strategy_overrides.tft_blind_fallback.enabled=true to trade them at " + mult + "% size";
-        return h("div", {
-          className: "mono " + cls,
-          style: { fontSize: "var(--t-2xs)", padding: "var(--s-2) 0 0",
-                   letterSpacing: ".06em" }
-        }, txt);
-      })()
-    );
-  }
-
-  function TrainingHealthRow({ p }) {
-    // Red for stub/missing/error, amber for stale, default for ok.
-    const status = p.status || "ok";
-    let rowCls, statusText, statusCls;
-    if (status === "stub") {
-      rowCls = "down"; statusText = "STUB"; statusCls = "down";
-    } else if (status === "missing") {
-      rowCls = "down"; statusText = "MISS"; statusCls = "down";
-    } else if (status === "error") {
-      rowCls = "down"; statusText = "ERR"; statusCls = "down";
-    } else if (status === "stale") {
-      rowCls = "warn"; statusText = "STALE"; statusCls = "warn";
-    } else {
-      rowCls = "up"; statusText = "OK"; statusCls = "up";
-    }
-
-    const cell = (kids, extra) => h("div", {
-      style: Object.assign({
-        padding: "var(--s-2) var(--s-2)",
-        borderBottom: "1px solid var(--line-1)",
-        fontSize: "var(--t-xs)",
-        display: "flex", alignItems: "center", gap: 6,
-        minHeight: 30,
-      }, extra || {})
-    }, kids);
-
-    // Pair name. On stub/missing the cell stays default colour but the
-    // status pill carries the red. When TFT-blind fallback is eligible
-    // for this pair, append a small chip:
-    //   [blind] (warn) → fallback ACTIVE — pair is trading on BollingerRSI
-    //   [dark]  (down) → fallback DISABLED — pair is no-op until retrain
-    let blindChip = null;
-    if (p.tft_blind_active) {
-      blindChip = h("span", {
-        className: "pill warn",
-        style: { height: 14, fontSize: "var(--t-2xs)", marginLeft: 4 },
-        title: "TFT-blind fallback ACTIVE — trading on BollingerRSI MR signal at degraded sizing. Will auto-disable on next successful TFT retrain."
-      },
-        h("span", { className: "dot warn" }),
-        " blind"
-      );
-    } else if (p.tft_blind_eligible) {
-      blindChip = h("span", {
-        className: "pill down",
-        style: { height: 14, fontSize: "var(--t-2xs)", marginLeft: 4 },
-        title: "Eligible for TFT-blind fallback but operator has set strategy_overrides.tft_blind_fallback.enabled=false (paper-mode default is true). Pair is DARK until the next successful TFT retrain."
-      },
-        h("span", { className: "dot down" }),
-        " dark"
-      );
-    }
-    const pairCell = cell([
-      h("span", {
-        className: "mono",
-        style: { color: "var(--fg-1)", fontFamily: "var(--mono)" },
-        title: p.reason || ""
-      }, p.pair),
-      blindChip,
-    ].filter(Boolean));
-
-    const statusCell = cell(
-      h("span", {
-        className: "pill " + statusCls,
-        style: { height: 16, fontSize: "var(--t-2xs)" },
-        title: p.reason || ""
-      },
-        h("span", { className: "dot " + statusCls }),
-        " ", statusText)
-    );
-
-    // Last train — ISO short time. Same component used by the weekly card.
-    const lastTs = p.last_train_ts ? (p.last_train_ts * 1000) : null;
-    let trainText;
-    if (lastTs) {
-      try {
-        const dt = new Date(lastTs);
-        trainText = String(dt.getUTCHours()).padStart(2, "0")
-                  + ":" + String(dt.getUTCMinutes()).padStart(2, "0")
-                  + " UTC";
-      } catch (_) {
-        trainText = "—";
-      }
-    } else {
-      trainText = "never";
-    }
-    const trainCell = cell(
-      h("span", {
-        className: "mono " + (lastTs ? "" : "dim"),
-        style: { fontFamily: "var(--mono)", fontSize: "var(--t-xs)" }
-      }, trainText)
-    );
-
-    // Age in hours, formatted with the same helper as the rest of the page.
-    const ageText = p.age_hours == null ? "—" : durToHM(p.age_hours);
-    const ageCls = (status === "stale") ? "warn" : "";
-    const ageCell = cell(
-      h("span", {
-        className: "mono " + ageCls,
-        style: {
-          fontFamily: "var(--mono)",
-          fontVariantNumeric: "tabular-nums",
-          fontSize: "var(--t-xs)",
-        }
-      }, ageText)
-    );
-
-    // Size — bytes -> MB / KB with one decimal. Stub artifacts show in red.
-    const sz = Number(p.zip_size_bytes || 0);
-    let szText;
-    if (!sz) szText = "—";
-    else if (sz < 1024) szText = sz + " B";
-    else if (sz < 1_000_000) szText = (sz / 1024).toFixed(0) + " KB";
-    else szText = (sz / 1_000_000).toFixed(1) + " MB";
-    const szCls = (status === "stub" && sz > 0 && sz < 10000) ? "down" : "";
-    const sizeCell = cell(
-      h("span", {
-        className: "mono " + szCls,
-        style: {
-          fontFamily: "var(--mono)",
-          fontVariantNumeric: "tabular-nums",
-          fontSize: "var(--t-xs)",
-          width: "100%", textAlign: "right",
-        }
-      }, szText),
-      { justifyContent: "flex-end" }
-    );
-
-    return h(F, null, pairCell, statusCell, trainCell, ageCell, sizeCell);
-  }
 
 
   // ─────────────── HERO — combined equity + 3-cell status ───────────────
@@ -1533,12 +1420,24 @@
     // day_pnl_pct is already × 100 on the server.
     const dayPnl = Number(cp.day_pnl_usd ?? 0);
     const dayPct = Number(cp.day_pnl_pct ?? 0);
-    // Per-leg day P&L (kept for the Mini strip).
-    const cryptoStart = Number((cp.sources && cp.sources.crypto_starting_equity) || cp.crypto_peak_equity || cryptoEq || 1);
-    const cryptoDayPnl = cryptoEq - Number(cp.crypto_peak_equity || cryptoStart);
+    // Per-leg day P&L (Mini strip). The denominator MUST be today's start
+    // equity, never the all-time peak. Audit 2026-05-16 (Batch E1):
+    // crypto_peak_equity / stocks_peak_equity are LIFETIME peaks; using
+    // them as the day-start proxy was the same B1 bug class fixed in
+    // computeScoreboardMetrics — but never propagated here, so the Mini
+    // strip kept showing peak-to-now drawdown labelled as "day". Prefer
+    // sources.*_starting_equity. Fallback to the leg's current equity
+    // (yielding 0% day-pnl) is safe when the producer hasn't emitted a
+    // start-equity field yet — better a flat zero than a phantom −%.
+    const cryptoStart = Number(
+      (cp.sources && cp.sources.crypto_starting_equity) || cryptoEq || 1
+    );
+    const cryptoDayPnl = cryptoEq - cryptoStart;
     const cryptoDayPct = cryptoStart > 0 ? (cryptoDayPnl / cryptoStart) * 100 : 0;
-    const stocksStart = Number((cp.sources && cp.sources.stocks_starting_equity) || cp.stocks_peak_equity || stocksEq || 1);
-    const stocksDayPnl = stocksEq - Number(cp.stocks_peak_equity || stocksStart);
+    const stocksStart = Number(
+      (cp.sources && cp.sources.stocks_starting_equity) || stocksEq || 1
+    );
+    const stocksDayPnl = stocksEq - stocksStart;
     const stocksDayPct = stocksStart > 0 ? (stocksDayPnl / stocksStart) * 100 : 0;
     const dd = Math.abs(Number(cp.combined_drawdown_pct || 0));
     const pauseTh = Number(cp.threshold_pct || 10) * 0.8;
@@ -1795,15 +1694,19 @@
   }
 
   // ─────────────── AGENT TIMELINE — 24h cron axis ───────────────
-  // Real cron jobs from the cron table (reference_trading_bot_paths.md).
+  // Cron entries shown on the timeline. NOT auto-discovered — operator-
+  // curated for "shape of the day" context. Retrain TFT (h:9) and DRL
+  // refresh (h:12) were removed 2026-05-16 (Batch E5) after the 7-phase
+  // freqtrade decommission; neither loop runs anymore. The replacement
+  // weekly LoRA training pipeline (ModelForge) doesn't fire on a fixed
+  // 24-hour clock so it doesn't belong here — WeeklyTrainingLive surfaces
+  // its state instead.
   const CRON_JOBS = [
     { h:  0, dur: 8,  name: "Genome cycle",         kind: "evo", desc: "EPT genome cycle" },
     { h:  1, dur: 4,  name: "Sentiment sweep",      kind: "rsh", desc: "Sentiment fast pass" },
     { h:  2, dur: 6,  name: "On-chain pull",        kind: "rsh", desc: "Glassnode / on-chain" },
     { h:  4, dur: 4,  name: "Sentiment sweep",      kind: "rsh", desc: "Sentiment fast pass" },
     { h:  6, dur: 12, name: "Macro brief",          kind: "rsh", desc: "WSJ / FT / Reuters" },
-    { h:  9, dur: 6,  name: "Retrain TFT",          kind: "ml",  desc: "Rolling TFT retrain" },
-    { h: 12, dur: 6,  name: "DRL refresh",          kind: "ml",  desc: "PPO/DQN policy update" },
     { h: 15, dur: 8,  name: "Daily Slack brief",    kind: "rpt", desc: "Hermes assembles + posts" },
     { h: 18, dur: 8,  name: "Walk-forward eval",    kind: "ml",  desc: "OOS Sharpe gate" },
     { h: 21, dur: 4,  name: "Risk rebalance",       kind: "risk",desc: "Pair weights from corr" },
@@ -2731,7 +2634,7 @@
     const basket = Array.isArray(env.basket) ? env.basket : Object.keys(symbols);
     const marketOpen = !!env.market_open;
     const tfLabel = env.timeframe || "5Min";
-    const mh = useMarketHours();
+    const mh = getMarketHours(data);
     // Granular session label for the sub-line + footer (matches NYSE
     // canonical schedule: 06:30 pre-opening · 09:30-16:00 regular ·
     // 16:00-20:00 after-hours · everything else closed).
@@ -3194,20 +3097,15 @@
     );
   }
 
-  // /api/ops/market_hours — NYSE session state. Cache 60s; the response only
-  // changes at 09:30 / 16:00 ET so polling more often is wasted work.
-  function useMarketHours() {
-    const [mh, setMh] = useState(null);
-    useEffect(() => {
-      let cancelled = false;
-      const fetchNow = () => safeJsonFetch("/api/ops/market_hours")
-        .then(j => { if (!cancelled) setMh(envelopeData(j) || null); })
-        .catch(() => { /* leave null — pill renders "—" placeholder */ });
-      fetchNow();
-      const iv = setInterval(fetchNow, 60_000);
-      return () => { cancelled = true; clearInterval(iv); };
-    }, []);
-    return mh;
+  // NYSE session state selector — pulls from the pooled SLOW_ENDPOINTS
+  // fetch instead of mounting its own setInterval. Previously this lived
+  // as `useMarketHours()` (a hook with its own 60s timer); each call site
+  // spawned an independent timer, so the SPA fired 3 parallel requests to
+  // /api/ops/market_hours every 60s for identical data. Pooled at the
+  // useOpsData layer (Batch E3 fix, 2026-05-16) so we now make 1 request
+  // and benefit from the page-visibility pause (E4).
+  function getMarketHours(data) {
+    return envelopeData(data && data.market_hours) || null;
   }
 
   // ─────────────── STOCKS — wheel + shark Alpaca state ───────────────
@@ -3217,7 +3115,7 @@
     const alpaca = env.alpaca || {};
     const wheel = env.wheel || {};
     const shark = env.shark || {};
-    const mh = useMarketHours();
+    const mh = getMarketHours(data);
 
     // Market hours pill — formats NYSE session state next to the card title.
     // Granular session labels match canonical NYSE schedule (06:30 pre-opening,
@@ -3500,68 +3398,6 @@
           "ARM, then hold 1.5s to flatten all positions, cancel orders, halt strategy.")
       )
     );
-  }
-
-  // ─────────────── TRAINING — FreqAI / TFT retrain status (data-num 17) ───────────────
-  function TrainingCardLive({ data }) {
-    const env = envelopeData(data.training) || {};
-    const tft = env.tft || {};
-    const ept = env.ept || {};
-    const pairs = tft.pairs || [];
-    const cur = pairs.find(p => p.status === "training");
-    const done = pairs.filter(p => p.status === "done");
-    const etaMin = tft.current_pair_eta_s != null ? Math.round(tft.current_pair_eta_s / 60) : null;
-    const epochPct = cur && cur.max_epoch ? Math.min(100, (Number(cur.last_epoch) / Number(cur.max_epoch)) * 100) : 0;
-    const inner = h(F, null,
-      cur ? h("div", null,
-        h(ProgressBar, { value: epochPct, max: 100, cls: "accent" }),
-        h("div", { className: "hr" })) : null,
-      h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, fontSize: "var(--t-xs)" } },
-        h("div", { className: "dim mono" }, "CURRENT PAIR"),
-        h("div", { className: "num accent" }, (cur && cur.pair) || "—"),
-        h("div", { className: "dim mono" }, "EPOCH"),
-        h("div", { className: "num v3-num" }, cur ? (cur.last_epoch + " / " + cur.max_epoch) : "—"),
-        h("div", { className: "dim mono" }, "VAL SHARPE"),
-        h("div", { className: "num " + ((cur && cur.val_sharpe >= 0) ? "up" : "down") }, cur && cur.val_sharpe != null ? Number(cur.val_sharpe).toFixed(3) : "—"),
-        h("div", { className: "dim mono" }, "LOSS"),
-        h("div", { className: "num" }, cur && cur.loss != null ? Number(cur.loss).toFixed(4) : "—"),
-        h("div", { className: "dim mono" }, "AVG EPOCH"),
-        h("div", { className: "num v3-num" }, tft.avg_epoch_seconds != null ? tft.avg_epoch_seconds + "s" : "—"),
-        h("div", { className: "dim mono" }, "ETA"),
-        h("div", { className: "num v3-num" }, etaMin != null ? etaMin + "m" : "—"),
-        h("div", { className: "dim mono" }, "DICT READY"),
-        h("div", { className: "num " + (tft.pair_dict_ready ? "up" : "warn") }, tft.pair_dict_ready ? "yes" : "no"),
-        h("div", { className: "dim mono" }, "EPT GEN"),
-        h("div", { className: "num" }, ept.generation != null ? ("gen " + ept.generation + " · " + (ept.champion_id || "—")) : "—")
-      ),
-      pairs.length > 0 && h("div", null,
-        h("div", { className: "hr" }),
-        h("div", { className: "metric-label" }, "PER-PAIR SUB-TRAIN · " + pairs.length + " pairs"),
-        h("div", { style: { marginTop: 6 } },
-          pairs.map((p, i) => h("div", {
-            key: i,
-            style: { display: "grid", gridTemplateColumns: "50px 80px 60px 60px 1fr", gap: 6, fontSize: "var(--t-2xs)", padding: "2px 0" }
-          },
-            h("span", { className: "mono" }, p.pair),
-            h("span", { className: "pill " + (p.status === "done" ? "up" : p.status === "training" ? "accent" : "info"), style: { height: 16 } }, p.status),
-            h("span", { className: "num v3-num" }, "ep " + (p.last_epoch != null ? p.last_epoch : "—")),
-            h("span", { className: "num " + ((p.val_sharpe || 0) >= 0 ? "up" : "down") }, p.val_sharpe != null ? Number(p.val_sharpe).toFixed(2) : "—"),
-            h("span", { className: "dim mono" }, p.early_stopped ? "early-stop" : (p.end_ts || p.start_ts || ""))
-          ))
-        )
-      )
-    );
-    return h("div", { className: cur ? "v3-train-live-glow" : undefined },
-      h(Card, {
-        num: "17", title: "Training · FreqAI / TFT retrain status",
-        sub: cur ? ("training " + cur.pair + " · epoch " + cur.last_epoch + "/" + cur.max_epoch) : (done.length + " pairs trained"),
-        right: h(F, null,
-          h(TimeSince, { ts: data.training_fetched_at, className: "mono dim", style: { fontSize: "var(--t-2xs)", marginRight: 8 } }),
-          cur
-            ? h("span", { className: "pill accent" }, h("span", { className: "dot accent pulse" }), " LIVE")
-            : h("span", { className: "pill up" }, "IDLE")
-        ),
-      }, inner));
   }
 
   // ─────────────── READINESS — validation gate matrix (data-num 18) ───────────────
@@ -5029,517 +4865,6 @@
     );
   }
 
-  // ─────────────── AgentFlow — pipeline strip above LLM Activity ───────────────
-  // Renders 5–6 boxes for the conceptual trading-bot LLM pipeline:
-  //   regime_tagger → indicator_selector? → bull_debater → bear_debater
-  //   → arbiter → reflector
-  // Piggybacks on the same /api/ops/llm_calls payload the existing LLM
-  // Activity card uses — server-side aggregates land in
-  // summary.by_role_detail. No new poll. Additive: the existing list below
-  // is untouched; operators still scan raw rows for forensic detail.
-  //
-  // Click → scrolls the LLM activity list to the role's most-recent row
-  // and pulses it for 800 ms. Implemented via a CustomEvent the
-  // LLMCallsLive component listens for — no shared state, no refactor of
-  // the existing component.
-  //
-  // Opt-out: localStorage.setItem("quanta.agent_flow", "0"); reload.
-
-  // Fixed order of strip slots — gaps are rendered as "no calls today"
-  // placeholder boxes (per spec edge-case) so the operator can see which
-  // pipeline stage isn't firing. ``indicator_selector`` is the one
-  // exception: if it has zero calls in the window we omit it entirely
-  // because today's bot doesn't emit it at all (per spec).
-  const DEBATE_FLOOR_ROLES = [
-    "regime_tagger",
-    "bull_debater",
-    "bear_debater",
-    "arbiter",
-    "reflector",
-  ];
-
-  function _afAgeMs(iso) {
-    if (!iso) return Infinity;
-    const t = Date.parse(iso);
-    if (isNaN(t)) return Infinity;
-    return Date.now() - t;
-  }
-  function _afAgeLabel(iso) {
-    const ms = _afAgeMs(iso);
-    if (!isFinite(ms)) return "—";
-    const s = Math.round(ms / 1000);
-    if (s < 60) return s + "s ago";
-    const m = Math.round(s / 60);
-    if (m < 60) return m + "m ago";
-    const hr = Math.round(m / 60);
-    if (hr < 24) return hr + "h ago";
-    const d = Math.round(hr / 24);
-    return d + "d ago";
-  }
-  function _afFreshnessClass(detail) {
-    if (!detail || !detail.count) return "is-empty";
-    // Failure dominates over freshness — red wins even if latest call was
-    // < 5 min ago, per spec.
-    if (detail.last_success === false) return "is-fail";
-    const ageMs = _afAgeMs(detail.last_ts);
-    if (ageMs < 5 * 60_000) return "is-fresh";
-    if (ageMs < 60 * 60_000) return "is-warm";
-    return "is-cold";
-  }
-  function _afDotClass(detail) {
-    if (!detail || !detail.count) return "";
-    if (detail.last_success === false) return "down";
-    const ageMs = _afAgeMs(detail.last_ts);
-    if (ageMs < 5 * 60_000) return "up pulse";
-    if (ageMs < 60 * 60_000) return "warn";
-    return "";
-  }
-
-  function _debateMaxLastTsMs(detailByRole) {
-    let max = 0;
-    for (let ri = 0; ri < DEBATE_FLOOR_ROLES.length; ri++) {
-      const role = DEBATE_FLOOR_ROLES[ri];
-      const d = detailByRole[role];
-      if (d && d.last_ts) {
-        const t = Date.parse(d.last_ts);
-        if (!isNaN(t) && t > max) max = t;
-      }
-    }
-    return max;
-  }
-
-  function _debateIsLive(detailByRole) {
-    const max = _debateMaxLastTsMs(detailByRole);
-    if (!max) return false;
-    return Date.now() - max < 60_000;
-  }
-
-  // Strip JSON syntax noise from a response gist so it renders as flat
-  // human-readable text. Bot responses often start with `{` and embed
-  // quoted keys; raw rendering looks like `{ "grade": "C", "pattern":...`
-  // which is ugly. We strip braces/quotes, replace `:` with ` ` and `,`
-  // with ` · `, and collapse whitespace.
-  function _afCleanGist(s) {
-    if (s == null) return "";
-    let t = String(s).trim();
-    // Quick path: if it doesn't look like JSON, just normalize whitespace.
-    if (t[0] !== "{" && t[0] !== "[" && t.indexOf('"') === -1) {
-      return t.replace(/\s+/g, " ");
-    }
-    t = t.replace(/[{}\[\]"]/g, "");
-    t = t.replace(/\s*:\s*/g, " ");
-    t = t.replace(/\s*,\s*/g, " · ");
-    t = t.replace(/\s+/g, " ").trim();
-    // Drop dangling separator if truncated mid-pair upstream.
-    if (t.endsWith("·")) t = t.slice(0, -1).trim();
-    return t;
-  }
-
-  function DebateFloorConnectors({ live, activeFlows }) {
-    // Each segment now carries a destination tag so we can spawn an
-    // animated "message dot" traveling along the path when the
-    // destination role fires (operator wanted "one agent talking to
-    // another" visual — this is the explicit message-passing layer).
-    //
-    // Active flows (set by AgentFlow when a role's last_ts < 8s):
-    //   "in-regime"   regime tagger receives → fires from card top
-    //   "regime→bull" regime fans out to bull
-    //   "regime→arb"  regime fans out to arbiter
-    //   "regime→bear" regime fans out to bear
-    //   "→reflect"    bull/bear/arb feed reflector
-    //   "out-reflect" reflector publishes
-    const stroke = "color-mix(in srgb, var(--fg-3) 55%, transparent)";
-    const segs = [
-      { d: "M 160 6 L 160 38",                        key: "in-regime",   color: "var(--v3-cold-blue)" },
-      { d: "M 160 38 L 52 38 L 52 58",                key: "regime→bull", color: "var(--up)" },
-      { d: "M 160 38 L 160 58",                       key: "regime→arb",  color: "var(--accent)" },
-      { d: "M 160 38 L 268 38 L 268 58",              key: "regime→bear", color: "var(--down)" },
-      { d: "M 52 118 L 160 150 L 268 118",            key: "→reflect",    color: "var(--warn)" },
-      { d: "M 160 150 L 160 178",                     key: "out-reflect", color: "var(--warn)" },
-    ];
-    const flows = activeFlows || {};
-    return h(
-      "svg",
-      {
-        className: "v3-debate-svg" + (live ? " is-live" : ""),
-        viewBox: "0 0 320 200",
-        preserveAspectRatio: "none",
-        "aria-hidden": "true",
-      },
-      segs.map((s, i) =>
-        h(F, { key: i },
-          h("path", {
-            id: "v3-debate-path-" + i,
-            className: "v3-debate-path" + (flows[s.key] ? " v3-debate-path-active" : ""),
-            d: s.d,
-            fill: "none",
-            stroke: flows[s.key] ? s.color : stroke,
-            strokeWidth: flows[s.key] ? 1.75 : 1.25,
-            strokeLinecap: "round",
-            strokeLinejoin: "round",
-          }),
-          // When this flow is active, render a traveling "message" dot
-          // that re-keys per firing so the SMIL animation restarts.
-          flows[s.key] && h("circle", {
-            key: "dot-" + i + "-" + flows[s.key],
-            r: 3.5,
-            fill: s.color,
-            opacity: 1,
-            style: { filter: "drop-shadow(0 0 6px " + s.color + ")" },
-          },
-            h("animateMotion", {
-              dur: "1.2s",
-              repeatCount: "indefinite",
-              path: s.d,
-              rotate: "auto",
-            })
-          )
-        )
-      )
-    );
-  }
-
-  // Returns ms since the role's last_ts, or null if no recent activity.
-  function _afAgeMs(detail) {
-    if (!detail || !detail.last_ts) return null;
-    const t = new Date(detail.last_ts).getTime();
-    if (!isFinite(t)) return null;
-    return Date.now() - t;
-  }
-
-  function DebateRoleCard({ role, headline, subline, variant, detail, onClick }) {
-    const empty = !detail || !detail.count;
-    const ageMs = _afAgeMs(detail);
-    // Pulse animation re-keys the DOM each time the role fires so the
-    // CSS @keyframes restarts. Key changes when last_ts moves into the
-    // "just fired" window (< 8 s).
-    const justFired = ageMs != null && ageMs < 8000;
-    const cardCls = cls(
-      "v3-debate-card",
-      "v3-debate-card--" + variant,
-      empty ? "is-empty" : _afFreshnessClass(detail),
-      justFired ? "just-fired" : ""
-    );
-    const boxRef = useRef(null);
-    const lastGist = detail && (detail.last_response_gist || detail.last_gist);
-    const cleanGist = lastGist ? _afCleanGist(lastGist) : "";
-    const ariaLabel = empty
-      ? role + " — idle (no calls in 24h)"
-      : role + " — " + detail.count + " calls, last " + _afAgeLabel(detail.last_ts);
-    const dotCls = _afDotClass(detail);
-    // Force a remount whenever last_ts changes so the .just-fired
-    // animation restarts cleanly on each new call.
-    const remountKey = detail && detail.last_ts ? String(detail.last_ts) : "idle";
-    return h("div", {
-      ref: boxRef,
-      key: remountKey,
-      className: cardCls,
-      role: "button",
-      tabIndex: 0,
-      "aria-label": ariaLabel,
-      onClick: () => onClick(role, detail, boxRef.current),
-      onKeyDown: (e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onClick(role, detail, boxRef.current);
-        }
-      },
-    },
-      h("div", { className: "v3-debate-card-head" },
-        h("span", { className: "v3-debate-role" }, headline),
-        !empty && h("span", { className: "v3-debate-model-chip mono" }, detail.model || "—")
-      ),
-      subline && h("div", { className: "v3-debate-sub mono dim" }, subline),
-      empty
-        ? h("div", { className: "v3-debate-idle dim" }, "idle")
-        : h(F, null,
-            h("div", { className: "v3-debate-live mono" },
-              dotCls && h("span", { className: "dot " + dotCls }),
-              h("span", null, _afAgeLabel(detail.last_ts))
-            ),
-            cleanGist && h("div", {
-              className: "v3-debate-gist mono dim",
-              title: cleanGist,
-            }, _aldTrim(cleanGist, 90))
-          )
-    );
-  }
-
-  function AgentFlow({ data }) {
-    const slot = slotState(data, "llm_calls");
-    const env = envelopeData(slot.env) || {};
-    const summary = env.summary || {};
-    const detailByRole = summary.by_role_detail || {};
-
-    // Opt-out — operator can hide the strip with one console line.
-    const [hidden, setHidden] = useState(() => {
-      try { return localStorage.getItem("quanta.agent_flow") === "0"; }
-      catch (_) { return false; }
-    });
-    useEffect(() => {
-      function onStorage(e) {
-        if (e.key === "quanta.agent_flow") {
-          setHidden(e.newValue === "0");
-        }
-      }
-      window.addEventListener("storage", onStorage);
-      return () => window.removeEventListener("storage", onStorage);
-    }, []);
-    if (hidden) return null;
-
-    // Re-render every 30 s so the "Xm ago" labels stay current between
-    // 10 s data polls — does NOT fetch anything, just bumps state.
-    const [, _tick] = useState(0);
-    useEffect(() => {
-      const iv = setInterval(() => _tick(n => n + 1), 30_000);
-      return () => clearInterval(iv);
-    }, []);
-
-    // 1.2Hz pulse when any frozen role fired within 60s (spec §5.2).
-    const [, _liveTick] = useState(0);
-    useEffect(() => {
-      const iv = setInterval(() => _liveTick(n => n + 1), 500);
-      return () => clearInterval(iv);
-    }, []);
-
-    // Regime-change banner — when /api/ops/regime label flips, show a
-    // "REGIME → X" pulse on the Agent Flow card for 30s so the operator
-    // can SEE that a regime trigger just hit the debate pipeline.
-    const regimeEnv = envelopeData(data.regime) || {};
-    const regimeNow = regimeEnv.current && regimeEnv.current.label
-      || regimeEnv.label
-      || regimeEnv.regime
-      || null;
-    const lastRegimeRef = useRef(regimeNow);
-    const [regimeFlash, setRegimeFlash] = useState(null);
-    useEffect(() => {
-      if (regimeNow && lastRegimeRef.current && regimeNow !== lastRegimeRef.current) {
-        const from = lastRegimeRef.current;
-        setRegimeFlash({ from, to: regimeNow, at: Date.now() });
-        const t = setTimeout(() => setRegimeFlash(null), 30_000);
-        lastRegimeRef.current = regimeNow;
-        return () => clearTimeout(t);
-      }
-      if (regimeNow && !lastRegimeRef.current) {
-        lastRegimeRef.current = regimeNow;
-      }
-    }, [regimeNow]);
-
-    const click = useCallback((role, detail, originEl) => {
-      // Tier E: prefer the AgentLogsDrawer. If the operator opted out
-      // via ``localStorage["quanta.agent_logs_drawer"] === "0"``, fall
-      // back to the Tier-D scroll-and-pulse path on the activity list.
-      let useDrawer = true;
-      try {
-        if (localStorage.getItem("quanta.agent_logs_drawer") === "0") {
-          useDrawer = false;
-        }
-      } catch (_e) { /* localStorage may be unavailable */ }
-
-      if (useDrawer) {
-        const evt = new CustomEvent("quanta:agent-logs-open", {
-          detail: {
-            role,
-            model: detail && detail.model || null,
-            detail: detail || null,
-            originEl: originEl || null,
-          },
-        });
-        window.dispatchEvent(evt);
-        return;
-      }
-
-      // Fallback (Tier-D behavior). Fires the existing pick event so the
-      // LLMCallsLive component scrolls + pulses the matching row.
-      const evt = new CustomEvent("quanta:agent-flow-pick", {
-        detail: {
-          role,
-          rawAgents: detail && detail.raw_agents ? Object.keys(detail.raw_agents) : [],
-          lastTs: detail && detail.last_ts || null,
-        },
-      });
-      window.dispatchEvent(evt);
-    }, []);
-
-    // Loading / empty states — keep the strip visible but show a thin
-    // skeleton so the operator can tell the difference between
-    // "endpoint unreachable" and "no calls today".
-    const empty = !env || Object.keys(detailByRole).length === 0;
-    const subText = slot.phase === "loading" && empty
-      ? "loading…"
-      : slot.phase === "down"
-        ? "endpoint unavailable — placeholders only"
-        : empty
-          ? "no canonical-role calls in 24h window — courtroom shows all five roles"
-          : Object.keys(detailByRole).length + " roles with data · "
-            + (summary.total_calls || 0) + " calls in 24h · Debate Floor";
-
-    const debateLive = _debateIsLive(detailByRole);
-    const regime = detailByRole.regime_tagger || null;
-    const bull = detailByRole.bull_debater || null;
-    const bear = detailByRole.bear_debater || null;
-    const arb = detailByRole.arbiter || null;
-    const refl = detailByRole.reflector || null;
-
-    // Build a Phase Strip showing where in the canonical debate cycle
-    // we are. "fired" = role has any call in the last 5 min;
-    // "firing" = role's last call was within 8 s (currently animating).
-    const _PHASES = [
-      { key: "regime",  label: "REGIME",   detail: regime },
-      { key: "bull",    label: "BULL",     detail: bull },
-      { key: "bear",    label: "BEAR",     detail: bear },
-      { key: "arbiter", label: "ARBITER",  detail: arb },
-      { key: "reflect", label: "REFLECT",  detail: refl },
-    ];
-    const phaseSteps = _PHASES.map((p) => {
-      const ms = _afAgeMs(p.detail);
-      return {
-        label: p.label,
-        firing: ms != null && ms < 8000,
-        fired:  ms != null && ms < 300_000,
-      };
-    });
-
-    // Build the activeFlows map for the connector SVG. A flow segment
-    // is "active" when its destination role has fired recently (last 8 s).
-    // Value is the role's last_ts so the SVG re-keys + restarts the
-    // animateMotion on each new fire.
-    const _flowKey = (det) => det && det.last_ts ? String(det.last_ts) : "";
-    const regimeMs = _afAgeMs(regime);
-    const bullMs   = _afAgeMs(bull);
-    const bearMs   = _afAgeMs(bear);
-    const arbMs    = _afAgeMs(arb);
-    const reflMs   = _afAgeMs(refl);
-    const activeFlows = {
-      "in-regime":   regimeMs != null && regimeMs < 8000 ? _flowKey(regime) : null,
-      "regime→bull": bullMs != null && bullMs < 8000 ? _flowKey(bull) : null,
-      "regime→arb":  arbMs != null && arbMs < 8000 ? _flowKey(arb) : null,
-      "regime→bear": bearMs != null && bearMs < 8000 ? _flowKey(bear) : null,
-      "→reflect":    reflMs != null && reflMs < 8000 ? _flowKey(refl) : null,
-      "out-reflect": reflMs != null && reflMs < 8000 ? _flowKey(refl) : null,
-    };
-
-    return h(Card, {
-      num: "21a",
-      title: "Agent flow",
-      sub: subText,
-      right: h("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
-        regimeNow ? h("span", {
-          className: "pill " + (regimeFlash ? "warn" : "info"),
-          style: { fontSize: "var(--t-2xs)" },
-          title: "current macro regime · debate fires on transition",
-        }, "REGIME · " + String(regimeNow).toUpperCase()) : null,
-        cardRight(slot.fetchedAt),
-      ),
-    },
-      h("div", {
-        className: "v3-debate-phase-strip",
-        role: "group",
-        "aria-label": "Debate phase indicator — regime → bull → bear → arbiter → reflector",
-      },
-        phaseSteps.flatMap((step, i) => {
-          const items = [];
-          if (i > 0) {
-            items.push(h("span", {
-              key: "arr-" + i,
-              className: cls("v3-debate-phase-arrow", step.firing || phaseSteps[i - 1].firing ? "lit" : ""),
-            }, "→"));
-          }
-          items.push(h("span", {
-            key: step.label,
-            className: cls("v3-debate-phase-step",
-              step.firing ? "firing" : (step.fired ? "fired" : "")),
-            title: step.firing ? "firing now" : (step.fired ? "fired in last 5 min" : "idle"),
-          }, step.label));
-          return items;
-        })
-      ),
-      regimeFlash && h("div", {
-        className: "v3-regime-flash",
-        role: "status",
-        "aria-live": "polite",
-        style: {
-          padding: "var(--s-2) var(--s-3)",
-          marginBottom: "var(--s-2)",
-          borderRadius: 6,
-          background: "color-mix(in srgb, var(--warn) 18%, transparent)",
-          border: "1px solid color-mix(in srgb, var(--warn) 60%, transparent)",
-          fontFamily: "var(--mono)",
-          fontSize: "var(--t-xs)",
-          color: "var(--fg-1)",
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-        },
-      },
-        h("span", { className: "dot", style: { background: "var(--warn)", width: 8, height: 8, borderRadius: 4 } }),
-        h("span", null, "REGIME CHANGED · "),
-        h("span", { className: "dim2" }, regimeFlash.from),
-        h("span", null, " → "),
-        h("span", { style: { fontWeight: 600 } }, regimeFlash.to),
-        h("span", { className: "dim2", style: { marginLeft: "auto", fontSize: "var(--t-2xs)" } },
-          "debate triggered · watching " + Object.keys(detailByRole).length + " roles for activity"),
-      ),
-      h("div", { className: "v3-debate-floor", id: "agent-flow-strip" },
-        h(DebateFloorConnectors, { live: debateLive, activeFlows: activeFlows }),
-        debateLive && h("div", { className: "v3-debate-live-anchor" },
-          h("span", { className: "v3-debate-live-pill", "aria-live": "polite" }, "DEBATE LIVE")),
-        h("div", { className: "v3-debate-grid" },
-          h("div", { className: "v3-debate-cell v3-debate-cell--regime" },
-            h(DebateRoleCard, {
-              role: "regime_tagger",
-              headline: "REGIME TAGGER",
-              subline: "scout · top of arena",
-              variant: "cold",
-              detail: regime,
-              onClick: click,
-            })
-          ),
-          h("div", { className: "v3-debate-cell v3-debate-cell--bull" },
-            h(DebateRoleCard, {
-              role: "bull_debater",
-              headline: "BULL",
-              subline: "assesses upside",
-              variant: "bull",
-              detail: bull,
-              onClick: click,
-            })
-          ),
-          h("div", { className: "v3-debate-cell v3-debate-cell--arbiter" },
-            h(DebateRoleCard, {
-              role: "arbiter",
-              headline: "ARBITER ⚖",
-              subline: "scales",
-              variant: "arbiter",
-              detail: arb,
-              onClick: click,
-            })
-          ),
-          h("div", { className: "v3-debate-cell v3-debate-cell--bear" },
-            h(DebateRoleCard, {
-              role: "bear_debater",
-              headline: "BEAR",
-              subline: "assesses downside",
-              variant: "bear",
-              detail: bear,
-              onClick: click,
-            })
-          ),
-          h("div", { className: "v3-debate-cell v3-debate-cell--reflector" },
-            h(DebateRoleCard, {
-              role: "reflector",
-              headline: "REFLECTOR",
-              subline: "post-mortem writer",
-              variant: "reflector",
-              detail: refl,
-              onClick: click,
-            })
-          )
-        )
-      )
-    );
-  }
-
   // ─────────────── AgentLogsDrawer — Tier E ────────────────────────────
   // Right-anchored slide-in panel that lists the last 50 calls for ONE
   // canonical AgentFlow role (bull_debater, bear_debater, arbiter, …).
@@ -6671,11 +5996,6 @@
           // V4 flash-status strip in its footer (operator-requested
           // 2026-05-13: "make that addition inside scoreboard").
           h(TodayScoreboard, { data }),
-          // AGENT FLOW — animated pipeline diagram (Hermes → V4/Wheel/Shark/
-          // ModelForge → Risk → Quanta Core → Alpaca). Packets travel along
-          // edges to convey "the system is breathing" without being chatty.
-          // Risk node tints vermillion when cap_violations > 0.
-          h(AgentFlowCard, { data }),
           // SHARK OVERRIDE HEALTH — verifier card for the BEAR_VOLATILE
           // paper-mode override. Sits directly under the scoreboard so a
           // single glance tells the operator "override is healthy" or
@@ -6710,11 +6030,13 @@
           // prompt + response (provided SHARK_LLM_LOG_FULL_TEXT=1 was on
           // when the call was logged).
           //
-          // AgentFlow strip sits ABOVE the activity list — same data, but
-          // a per-role pipeline view (regime_tagger → … → reflector). Both
-          // consume the same /api/ops/llm_calls response; no extra poll.
+          // AGENT FLOW — animated pipeline diagram (Hermes → V4/Wheel/Shark/
+          // ModelForge → Risk → Quanta Core → Alpaca). Packets travel along
+          // edges to convey "the system is breathing" without being chatty.
+          // Risk node tints vermillion when cap_violations > 0. Wired to live
+          // data from scoreboard slots — no hardcoded labels.
           h("div", { id: "llm-calls", className: "anchor", style: { gridColumn: "span 12" } },
-            h(AgentFlow, { data }),
+            h(AgentFlowCard, { data }),
             h(LLMCallsLive, { data }),
             // Tier E: AgentLogsDrawer renders via React portal to
             // document.body, so its position in the tree is irrelevant

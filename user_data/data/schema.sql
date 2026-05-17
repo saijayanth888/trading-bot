@@ -162,6 +162,44 @@ CREATE INDEX IF NOT EXISTS ix_trade_journal_opened_at ON trade_journal(opened_at
 CREATE INDEX IF NOT EXISTS ix_trade_journal_pair ON trade_journal(pair, opened_at DESC);
 CREATE INDEX IF NOT EXISTS ix_trade_journal_external_id ON trade_journal(external_id) WHERE external_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_trade_journal_open ON trade_journal(opened_at DESC) WHERE closed_at IS NULL;
+-- pnl_pct unit convention is FRACTION (-0.0123 = -1.23%); display layer
+-- multiplies × 100. Two rows landed in DB as percentage (trade_ids 118/134
+-- on 2026-05-14, audit 2026-05-16). Constraint blocks the 100x-mistake
+-- class while leaving headroom for paper-mode extremes.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'ck_pnl_pct_sane'
+           AND conrelid = 'trade_journal'::regclass
+    ) THEN
+        ALTER TABLE trade_journal
+            ADD CONSTRAINT ck_pnl_pct_sane
+            CHECK (pnl_pct IS NULL OR (pnl_pct BETWEEN -100 AND 100));
+    END IF;
+END $$;
+-- direction must be one of the two domain values. Quanta-core is long-only
+-- today but the audit 2026-05-16 (Batch F2) added this so a future short-
+-- enabled path can't silently land 'SHORT'/'sell'/'short' mixed values.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'ck_direction_enum'
+           AND conrelid = 'trade_journal'::regclass
+    ) THEN
+        ALTER TABLE trade_journal
+            ADD CONSTRAINT ck_direction_enum
+            CHECK (direction IN ('long', 'short'));
+    END IF;
+END $$;
+-- Hot-query index — every dashboard endpoint that filters/sorts on
+-- closed_at relies on this. Partial index keeps the still-open rows out
+-- since they share opened_at as a more natural axis. Audit 2026-05-16
+-- (Batch F1).
+CREATE INDEX IF NOT EXISTS ix_trade_journal_closed_at
+    ON trade_journal (closed_at DESC)
+    WHERE closed_at IS NOT NULL;
 
 -- ── Multi-source news aggregator (Task: expand sentiment sources) ───────
 CREATE TABLE IF NOT EXISTS news_headlines (

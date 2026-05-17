@@ -794,13 +794,38 @@ def trip_combined_kill_switch(reason: str) -> dict:
         logger.exception("unified_risk: failed to write stocks KILL flag: %s", exc)
 
     # 2. Crypto pause via the dashboard /api/ops/pause endpoint (mirrors the
-    #    Quick-actions button operators already use)
+    #    Quick-actions button operators already use).
+    #
+    # Routing: the kill-switch must reach the dashboard container regardless
+    # of where this module is imported from.
+    #   - Inside any compose service (quanta-core, dashboard itself, hermes-mcp):
+    #     reach the dashboard via the compose service name "dashboard:8081".
+    #     localhost:8081 inside another container points at THAT container's
+    #     own loopback — wrong target — and is the bug behind the split-brain
+    #     kill-switch failure (audit 2026-05-16).
+    #   - Host-side crons (risk_monitor_15min.sh, etc.):
+    #     reach the dashboard at the host's published port — localhost:8081
+    #     (docker-compose publishes 0.0.0.0:8081:8081).
+    #
+    # Detect the container context via /.dockerenv and pick the right default.
+    # DASHBOARD_INTERNAL_URL still overrides (e.g. for split networks or tests).
     try:
         import httpx
-        base = os.environ.get("DASHBOARD_INTERNAL_URL", "http://localhost:8081")
+        default_url = (
+            "http://dashboard:8081"
+            if Path("/.dockerenv").exists()
+            else "http://localhost:8081"
+        )
+        base = os.environ.get("DASHBOARD_INTERNAL_URL", default_url)
         with httpx.Client(timeout=3.0) as c:
             r = c.post(f"{base}/api/ops/pause", json={"reason": f"unified_risk: {reason}"})
         actions["crypto_paused"] = r.status_code in (200, 202)
+        if not actions["crypto_paused"]:
+            logger.warning(
+                "unified_risk: crypto pause endpoint returned %s from %s — "
+                "kill switch did NOT pause crypto side",
+                r.status_code, base,
+            )
     except Exception as exc:
         logger.warning("unified_risk: crypto pause call failed: %s", exc)
 

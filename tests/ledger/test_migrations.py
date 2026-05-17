@@ -87,7 +87,12 @@ async def test_migrate_then_re_migrate_is_idempotent(
     ledger: PostgresLedger,
 ) -> None:
     first = await ledger.migrate()
-    assert first == [1, 2]
+    # Don't hardcode the migration count — the test should pass regardless
+    # of how many .sql files live in migrations/. What matters: the FIRST
+    # run applies *something*, the SECOND run applies nothing, and the
+    # applied list matches what was returned.
+    assert first, "expected first migrate() to apply at least one migration"
+    assert first == sorted(first)
     second = await ledger.migrate()
     assert second == []
-    assert await ledger.applied_migrations() == [1, 2]
+    assert await ledger.applied_migrations() == first

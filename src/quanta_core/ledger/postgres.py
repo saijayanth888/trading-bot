@@ -104,6 +104,7 @@ class PostgresLedger:
         max_size: int = 10,
         timeout: float = 30.0,
         application_name: str = "quanta_core",
+        schema: str = "quanta_schema",
     ) -> None:
         if not dsn:
             raise ValueError("PostgresLedger requires a non-empty dsn")
@@ -112,6 +113,15 @@ class PostgresLedger:
         self._max_size = max_size
         self._timeout = timeout
         self._application_name = application_name
+        # Server-side search_path so every unqualified table name in this
+        # class (reservations / proposals / orders / fills / decisions /
+        # equity_snapshots / run_state) resolves into the application
+        # schema. Without this, the default ``"$user", public`` order sends
+        # bare CREATE/INSERT/SELECT to `public` where the tables don't
+        # exist — caught by the 2026-05-16 DB audit (Phase-3 live order
+        # placement would have thrown `relation "fills" does not exist` on
+        # the first call).
+        self._schema = schema
         self._pool: AsyncConnectionPool | None = None
 
     # ------------------------------------------------------------------ lifecycle
@@ -122,6 +132,13 @@ class PostgresLedger:
             return
         kwargs: dict[str, Any] = {
             "application_name": self._application_name,
+            # psycopg passes connection options through as libpq parameters.
+            # `-c search_path=...` runs at session start so every pooled
+            # connection — including ones recycled after server-side resets —
+            # gets the schema-qualified path. `public` stays in the chain so
+            # public.* objects (trade_journal, regime_log, …) remain
+            # reachable for cross-schema queries.
+            "options": f"-c search_path={self._schema},public",
         }
         pool = AsyncConnectionPool(
             conninfo=self._dsn,

@@ -191,12 +191,6 @@ services:
       # Ollama health probe output (/tmp/ollama-health.json) that the
       # host-side shark process + ollama_health cron write to.
       - /tmp:/host-tmp:ro
-      # frontend-v4 SPA dist — bind-mounted so /v4/* serves the React 19 +
-      # shadcn operator console (see frontend-v4/). Rebuild on host with
-      # `cd frontend-v4 && npm run build`; no dashboard restart needed
-      # because FastAPI StaticFiles re-reads from disk on each request.
-      # Path inside container matches v4_routes.py:V4_DIST resolution.
-      - ./frontend-v4/dist:/frontend-v4/dist:ro
       # ops-design — the cloud-Claude designed Operator Console served at
       # /ops (Direction A) and /ops/design-canvas (both A + B side-by-side).
       # Pure static files (React UMD + Babel, no build step). Edit live on

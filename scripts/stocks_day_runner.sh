@@ -59,7 +59,12 @@ schedule=(
     "10:30:wheel_snapshot.sh"
     "10:45:wheel_snapshot.sh"
     "11:00:wheel_snapshot.sh"
-    "11:00:wheel_sell_calls.sh"     # Monday-only — sell covered calls
+    # wheel_sell_calls.sh — REMOVED 2026-05-16.
+    # Hermes cron owns this as Monday-only (`0 11 * * 1`). The day_runner had
+    # no DOW guard, so this entry fired wheel_sell_calls on Tue–Fri too,
+    # opening covered calls on days the wheel state machine doesn't expect
+    # CC writes. If Hermes is stuck on Monday at 11:00, the operator can
+    # invoke the script manually rather than risking 4 extra fires/week.
     "11:15:wheel_snapshot.sh"
     "11:30:wheel_snapshot.sh"
     "11:45:wheel_snapshot.sh"

@@ -22,6 +22,7 @@ Reusable safety:
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 
@@ -34,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # Load unified .env via shark's loader (no-op if already loaded)
 import shark.run  # noqa: F401
+from shark.memory.atomic import file_lock as _file_lock
 from shark.memory.kill_switch import is_killed as _shark_kill_active
 
 from .broker import from_env
@@ -42,6 +44,7 @@ from .risk_caps import EquityRiskCaps, caps_as_dict, derive_caps
 from .state import (
     Position,
     TradeRecord,
+    _STATE_DIR,
     add_position,
     append_trade,
     cumulative_pnl_for,
@@ -65,6 +68,38 @@ from .strategy import (
     profit_take_threshold,
     select_best,
 )
+
+
+# ── Process-level mutex across every wheel runner entrypoint ────────────────
+# Hermes and stocks_day_runner can race on positions.json reads/writes
+# (audit 2026-05-16 HERMES-2). save_positions() uses atomic_write_text for
+# crash consistency but NOT for cross-process mutual exclusion: two
+# concurrent profit_take_check() calls can both observe the same open CSP,
+# both attempt close, then both remove_position() and one overwrites the
+# other's write. file_lock() (already used by shark) gives us that
+# exclusion at the operating-system level.
+#
+# Bash-level flocks on the cron scripts (added in C3) catch the common case
+# at the shell. The Python lock here is defence-in-depth — covers direct
+# `python -m wheel.cli ...` invocations, REPL sessions, and any future
+# in-process caller that doesn't go through the script wrapper.
+_WHEEL_RUNNER_LOCK = _STATE_DIR / ".wheel_runner.lock"
+
+
+def _wheel_locked(fn):
+    """Decorator: acquire the wheel runner's process-level file_lock for the
+    duration of *fn*. Re-entrant within the same process is NOT supported —
+    do not nest locked entrypoints.
+
+    Timeout = 30s. If contention exceeds that, raise TimeoutError so the
+    operator notices rather than silently double-running.
+    """
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        _STATE_DIR.mkdir(parents=True, exist_ok=True)
+        with _file_lock(_WHEEL_RUNNER_LOCK, timeout_seconds=30.0):
+            return fn(*args, **kwargs)
+    return wrapped
 
 # Per-symbol next-earnings dates so the earnings blackout gate (P1-S5) can
 # consult an authoritative source without reaching into Perplexity from a
@@ -137,6 +172,7 @@ def _fetch_spy_regime(timeout_s: float = 2.0) -> str:
 # ── Entry: sell_csps ────────────────────────────────────────────────────────
 
 
+@_wheel_locked
 def sell_csps(symbols_override: list[str] | None = None) -> dict:
     """Sell cash-secured puts for each allowed ticker. One-shot.
 
@@ -604,6 +640,7 @@ def _check_one_assignment(
 # ── Entry: profit_take_check ────────────────────────────────────────────────
 
 
+@_wheel_locked
 def profit_take_check() -> dict:
     """Walk open short puts; buy-to-close any whose mid is at or below the
     profit-take threshold. One-shot.
@@ -708,6 +745,7 @@ def _check_csp_profit_take(broker, pos: Position, cfg, summary: dict) -> None:
 # ── Entry: sell_covered_calls ──────────────────────────────────────────────
 
 
+@_wheel_locked
 def sell_covered_calls() -> dict:
     """For each underlying where we hold ≥100 shares (assigned), sell a CC."""
     cfg = load_config()

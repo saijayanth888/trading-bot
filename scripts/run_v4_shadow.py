@@ -493,12 +493,121 @@ def _get_governor() -> RiskGovernor | None:
     return _GOVERNOR
 
 
+async def _compute_open_unrealised_pnl(conn: psycopg.AsyncConnection) -> float:
+    """Compute total open-position unrealised PnL in quote currency (USD).
+
+    Joins every open ``public.trade_journal`` row to the most-recent
+    ``quanta_schema.fills`` row for the same pair (the in-engine mark) and
+    sums ``(mark - entry) * stake / entry``. Used to feed
+    ``RiskGovernor.approve_entry(open_unrealised_pnl=...)`` so the
+    daily-loss gate sees mark-to-market drawdown, not just realised closes.
+    Without this, a bot sitting on large paper losses keeps opening new
+    entries until the closes catch up.
+
+    Returns 0.0 on any error or when no marks are available (fail-conservative
+    in the OPEN direction — gate behaves as if no MTM information).
+    """
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                WITH latest_mark AS (
+                    SELECT DISTINCT ON (p.symbol)
+                           p.symbol AS pair,
+                           f.price  AS mark_price
+                    FROM quanta_schema.fills f
+                    JOIN quanta_schema.proposals p
+                      ON p.client_order_id = f.client_order_id
+                    ORDER BY p.symbol, f.ts DESC
+                )
+                SELECT COALESCE(SUM(
+                    CASE
+                        WHEN j.direction = 'long' AND m.mark_price IS NOT NULL
+                             AND j.entry_price IS NOT NULL AND j.entry_price > 0
+                        THEN (m.mark_price - j.entry_price)
+                             * (j.stake / j.entry_price)
+                        ELSE 0
+                    END
+                ), 0)
+                FROM public.trade_journal j
+                LEFT JOIN latest_mark m ON m.pair = j.pair
+                WHERE j.closed_at IS NULL
+                """
+            )
+            row = await cur.fetchone()
+            return float(row[0]) if row and row[0] is not None else 0.0
+    except Exception as exc:
+        log.warning("compute_open_unrealised_pnl failed: %s", exc)
+        return 0.0
+
+
+async def _write_equity_snapshot(
+    conn: psycopg.AsyncConnection,
+    *,
+    starting_equity: float,
+    unrealised_pnl: float,
+) -> None:
+    """Append one row to ``quanta_schema.equity_snapshots`` at cycle end.
+
+    Audit 2026-05-16 (DB-4): the table existed but had zero rows because
+    nothing ever wrote to it. Every drawdown gauge in the dashboard fell
+    back to a hardcoded constant. This writer closes the loop.
+
+    Equity is computed as:
+        starting_equity + realised_pnl(today and prior) + unrealised_pnl
+    where realised_pnl is summed from ``public.trade_journal`` (V4 paper
+    fills land there too, so this captures both the V4 ledger and any
+    legacy entries). Drawdown_pct is computed against the running peak
+    over ``equity_snapshots`` itself — a single SQL window pass rather
+    than tracking peak in Python.
+
+    Failure tolerated: never raises. Snapshot loss is non-fatal — the
+    next cycle will write a fresh row.
+    """
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT COALESCE(SUM(pnl), 0) FROM public.trade_journal"
+                " WHERE closed_at IS NOT NULL"
+            )
+            row = await cur.fetchone()
+            realised = float(row[0]) if row and row[0] is not None else 0.0
+            equity = float(starting_equity) + realised + float(unrealised_pnl)
+
+            # Drawdown vs the historical peak in this same table. First-ever
+            # write has no prior peak — treat as zero drawdown.
+            await cur.execute(
+                "SELECT COALESCE(MAX(equity), 0) FROM equity_snapshots"
+            )
+            peak_row = await cur.fetchone()
+            peak = float(peak_row[0]) if peak_row and peak_row[0] is not None else 0.0
+            peak = max(peak, equity)  # treat now as the new peak if equity > prior
+            dd_pct = 0.0 if peak <= 0 else max(0.0, (peak - equity) / peak * 100.0)
+
+            await cur.execute(
+                """
+                INSERT INTO equity_snapshots
+                    (ts, equity, unrealized, drawdown_pct, cash)
+                VALUES (NOW(), %s, %s, %s, NULL)
+                ON CONFLICT (ts) DO UPDATE
+                SET equity       = EXCLUDED.equity,
+                    unrealized   = EXCLUDED.unrealized,
+                    drawdown_pct = EXCLUDED.drawdown_pct
+                """,
+                (equity, float(unrealised_pnl), dd_pct),
+            )
+            await conn.commit()
+    except Exception as exc:
+        log.warning("equity_snapshot write failed: %s", exc)
+
+
 def _rg_gate_buy(
     symbol: str,
     qty: Decimal | float,
     signal_price: float,
     conviction: float | None,
     open_positions_all: dict[str, dict[str, dict[str, Any]]],
+    open_unrealised_pnl: float = 0.0,
 ) -> tuple[bool, str | None, dict[str, Any]]:
     """Run the RiskGovernor entry gate for a single BUY proposal.
 
@@ -506,6 +615,12 @@ def _rg_gate_buy(
     structured decision dict (for the debate JSONB) or empty on fail-open.
     Fail-OPEN on any exception — better than taking the bot dark when the
     governor itself is misbehaving.
+
+    ``open_unrealised_pnl`` is the cycle-scoped mark-to-market PnL across
+    every open position (computed once by ``_compute_open_unrealised_pnl``
+    and reused across all proposals in the cycle). Threads into the
+    governor's daily-loss check so paper-loss drawdown is observed at the
+    gate, not only after closes.
     """
     gov = _get_governor()
     if gov is None:
@@ -541,7 +656,7 @@ def _rg_gate_buy(
             model_confidence=float(conviction) if conviction is not None else None,
             open_positions=open_positions,
             pair_returns=None,  # Phase 2: wire correlation gate
-            open_unrealised_pnl=0.0,  # Phase 2: compute from live MTM
+            open_unrealised_pnl=float(open_unrealised_pnl),
         )
         if not rd.approved:
             return False, f"{rd.blocking_constraint}: {rd.reason}", rd.to_dict()
@@ -1120,8 +1235,9 @@ async def fill_pending_proposals(
             # legacy endpoints (/api/ops/readiness, /rebalance, /slack_preview,
             # /explainability, /trades_risk live-tape, /api/state.recent_trades)
             # see V4 paper activity without code changes.
+            close_result: tuple[float, float] | None = None
             try:
-                await _write_trade_journal_row(
+                close_result = await _write_trade_journal_row(
                     cur, coid=coid, symbol=symbol, side=side,
                     qty=qty, price=price,
                     regime=regime_val if isinstance(regime_val, str) else None,
@@ -1130,6 +1246,22 @@ async def fill_pending_proposals(
             except Exception as exc:
                 log.warning("trade_journal write failed for %s/%s: %s",
                             symbol, side, exc)
+            # Feed closed trades back into the RiskGovernor so the
+            # consecutive-losses counter + circuit-breaker actually
+            # observe live outcomes. Without this, the breaker is
+            # permanently blind (see Phase 2 audit, 2026-05-16).
+            if side == "SELL" and close_result is not None:
+                gov = _get_governor()
+                if gov is not None:
+                    pnl_q, pnl_p = close_result
+                    try:
+                        gov.record_trade_close(symbol, pnl_q, pnl_p)
+                    except Exception as exc:
+                        log.warning(
+                            "governor.record_trade_close failed for %s "
+                            "(pnl=%.4f pct=%.4f): %s",
+                            symbol, pnl_q, pnl_p, exc,
+                        )
             filled += 1
     if filled:
         await conn.commit()
@@ -1146,12 +1278,16 @@ async def _write_trade_journal_row(
     price: Any,
     regime: str | None = None,
     confidence: float | None = None,
-) -> None:
+) -> tuple[float, float] | None:
     """Translate a V4 paper fill into a public.trade_journal entry.
 
-    BUY  → INSERT a new open row (closed_at=NULL).
+    BUY  → INSERT a new open row (closed_at=NULL); returns None.
     SELL → UPDATE the most-recent matching open row with closed_at,
-           exit_price, derived pnl + pnl_pct + duration_min.
+           exit_price, derived pnl + pnl_pct + duration_min; returns
+           ``(pnl_quote, pnl_pct_fraction)`` for the closed row so the
+           caller can feed it into ``RiskGovernor.record_trade_close()``.
+           Returns ``None`` when no matching open row was found (the SELL
+           did not close anything — orphan SELL or already-closed pair).
 
     Schema lives in user_data/modules/trade_journal.py — we hit only the
     columns the dashboard reads. The `external_id` mirrors the V4
@@ -1183,6 +1319,7 @@ async def _write_trade_journal_row(
             """,
             (coid, symbol, price_f, stake, confidence, regime, coid),
         )
+        return None
     elif side == "SELL":
         # Close the most-recent open long row on this pair.
         # pnl_pct is stored as a FRACTION (no × 100); the BUY row's regime
@@ -1192,6 +1329,12 @@ async def _write_trade_journal_row(
         # proposal's coid is different from the BUY's coid. When BUYs and
         # SELLs don't interleave 1:1, older BUYs can get stranded as
         # orphans. The reconcile block AFTER this UPDATE catches them.
+        #
+        # RETURNING pnl + pnl_pct feeds RiskGovernor.record_trade_close()
+        # so the consecutive-losses counter + daily realised PnL update
+        # in lock-step with the journal write. Without this, the in-process
+        # governor singleton stays at consecutive_losses=0 forever and the
+        # circuit breaker never trips.
         await cur.execute(
             """
             UPDATE public.trade_journal
@@ -1208,9 +1351,18 @@ async def _write_trade_journal_row(
                  ORDER BY opened_at DESC
                  LIMIT 1
              )
+         RETURNING pnl, pnl_pct
             """,
             (price_f, price_f, price_f, coid, symbol),
         )
+        row = await cur.fetchone()
+        close_result: tuple[float, float] | None
+        if row is None:
+            close_result = None
+        else:
+            pnl_q = float(row[0]) if row[0] is not None else 0.0
+            pnl_p = float(row[1]) if row[1] is not None else 0.0
+            close_result = (pnl_q, pnl_p)
         # Ledger reconciliation (2026-05-15): after the SELL above, check
         # whether the V4 fills ledger considers this strategy+symbol fully
         # closed (net qty == 0). If yes BUT trade_journal still has open
@@ -1244,6 +1396,8 @@ async def _write_trade_journal_row(
             """,
             (symbol, symbol),
         )
+        return close_result
+    return None
 
 
 async def fetch_positions(
@@ -1382,6 +1536,16 @@ async def run_cycle(cfg: Cfg, session: aiohttp.ClientSession, conn: psycopg.Asyn
                     ", ".join(f"{s}={p['qty']}" for s, p in ps.items()),
                 )
 
+    # 3) Mark-to-market open unrealised PnL — one query per cycle, reused by
+    #    every RiskGovernor entry gate below. Cycle-scoped because prices
+    #    change every 5 min; computing per-proposal would multiply DB load
+    #    for no benefit.
+    open_unrealised_pnl_cycle: float = 0.0
+    if cfg.mode == "live":
+        open_unrealised_pnl_cycle = await _compute_open_unrealised_pnl(conn)
+        if open_unrealised_pnl_cycle != 0.0:
+            log.info("cycle open unrealised PnL = %.2f USD", open_unrealised_pnl_cycle)
+
     for symbol in cfg.symbols:
         try:
             bars = await fetch_coinbase_candles(session, cfg.coinbase_base, symbol)
@@ -1479,6 +1643,7 @@ async def run_cycle(cfg: Cfg, session: aiohttp.ClientSession, conn: psycopg.Asyn
                         signal_price=float(latest_bar.close),
                         conviction=getattr(strat, "last_conviction", None),
                         open_positions_all=positions_by_strategy,
+                        open_unrealised_pnl=open_unrealised_pnl_cycle,
                     )
 
                 decision_outcome = "RG_BLOCKED" if rg_block_reason else str(prop.side)
@@ -1587,6 +1752,27 @@ async def run_cycle(cfg: Cfg, session: aiohttp.ClientSession, conn: psycopg.Asyn
                 )
         except Exception as exc:
             log.warning("classifier write failed for %s: %s", symbol, exc)
+
+    # ── End-of-cycle equity snapshot ────────────────────────────────────────
+    # One row per cycle into quanta_schema.equity_snapshots. The dashboard's
+    # 30-day drawdown gauge reads from this table; without writes it falls
+    # back to a hardcoded constant. Live mode only — shadow mode is
+    # observability-only and shouldn't pollute the equity curve.
+    if cfg.mode == "live":
+        try:
+            gov = _get_governor()
+            starting_equity = float(
+                os.environ.get("V4_EQUITY_USD")
+                or (gov.config.starting_equity_for_pct_limits if gov else None)
+                or 20000.0
+            )
+            await _write_equity_snapshot(
+                conn,
+                starting_equity=starting_equity,
+                unrealised_pnl=open_unrealised_pnl_cycle,
+            )
+        except Exception as exc:
+            log.warning("equity snapshot dispatch failed: %s", exc)
 
 
 async def fill_pending_then_collect_closes(

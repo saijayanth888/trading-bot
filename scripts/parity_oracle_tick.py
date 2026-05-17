@@ -146,6 +146,41 @@ class _ReplayContext:
 
 
 # ---------------------------------------------------------------------------
+# Crypto pair universe — single source of truth at user_data/universe.json
+# ---------------------------------------------------------------------------
+
+# Fallback used only if universe.json is unreadable. Mirrors the .env
+# DASHBOARD_PAIRS contents at the time of writing; kept here so a
+# misconfigured deployment still parities the 12 production pairs rather
+# than silently scanning zero rows.
+_UNIVERSE_FALLBACK: list[str] = [
+    "BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD", "XRP/USD", "DOGE/USD",
+    "AVAX/USD", "LINK/USD", "DOT/USD", "ATOM/USD", "LTC/USD", "BCH/USD",
+]
+_UNIVERSE_JSON = _REPO_ROOT / "user_data" / "universe.json" \
+    if "_REPO_ROOT" in globals() else \
+    Path(__file__).resolve().parent.parent / "user_data" / "universe.json"
+
+
+def _crypto_pairs_universe() -> list[str]:
+    """Return the active crypto pair list, preferring user_data/universe.json.
+
+    Failure-tolerant: any read / parse error falls back to the hardcoded
+    list so the parity sweep never silently returns zero rows. The result
+    is fed directly into the ``symbol = ANY(%s)`` query so each call is
+    one round-trip + one disk read.
+    """
+    try:
+        with _UNIVERSE_JSON.open() as fh:
+            data = json.load(fh)
+        pairs = (data.get("crypto") or {}).get("pairs") or []
+        out = [str(p) for p in pairs if isinstance(p, str) and "/" in p]
+        return out or list(_UNIVERSE_FALLBACK)
+    except (OSError, json.JSONDecodeError):
+        return list(_UNIVERSE_FALLBACK)
+
+
+# ---------------------------------------------------------------------------
 # Seen-id ring (idempotency)
 # ---------------------------------------------------------------------------
 
@@ -202,18 +237,24 @@ async def fetch_recent_decisions(
     """
     rows: list[dict[str, Any]] = []
     async with conn.cursor() as cur:
-        # Note: we pass the LIKE pattern as a bind param to avoid psycopg
-        # mis-parsing the '%/' literal as a format placeholder.
+        # Exact-match against the universe.json crypto pair list rather than
+        # the previous ``symbol LIKE '%/USD'`` suffix pattern. Suffix LIKE
+        # can't use the (symbol, ts DESC) b-tree index — Postgres falls
+        # back to a Bitmap heap scan + filter (verified via EXPLAIN at
+        # 23k rows, audit 2026-05-16 / Batch F3). Equality with ANY(ARRAY)
+        # uses the leading column of the composite index and limits the
+        # set to known-traded pairs (stocks/ETF symbols that may later
+        # share the schema can't pollute the parity check).
         await cur.execute(
             """
             SELECT id, ts, symbol, strategy, outcome, rationale, debate
               FROM quanta_schema.decisions
              WHERE outcome IN ('FLAT', 'BUY')
-               AND symbol LIKE %s            -- crypto pairs only (V4 shadow)
+               AND symbol = ANY(%s)          -- crypto pairs from universe.json
              ORDER BY ts DESC
              LIMIT %s
             """,
-            ("%/USD", limit),
+            (_crypto_pairs_universe(), limit),
         )
         for rid, ts, symbol, strategy, outcome, rationale, debate in await cur.fetchall():
             rows.append({

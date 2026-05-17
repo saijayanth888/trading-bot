@@ -146,6 +146,9 @@ def test_long_entry_on_breakout() -> None:
     ctx = _FakeContext(_history(closes))
     strat = TrendFollow(ctx, {"symbol": str(SYMBOL), "timeframe": TIMEFRAME})
     strat.state["regime"] = "trending_up"
+    # _MIN_ENTRY_PROBABILITY=0.85 gate (2026-05-15) requires explicit
+    # probability for any test that expects a BUY proposal.
+    strat.state["regime_probability"] = 0.9
 
     # Current bar close = 125 — comfortably above the short MA (~116.5)
     # of the rising window.
@@ -246,6 +249,7 @@ def test_conviction_clamped() -> None:
     ctx = _FakeContext(_history(closes))
     strat = TrendFollow(ctx, {"symbol": str(SYMBOL), "timeframe": TIMEFRAME})
     strat.state["regime"] = "trending_up"
+    strat.state["regime_probability"] = 0.9
 
     # Absurd breakout — close 10x the short MA — must still clamp at 0.95.
     bar = _bar(Decimal("10000"), idx=22, high=Decimal("10001"))

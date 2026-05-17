@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# Runs once on the postgres container's first startup. Creates the
-# freqtrade DB (separate from the application's `tradebot` DB) and
-# enables the TimescaleDB extension on both.
+# Runs once on the postgres container's first startup. Enables the
+# TimescaleDB extension on the application's `tradebot` DB.
+#
+# Freqtrade was decommissioned 2026-05-14 (memory `freqtrade_decommissioned`).
+# The freqtrade database creation step was removed on 2026-05-16 after the
+# DB audit confirmed no live code reads from it. Existing freqtrade DBs are
+# left in place on already-initialised volumes; this script only governs
+# fresh-volume bootstrap.
 
 set -euo pipefail
 
@@ -9,13 +14,4 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-S
     CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
 SQL
 
-# Spawn the freqtrade DB
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "postgres" <<-SQL
-    CREATE DATABASE freqtrade OWNER "$POSTGRES_USER";
-SQL
-
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "freqtrade" <<-SQL
-    CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
-SQL
-
-echo "[init] postgres ready: tradebot + freqtrade DBs, timescaledb enabled"
+echo "[init] postgres ready: tradebot DB, timescaledb enabled"

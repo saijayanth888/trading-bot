@@ -77,6 +77,12 @@ _CONV_MAX = 0.95
 _ENTRY_REGIME = "trending_up"
 # Regimes that force-exit an open long even when momentum is intact.
 _EXIT_REGIMES = frozenset({"trending_down", "high_volatility"})
+# Minimum HMM posterior probability required to permit entry. Must match
+# MeanRevBB._MIN_ENTRY_PROBABILITY so both strategies apply the same low-
+# confidence cut-off. Was referenced at on_candle() but never declared here —
+# every cycle silently NameError'd inside the dispatcher's hook_exceptions
+# guard, so TrendFollow produced zero entries until this declaration landed.
+_MIN_ENTRY_PROBABILITY = 0.85
 
 
 class TrendFollow(Strategy):

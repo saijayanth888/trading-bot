@@ -140,6 +140,9 @@ def test_long_signal_at_lower_band() -> None:
     ctx = _FakeContext(_history(closes))
     strat = MeanRevBB(ctx, {"symbol": str(SYMBOL), "timeframe": TIMEFRAME})
     strat.state["regime"] = "mean_reverting"
+    # _MIN_ENTRY_PROBABILITY=0.85 gate (2026-05-15) requires explicit
+    # regime_probability for any test that expects a BUY proposal.
+    strat.state["regime_probability"] = 0.9
 
     # Build a current bar whose close is well below the lower band (mean=100,
     # std ~ 0.7, lower ~ 98.6). Close=95 is comfortably below.
@@ -161,6 +164,7 @@ def test_long_signal_also_fires_in_trending_up() -> None:
     ctx = _FakeContext(_history(closes))
     strat = MeanRevBB(ctx, {"symbol": str(SYMBOL), "timeframe": TIMEFRAME})
     strat.state["regime"] = "trending_up"
+    strat.state["regime_probability"] = 0.9
 
     bar = _bar(Decimal("95"), idx=21)
     proposals = list(strat.on_candle(bar))
@@ -243,6 +247,7 @@ def test_conviction_is_clamped_to_max() -> None:
     ctx = _FakeContext(_history(closes))
     strat = MeanRevBB(ctx, {"symbol": str(SYMBOL), "timeframe": TIMEFRAME})
     strat.state["regime"] = "mean_reverting"
+    strat.state["regime_probability"] = 0.9
 
     # Close way below band — provide a sufficiently low ``low`` so the Bar
     # validator is satisfied.

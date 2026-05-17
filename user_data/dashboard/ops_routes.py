@@ -4222,6 +4222,20 @@ async def combined_portfolio():
     }
     # =======================================================================
 
+    # market_open_now — NYSE regular-hours flag, single source of truth for
+    # the entire SPA. Frontend AgentFlowCard.alpacaStale and
+    # CircuitBreakersLive both read this; previously they read a field that
+    # was never emitted, making the stale-snapshot guard always false (and
+    # silently inverting the breaker visualisation). Audit 2026-05-16
+    # (Batch D3). `_is_nyse_open_now` is the same helper that gates the
+    # 30+-minute LLM cron windows, so the flag is consistent across the
+    # whole stack.
+    try:
+        status["market_open_now"] = bool(_is_nyse_open_now())
+    except Exception as exc:
+        logger.warning("combined_portfolio: market_open_now probe failed: %s", exc)
+        status["market_open_now"] = None  # explicit unknown, not silent false
+
     # Promote the breaker flag to the envelope status
     return _envelope(
         "degraded" if status.get("circuit_breaker_active") else "ok",
@@ -5809,18 +5823,34 @@ async def cap_violations(hours: int = Query(168, ge=1, le=720)):
 
     Returns the violations sorted by `cap_multiple` desc; the operator gets
     the worst one front-and-center. `hours` defaults to 7 days; cap to 30.
+
+    Includes BOTH closed-in-window and currently-open breaches. Open
+    positions over the cap RIGHT NOW are the most urgent signal the
+    operator needs — the original SQL filtered `closed_at >= since` which
+    silently excluded every open row (NULL >= ts → NULL → false).
+    Audit 2026-05-16 (Batch D1).
+
+    Reads cap thresholds live from `unified_risk._load_risk_gates()` and
+    `_crypto_starting_equity()` so operator config changes via the
+    risk-gates UI take effect on next request — no hardcoded constants.
     """
     import psycopg
     from psycopg.rows import dict_row
     from datetime import datetime, timedelta, UTC
 
-    # The crypto sleeve starting equity and cap pct match the values the
-    # producer reads from `unified_risk._load_risk_gates()`. Hardcoded here
-    # to avoid coupling this surface to an additional file read on every
-    # poll. If the operator changes the cap, bump the constants here.
-    crypto_sleeve_usd = 19000.0
-    cap_pct = 0.10
-    cap_usd = crypto_sleeve_usd * cap_pct  # $1,900
+    # Source-of-truth: live config. Fall back to defaults only if the
+    # config file can't be parsed at all (loud warning emitted by helpers).
+    try:
+        from user_data.modules import unified_risk as _ur
+        gates = _ur._load_risk_gates()
+        crypto_sleeve_usd = float(_ur._crypto_starting_equity() or 19000.0)
+        cap_pct = float(gates.get("single_name_cap_pct", 0.10))
+    except Exception as exc:  # noqa: BLE001
+        # Defensive — never block the endpoint on a config read.
+        logger.warning("cap_violations: live-config read failed (%s); using defaults", exc)
+        crypto_sleeve_usd = 19000.0
+        cap_pct = 0.10
+    cap_usd = crypto_sleeve_usd * cap_pct  # $1,900 at defaults
 
     since = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
 
@@ -5831,13 +5861,17 @@ async def cap_violations(hours: int = Query(168, ge=1, le=720)):
                 SELECT pair, direction, stake, pnl, pnl_pct,
                        opened_at, closed_at, exit_reason
                 FROM trade_journal
-                WHERE closed_at >= %s
-                  AND stake IS NOT NULL
+                WHERE stake IS NOT NULL
                   AND stake > %s
-                ORDER BY stake DESC
+                  AND (
+                       closed_at IS NULL                  -- still open: always show
+                       OR closed_at >= %s                 -- recently closed (window)
+                  )
+                ORDER BY (closed_at IS NULL) DESC,         -- open first
+                         stake DESC
                 LIMIT 10
                 """,
-                (since, cap_usd),
+                (cap_usd, since),
             )
             rows = cur.fetchall()
     except Exception as exc:  # noqa: BLE001
@@ -5850,16 +5884,25 @@ async def cap_violations(hours: int = Query(168, ge=1, le=720)):
             "direction": r["direction"],
             "stake_usd": float(r["stake"]),
             "cap_usd": cap_usd,
-            "cap_multiple": round(float(r["stake"]) / cap_usd, 1),
+            "cap_multiple": round(float(r["stake"]) / cap_usd, 1) if cap_usd > 0 else None,
             "pnl_usd": float(r["pnl"] or 0),
             "pnl_pct": float(r["pnl_pct"] or 0),
             "opened_at": r["opened_at"].isoformat() if r["opened_at"] else None,
             "closed_at": r["closed_at"].isoformat() if r["closed_at"] else None,
             "exit_reason": r["exit_reason"],
+            # "open" means the breach is LIVE on the book right now. The
+            # frontend can render these differently (e.g., red banner vs.
+            # amber post-mortem).
+            "status": "open" if r["closed_at"] is None else "closed",
         }
         for r in rows
     ]
 
+    n_open = sum(1 for v in violations if v["status"] == "open")
+    # Envelope contract is {"ok"|"degraded"|"down"}. Open breaches are more
+    # urgent than closed ones, but "degraded" is the strongest non-fatal
+    # signal the frontend handles uniformly. Urgency is conveyed via the
+    # error string and n_open, which the scoreboard banner reads directly.
     status = "ok" if not violations else "degraded"
     return _envelope(
         status,
@@ -5868,10 +5911,18 @@ async def cap_violations(hours: int = Query(168, ge=1, le=720)):
             "since_hours": hours,
             "cap_usd": cap_usd,
             "n_violations": len(violations),
+            "n_open": n_open,
             "crypto_sleeve_usd": crypto_sleeve_usd,
             "cap_pct": cap_pct,
         },
-        error=None if status == "ok" else f"{len(violations)} cap violation(s) in last {hours}h",
+        error=(
+            None if status == "ok"
+            else (
+                f"{n_open} OPEN cap breach(es) — {len(violations) - n_open} closed in last {hours}h"
+                if n_open
+                else f"{len(violations)} cap violation(s) closed in last {hours}h"
+            )
+        ),
     )
 
 
