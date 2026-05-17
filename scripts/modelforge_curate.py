@@ -831,6 +831,18 @@ def curate_role(
     role_dir = out_root / "datasets" / role
     n_min_train = N_MIN_TRAIN.get(role, 0)
     n_min_test = N_MIN_TEST.get(role, 0)
+    # Test-only override: tests with small fixture corpora set this to 1 so
+    # they can exercise the happy-path shard-write logic without seeding 100+
+    # synthetic records. Production deployments never set this; the gate
+    # protects against undertrained adapters reaching Ollama.
+    if os.environ.get("MODELFORGE_CURATE_N_MIN_OVERRIDE"):
+        try:
+            override = int(os.environ["MODELFORGE_CURATE_N_MIN_OVERRIDE"])
+            if override > 0:
+                n_min_train = override
+                n_min_test = max(1, override // 4)
+        except ValueError:
+            pass
 
     # We use 20% split approximation for test size estimation here.
     # The actual test set is computed from kept_raw below.

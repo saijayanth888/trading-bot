@@ -128,7 +128,9 @@ class TestReflectorFilter:
         assert code == curate_mod.Reject.LENGTH_OUT_OF_BAND
 
     def test_rejects_too_long(self):
-        ex = _reflector_example(response="X" * 700)
+        # filter_reflector accepts response lengths in [80, 1200]; widened from
+        # the original [80, 600] band. Use 1500 chars to exceed the new cap.
+        ex = _reflector_example(response="X" * 1500)
         ok, code = curate_mod.filter_reflector(ex)
         assert not ok
         assert code == curate_mod.Reject.LENGTH_OUT_OF_BAND
@@ -307,13 +309,22 @@ def populated_root(tmp_path: Path) -> Path:
     return root
 
 
-def test_end_to_end_writes_hf_arrow_per_role(populated_root: Path):
-    """The whole pipeline yields a loadable HF Arrow shard per role."""
+def test_end_to_end_writes_hf_arrow_per_role(populated_root: Path, monkeypatch):
+    """The whole pipeline yields a loadable HF Arrow shard per role.
+
+    The test fixtures seed only 1-4 records per role to keep the suite fast.
+    Production N_MIN gates (100 for reflector/bull/bear/arbiter, 40 for
+    regime/indicator) would block the shard write. Set the override env var
+    so the happy-path shard logic can be exercised — production callers must
+    NOT set this; the gate is the structural safeguard against undertrained
+    adapters.
+    """
     try:
         from datasets import load_from_disk  # noqa: F401
     except ImportError:
         pytest.skip("datasets library not installed in this env")
 
+    monkeypatch.setenv("MODELFORGE_CURATE_N_MIN_OVERRIDE", "1")
     stats = curate_mod.curate(dt.date(2026, 5, 11), root=populated_root)
 
     # Reflector: 2 keeps out of 4 inputs
@@ -375,7 +386,11 @@ def test_per_day_stats_file_written(populated_root: Path):
     out = populated_root / "curate" / "trading-reflector_2026-05-11.json"
     assert out.exists()
     parsed = json.loads(out.read_text())
-    assert parsed["role"] == "trading-reflector"
+    # The ``RoleCurationResult.as_dict()`` emits ``track_id`` per the spec at
+    # docs/superpowers/specs/2026-05-17-trading-data-pipeline-rebuild.md
+    # Section D — the older ``role`` key was renamed for cross-stack
+    # consistency with model-forge's evolution.start config payload.
+    assert parsed["track_id"] == "trading-reflector"
     assert parsed["accept_count"] == 2
     assert "accept_rate" in parsed
 
