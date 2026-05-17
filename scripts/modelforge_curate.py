@@ -69,6 +69,34 @@ ALL_ROLES: tuple[str, ...] = (
 )
 
 # --------------------------------------------------------------------------- #
+# Regime-tagger baseline indicators (Section B, Section I)
+# Deterministic fallback for indicator-selector when the LLM is unreachable.
+# Also used as baseline_output for indicator-selector test-set rows.
+# --------------------------------------------------------------------------- #
+
+REGIME_BASELINE_INDICATORS: dict[str, list[str]] = {
+    "trending_up":    ["ema", "macd", "atr", "adx", "rsi"],
+    "trending_down":  ["ema", "macd", "atr", "adx", "rsi"],
+    "ranging":        ["bbands", "rsi", "stoch", "mfi", "atr"],
+    "high_volatility":["atr", "bbands", "rsi", "vwap", "obv"],
+    "low_volatility": ["bbands", "rsi", "sma", "mfi", "stoch"],
+    "breakout_up":    ["vwap", "obv", "atr", "macd", "adx"],
+    "breakout_down":  ["vwap", "obv", "atr", "macd", "adx"],
+}
+
+#: Strategy column → RegimeLabel mapping (Section A). Used in curate for
+#: regime-tagger test-set row baseline_output derivation. Keep in sync with
+#: modelforge_ingest_decisions.py::STRATEGY_TO_REGIME.
+_STRATEGY_TO_REGIME_CURATE: dict[str, str] = {
+    "meta_up_regime":   "trending_up",
+    "meta_down_regime": "trending_down",
+    "bb_squeeze":       "ranging",
+    "bb_breakout":      "breakout_up",
+    "bb_revert":        "ranging",
+}
+
+
+# --------------------------------------------------------------------------- #
 # Minimum-records-to-train thresholds (Section D, rev2 numbers)
 # Sources: HuggingFace PEFT instruction-tuning ablations (Mangrulkar et al.
 # 2023); QLoRA paper (Dettmers et al. 2023). Hermes-3-Llama-3.1-8B is an 8B
@@ -567,6 +595,82 @@ def _build_eval_test_set_row(role: str, example: dict[str, Any]) -> dict[str, An
                 row["exit_price"] = float(m_xp.group(1))
             except ValueError:
                 pass
+
+    # Bull/bear test-set rows: add opponent_strongest_point + prior_response
+    # per Section B. These are populated from the debate JSONB when present
+    # (e.g. from decisions bootstrap ETL rows). For llm-calls rows they will
+    # typically be empty strings; the eval can handle that gracefully.
+    elif role in ("trading-bull", "trading-bear"):
+        ledger = example.get("ledger") or {}
+        debate = ledger.get("debate") or {}
+        # For bull: opponent is bear; for bear: opponent is bull.
+        if role == "trading-bull":
+            opponent_key = "bear_strongest_point"
+            # Fallback: extract bear text from debate dict if structured
+            if not debate.get(opponent_key):
+                bear_raw = debate.get("bear") or ""
+                if isinstance(bear_raw, dict):
+                    bear_raw = bear_raw.get("text") or bear_raw.get("response") or ""
+                # Take last sentence as "strongest point" heuristic.
+                sentences = [s.strip() for s in str(bear_raw).split(". ") if s.strip()]
+                debate[opponent_key] = sentences[-1] if sentences else ""
+        else:  # trading-bear
+            opponent_key = "bull_strongest_point"
+            if not debate.get(opponent_key):
+                bull_raw = debate.get("bull") or ""
+                if isinstance(bull_raw, dict):
+                    bull_raw = bull_raw.get("text") or bull_raw.get("response") or ""
+                sentences = [s.strip() for s in str(bull_raw).split(". ") if s.strip()]
+                debate[opponent_key] = sentences[-1] if sentences else ""
+
+        row["opponent_strongest_point"] = str(debate.get(opponent_key) or "")
+        # prior_response: the gold_response is the response that was already
+        # logged (the "current champion equivalent" at curate time). Embed it so
+        # evals don't need to run inference for this field at eval time (Section B).
+        row["prior_response"] = example.get("response") or ""
+        row["ticker"] = example.get("ticker") or ""
+        row["ts"] = example.get("ts") or ""
+
+    # Regime-tagger test-set rows: add baseline_output per Section B.
+    # baseline_output.regime is derived from the response JSON (which should
+    # contain {"regime": "<label>"}). If the response is not valid JSON or
+    # doesn't carry a regime, fall back to the strategy→regime mapping.
+    elif role == "trading-regime-tagger":
+        baseline_regime: str | None = None
+        response_text = example.get("response") or ""
+        try:
+            parsed = json.loads(response_text)
+            if isinstance(parsed, dict) and "regime" in parsed:
+                baseline_regime = str(parsed["regime"])
+        except (json.JSONDecodeError, TypeError):
+            pass
+        if baseline_regime is None:
+            # Fall back: extract strategy from user_message and map.
+            strategy_m = re.search(r"(?i)strategy\s*[:=]\s*(\S+)", user_msg)
+            if strategy_m:
+                strategy_val = strategy_m.group(1).strip().lower()
+                baseline_regime = _STRATEGY_TO_REGIME_CURATE.get(strategy_val)
+        row["baseline_output"] = {"regime": baseline_regime or "unknown"}
+        row["symbol"] = example.get("ticker") or ""
+        row["date"] = (example.get("ts") or "")[:10]
+
+    # Indicator-selector test-set rows: add baseline_output per Section B.
+    # baseline_output.indicators is deterministic from REGIME_BASELINE_INDICATORS.
+    elif role == "trading-indicator-selector":
+        regime_val: str = ""
+        response_text = example.get("response") or ""
+        try:
+            parsed = json.loads(response_text)
+            if isinstance(parsed, dict) and "regime" in parsed:
+                regime_val = str(parsed["regime"])
+        except (json.JSONDecodeError, TypeError):
+            pass
+        baseline_inds = REGIME_BASELINE_INDICATORS.get(regime_val, [])
+        row["baseline_output"] = {"indicators": baseline_inds}
+        row["symbol"] = example.get("ticker") or ""
+        row["regime"] = regime_val
+        row["date"] = (example.get("ts") or "")[:10]
+
     return row
 
 

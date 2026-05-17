@@ -485,6 +485,72 @@ def _collect_candidate_data(
             logger.debug("setup_tag computation failed for %s: %s", symbol, exc)
 
         logger.info("%s passed all gates — including in analysis (tag=%s)", symbol, setup_tag)
+
+        # ─── Indicator-selector agent call (gated) ─────────────────────────
+        # Fires only when SHARK_ENABLE_INDICATOR_SELECTOR=1 env var is set.
+        # Calls per-symbol ONCE on the shortlisted candidates (~10-30/day),
+        # NOT for all 524 KB tickers (those never reach _collect_candidate_data).
+        # The call is logged via LLMTracker with agent="indicator_selector" so
+        # modelforge_ingest.py picks it up via AGENT_TO_ROLE mapping.
+        # On invalid JSON or any failure: log warning, fall back to
+        # REGIME_BASELINE_INDICATORS[regime_str] (deterministic, never raises).
+        # Accumulation rate: ~10-30 calls/day → N_MIN=40 in 2-4 days of live op.
+        indicator_selection: list[str] | None = None
+        if os.environ.get("SHARK_ENABLE_INDICATOR_SELECTOR", "0") == "1":
+            try:
+                from shark.agents.market_analyst import (
+                    IndicatorSelection,
+                    select_indicators as _select_indicators,
+                )
+                from shark.llm.tracker import LLMTracker as _LLMTracker
+                import time as _time
+
+                _t0 = _time.monotonic()
+                # Pass bars to the selector so it has OHLCV context.
+                _sel: IndicatorSelection = _select_indicators(
+                    ticker=symbol,
+                    regime=regime_str,
+                    bars=bars,
+                    use_cache=True,
+                )
+                _latency = _time.monotonic() - _t0
+
+                # Validate picks — must be a non-empty list of strings.
+                if _sel.picks:
+                    indicator_selection = [str(p.indicator) for p in _sel.picks]
+                    # Log via LLMTracker so modelforge_ingest.py picks up
+                    # agent="indicator_selector" rows from llm-calls.jsonl.
+                    try:
+                        import json as _json
+                        _response_json = _json.dumps({"indicators": indicator_selection})
+                        _tracker = _LLMTracker()
+                        _tracker.record(
+                            agent="indicator_selector",
+                            model="market_analyst",
+                            tier="fast",
+                            prompt=f"Symbol: {symbol}\nRegime: {regime_str}",
+                            response_text=_response_json,
+                            latency_seconds=_latency,
+                            valid=True,
+                        )
+                    except Exception as _log_exc:
+                        logger.debug("indicator_selector tracker.record failed: %s", _log_exc)
+                    logger.info(
+                        "%s indicator_selector selected %d picks for regime=%s: %s",
+                        symbol, len(indicator_selection), regime_str, indicator_selection,
+                    )
+                else:
+                    logger.warning(
+                        "%s indicator_selector returned empty picks for regime=%s "
+                        "— falling back to REGIME_BASELINE",
+                        symbol, regime_str,
+                    )
+            except Exception as _ind_exc:
+                logger.warning(
+                    "%s indicator_selector call failed (%s) — falling back to REGIME_BASELINE",
+                    symbol, _ind_exc,
+                )
+
         # ATR-derived trailing stop — keeps trail proportional to a ticker's
         # actual volatility rather than a fixed 10%. ATR_TRAIL_MULTIPLE controls
         # tightness (default 3.0x ATR ~= typical swing-trade trail).
@@ -528,6 +594,10 @@ def _collect_candidate_data(
             # reuses the prediction computed for the composite override above.
             # Saves one TFT inference per candidate.
             "_tft_pred": tft_pred,
+            # indicator_selector result (None when SHARK_ENABLE_INDICATOR_SELECTOR
+            # is not set or the call fails). The bull/bear debate prompt builder
+            # can embed the selected indicators for richer context when present.
+            "indicator_selection": indicator_selection,
             "perplexity_intel": perplexity_intel,
             "rs_data": {
                 "rs_composite": round(float(rs_data.get("rs_composite", 0)), 3),
