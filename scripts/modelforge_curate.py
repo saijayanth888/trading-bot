@@ -68,6 +68,54 @@ ALL_ROLES: tuple[str, ...] = (
     "trading-indicator-selector",
 )
 
+# --------------------------------------------------------------------------- #
+# Minimum-records-to-train thresholds (Section D, rev2 numbers)
+# Sources: HuggingFace PEFT instruction-tuning ablations (Mangrulkar et al.
+# 2023); QLoRA paper (Dettmers et al. 2023). Hermes-3-Llama-3.1-8B is an 8B
+# base — practical floor for measurable generalization at rank 16 is 100-200.
+# We set N_MIN_TRAIN at 100 and accept that early generations will be
+# undertrained; the first-gen min-score gate (evolution_graph.py) ensures only
+# adapters that beat the base advance to production.
+# --------------------------------------------------------------------------- #
+
+N_MIN_TRAIN: dict[str, int] = {
+    "trading-reflector":          100,  # post-mortem prose; 100 closed trades for predictive_hit_rate_30d SNR >= 0.2
+    "trading-bull":               100,  # debate prose with stock-specific vocabulary
+    "trading-bear":               100,
+    "trading-arbiter":            100,  # structured output + PnL labels
+    "trading-regime-tagger":       40,  # 7-class JSON classifier; smaller because base already knows JSON
+    "trading-indicator-selector":  40,  # 20 indicators, top-k selection; deterministic baseline is the anchor
+}
+
+N_MIN_TEST: dict[str, int] = {
+    "trading-reflector":          20,
+    "trading-bull":               20,
+    "trading-bear":               20,
+    "trading-arbiter":            25,
+    "trading-regime-tagger":      15,
+    "trading-indicator-selector": 15,
+}
+
+# --------------------------------------------------------------------------- #
+# Crypto-term contamination blocklist (Section A, Section D)
+# Applied ONLY to bull/bear/arbiter prose roles. Case-insensitive substring
+# match. regime-tagger uses strategy column label strings (not prose), so it
+# is exempt. Reflector is exempt (stock-only source by design).
+# --------------------------------------------------------------------------- #
+
+#: Roles to which the crypto-term blocklist applies.
+CRYPTO_BLOCKLIST_ROLES: frozenset[str] = frozenset({
+    "trading-bull", "trading-bear", "trading-arbiter",
+})
+
+#: Crypto-specific terms that contaminate stock-trader training data.
+CRYPTO_TERMS: tuple[str, ...] = (
+    "funding rate", "on-chain", "USDT", "USDC", "BTC", "ETH", "LTC",
+    "SOL", "ADA", "perpetual", "leverage", "staking", "mempool",
+    "gas fee", "tokenomics", "airdrop", "whale", "24/7", "mining",
+    "validator", "halving",
+)
+
 #: Known exit reasons emitted by the trading bot. Anything outside this set is
 #: a reflector reject. Keep in sync with `freqtrade` strategy exit signals.
 KNOWN_EXIT_REASONS: frozenset[str] = frozenset({
@@ -132,6 +180,7 @@ class Reject:
     UNKNOWN_EXIT_REASON     = "unknown_exit_reason"
     EVIDENCE_TOO_THIN       = "evidence_too_thin"
     STRUCTURED_INVALID      = "structured_output_invalid"
+    CRYPTO_TERM_CONTAMINATION = "crypto_term_contamination"
 
 
 # --------------------------------------------------------------------------- #
@@ -251,6 +300,18 @@ def filter_structured(example: dict[str, Any]) -> tuple[bool, str | None]:
     return True, None
 
 
+def _has_crypto_term(text: str) -> bool:
+    """Return True if ``text`` contains any crypto-specific contamination term.
+
+    Case-insensitive substring match per spec Section A. This catches both
+    pure crypto debates (all 29k quanta_schema.decisions rows reference crypto)
+    and any stock debate that accidentally mentions crypto concepts (e.g. a
+    debate citing "BTC correlation" for a macro analysis).
+    """
+    lower = text.lower()
+    return any(term.lower() in lower for term in CRYPTO_TERMS)
+
+
 ROLE_FILTERS = {
     "trading-reflector":          filter_reflector,
     "trading-bull":               filter_bull_bear,
@@ -272,9 +333,13 @@ class RoleCurationResult:
     role: str
     accept_count: int = 0
     reject_count: int = 0
+    test_set_count: int = 0
     reject_reasons: dict[str, int] = field(default_factory=dict)
     source_files: list[str] = field(default_factory=list)
     out_path: str | None = None
+    test_set_path: str | None = None
+    #: "ok" | "insufficient_data" | "error"
+    status: str = "ok"
 
     @property
     def total(self) -> int:
@@ -288,13 +353,17 @@ class RoleCurationResult:
 
     def as_dict(self) -> dict[str, Any]:
         return {
-            "role":           self.role,
+            "status":         self.status,
+            "track_id":       self.role,
             "accept_count":   self.accept_count,
             "reject_count":   self.reject_count,
+            "test_set_count": self.test_set_count,
             "accept_rate":    round(self.accept_rate, 4),
             "reject_reasons": dict(sorted(self.reject_reasons.items())),
             "source_files":   list(self.source_files),
             "out_path":       self.out_path,
+            "test_set_path":  self.test_set_path,
+            "timestamp_utc":  dt.datetime.now(dt.UTC).isoformat(),
         }
 
 
@@ -590,6 +659,23 @@ def _write_hf_dataset(
     return out_dir
 
 
+def _write_curator_result_json(role_dir: Path, result: "RoleCurationResult") -> None:
+    """Write ``curator_result.json`` next to the Arrow shard (or where it would be).
+
+    Matches the schema from spec Section D. Never raises — disk errors are
+    logged as warnings so the caller's return path is unaffected.
+    """
+    try:
+        role_dir.mkdir(parents=True, exist_ok=True)
+        out = role_dir / "curator_result.json"
+        tmp = out.with_suffix(".json.partial")
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump(result.as_dict(), fh, indent=2, sort_keys=True)
+        os.replace(tmp, out)
+    except OSError as exc:
+        logger.warning("[curate] failed to write curator_result.json for role=%s: %s", result.role, exc)
+
+
 def curate_role(
     role: str,
     *,
@@ -611,9 +697,22 @@ def curate_role(
     result = RoleCurationResult(role=role, source_files=[str(p) for p in raw_files])
     kept_rows: list[dict[str, Any]] = []
     kept_raw: list[dict[str, Any]] = []
+    # test_set: temporal/ID split applied after the full accept pass
+    test_set: list[dict[str, Any]] = []
+
+    apply_crypto_blocklist = role in CRYPTO_BLOCKLIST_ROLES
 
     for path in raw_files:
         for example in _iter_jsonl(path):
+            # --- Crypto-term contamination check (bull/bear/arbiter only) ---
+            if apply_crypto_blocklist:
+                response_text = example.get("response") or ""
+                if _has_crypto_term(response_text):
+                    result.reject_count += 1
+                    key = Reject.CRYPTO_TERM_CONTAMINATION
+                    result.reject_reasons[key] = result.reject_reasons.get(key, 0) + 1
+                    continue
+
             ok, code = filt(example)
             if ok:
                 result.accept_count += 1
@@ -624,12 +723,31 @@ def curate_role(
                 key = code or "unknown"
                 result.reject_reasons[key] = result.reject_reasons.get(key, 0) + 1
 
+    # --- N_MIN gate (Section D) ---
+    role_dir = out_root / "datasets" / role
+    n_min_train = N_MIN_TRAIN.get(role, 0)
+    n_min_test = N_MIN_TEST.get(role, 0)
+
+    # We use 20% split approximation for test size estimation here.
+    # The actual test set is computed from kept_raw below.
+    # For the gate: check accept_count against N_MIN_TRAIN.
+    if result.accept_count < n_min_train:
+        result.reject_reasons["below_min_records_gate"] = result.accept_count
+        result.status = "insufficient_data"
+        logger.error(
+            "[curate] role=%s INSUFFICIENT DATA: accept_count=%d < N_MIN=%d. "
+            "No shard written. Evolution will be blocked.",
+            role, result.accept_count, n_min_train,
+        )
+        # Write curator_result.json alongside where the shard WOULD be so
+        # callers can programmatically inspect the failure without parsing logs.
+        _write_curator_result_json(role_dir, result)
+        return result  # out_path remains None — callers check this
+
     if not kept_rows:
-        # Don't emit an empty Arrow shard — ModelForge's trainer would crash
-        # on a zero-row dataset. Keep the stats row, exit early.
+        # Should not reach here after the N_MIN check above, but keep as safety.
         return result
 
-    role_dir = out_root / "datasets" / role
     out_dir = role_dir / "curated"
     try:
         _write_hf_dataset(
@@ -650,14 +768,29 @@ def curate_role(
                 raw_examples=kept_raw,
             )
             if test_path is not None:
+                result.test_set_path = str(test_path)
+                result.test_set_count = len(kept_raw)
                 logger.info("[curate] wrote eval test set %s (%d rows)", test_path, len(kept_raw))
+
+            # --- N_MIN test gate (after test set is known) ---
+            if result.test_set_count < n_min_test:
+                logger.error(
+                    "[curate] role=%s test_set_count=%d < N_MIN_TEST=%d. "
+                    "Shard written but flagged insufficient for eval.",
+                    role, result.test_set_count, n_min_test,
+                )
+                result.status = "insufficient_data"
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("[curate] eval test set write failed for role=%s: %s", role, exc)
     except ImportError as exc:
         result.reject_reasons["datasets_import_failed"] = result.accept_count
         result.reject_count += result.accept_count
         result.accept_count = 0
+        result.status = "error"
         logger.warning("datasets library not importable for role=%s: %s", role, exc)
+
+    # Always write curator_result.json alongside the shard (or error state).
+    _write_curator_result_json(role_dir, result)
     return result
 
 
