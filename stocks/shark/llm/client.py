@@ -819,12 +819,21 @@ def _ollama_base_url() -> str:
 
 
 def _probe_ollama_tags() -> set[str]:
-    """Return the set of model tags currently served by Ollama.
+    """Return the set of model tags currently served by Ollama, normalised
+    to BOTH ``name:latest`` and bare ``name`` forms so callers don't have
+    to remember the suffix convention.
 
     Cached for ``_OLLAMA_TAGS_CACHE_TTL_S`` seconds. Returns an empty set
     on any probe failure (transport error, non-200, malformed JSON);
     callers must interpret an empty set as "no adapters available, fall
     back to base" rather than "Ollama is empty" — fail-closed.
+
+    Normalisation rationale: Ollama's ``/api/tags`` returns models like
+    ``hermes3-8b-reflector-current:latest`` (full tag with version),
+    but the API accepts calls with EITHER form (``model: "name"`` or
+    ``model: "name:latest"``). Our routing JSON omits ``:latest`` for
+    readability; the probe inserts both forms into the set so an exact
+    match works either way.
     """
     global _OLLAMA_TAGS_CACHE, _OLLAMA_TAGS_CACHED_AT
     now = time.monotonic()
@@ -842,9 +851,18 @@ def _probe_ollama_tags() -> set[str]:
             _OLLAMA_TAGS_CACHE = set()
         else:
             body = resp.json() or {}
-            _OLLAMA_TAGS_CACHE = {
-                str(m.get("name", "")) for m in (body.get("models") or [])
-            }
+            tags: set[str] = set()
+            for m in (body.get("models") or []):
+                full = str(m.get("name", ""))
+                if not full:
+                    continue
+                tags.add(full)
+                # Also index the bare form (strip a trailing :version) so
+                # routing JSON without an explicit `:latest` resolves cleanly.
+                if ":" in full:
+                    bare, _ver = full.rsplit(":", 1)
+                    tags.add(bare)
+            _OLLAMA_TAGS_CACHE = tags
     except Exception as exc:
         logger.debug("Ollama tag probe failed: %s", exc)
         _OLLAMA_TAGS_CACHE = set()

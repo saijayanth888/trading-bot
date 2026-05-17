@@ -42,12 +42,12 @@ def test_trading_bull_routes_to_adapter_when_present():
     """When the adapter tag is in Ollama, that's what the router picks."""
     fake_resp = type("R", (), {
         "status_code": 200,
-        "json": lambda self: _fake_tags("hermes3:8b", "hermes3:8b-bull-current"),
+        "json": lambda self: _fake_tags("hermes3:8b", "hermes3-8b-bull-current"),
     })()
     with patch("requests.get", return_value=fake_resp):
         route = cli.resolve_role_route("trading-bull")
     assert route["backend"] == "ollama"
-    assert route["model"] == "hermes3:8b-bull-current"
+    assert route["model"] == "hermes3-8b-bull-current"
 
 
 def test_all_six_trading_roles_pick_their_adapter_when_published():
@@ -56,22 +56,22 @@ def test_all_six_trading_roles_pick_their_adapter_when_published():
     fake_resp = type("R", (), {
         "status_code": 200,
         "json": lambda self: _fake_tags(
-            "hermes3:8b-reflector-current",
-            "hermes3:8b-bull-current",
-            "hermes3:8b-bear-current",
-            "hermes3:8b-arbiter-current",
-            "hermes3:8b-regime-tagger-current",
-            "hermes3:8b-indicator-selector-current",
+            "hermes3-8b-reflector-current",
+            "hermes3-8b-bull-current",
+            "hermes3-8b-bear-current",
+            "hermes3-8b-arbiter-current",
+            "hermes3-8b-regime-tagger-current",
+            "hermes3-8b-indicator-selector-current",
         ),
     })()
     with patch("requests.get", return_value=fake_resp):
         for role, expected in [
-            ("trading-reflector", "hermes3:8b-reflector-current"),
-            ("trading-bull", "hermes3:8b-bull-current"),
-            ("trading-bear", "hermes3:8b-bear-current"),
-            ("trading-arbiter", "hermes3:8b-arbiter-current"),
-            ("trading-regime-tagger", "hermes3:8b-regime-tagger-current"),
-            ("trading-indicator-selector", "hermes3:8b-indicator-selector-current"),
+            ("trading-reflector", "hermes3-8b-reflector-current"),
+            ("trading-bull", "hermes3-8b-bull-current"),
+            ("trading-bear", "hermes3-8b-bear-current"),
+            ("trading-arbiter", "hermes3-8b-arbiter-current"),
+            ("trading-regime-tagger", "hermes3-8b-regime-tagger-current"),
+            ("trading-indicator-selector", "hermes3-8b-indicator-selector-current"),
         ]:
             cli._reset_routing_cache()
             route = cli.resolve_role_route(role)
@@ -142,7 +142,7 @@ def test_probe_is_cached_across_resolve_calls():
     once, not five times. Otherwise every shark cycle hammers Ollama."""
     fake_resp = type("R", (), {
         "status_code": 200,
-        "json": lambda self: _fake_tags("hermes3:8b-bull-current"),
+        "json": lambda self: _fake_tags("hermes3-8b-bull-current"),
     })()
     with patch("requests.get", return_value=fake_resp) as mock_get:
         for role in [

@@ -15,14 +15,14 @@
   "portfolio_manager": "hermes3:70b",
 
   "routing": {
-    "_comment": "Per-role backend + model selection consumed by shark.llm.client.resolve_role_route(). All trading-* roles point at ModelForge-trained adapter tags (hermes3:8b-<role>-current). The router probes Ollama for that tag at resolve time and silently swaps to the 'fallback' base model if the adapter hasn't been published yet — that is how a ModelForge promotion gets auto-picked-up on the next call. Probe cache is 60s, so a fresh publish appears in shark within a minute. Switched from vLLM to Ollama on 2026-05-17: vLLM crashed the GB10 host on 2026-05-14; Ollama already proved the custom-model pattern works (hermes3:8b-trader).",
+    "_comment": "Per-role backend + model selection consumed by shark.llm.client.resolve_role_route(). All trading-* roles point at ModelForge-trained adapter tags (hermes3-8b-<role>-current). The router probes Ollama for that tag at resolve time and silently swaps to the 'fallback' base model if the adapter hasn't been published yet — that is how a ModelForge promotion gets auto-picked-up on the next call. Probe cache is 60s, so a fresh publish appears in shark within a minute. Switched from vLLM to Ollama on 2026-05-17 (vLLM crashed the GB10 host on 2026-05-14; Ollama already proved the custom-model pattern works with hermes3:8b-trader). NOTE on naming: published tags use a dash between base+version because Ollama only allows ONE colon per tag (the model:version separator). The action's _slug() does the replacement: `hermes3:8b` base → `hermes3-8b` prefix in the tag.",
 
-    "trading-reflector":          {"backend": "ollama", "model": "hermes3:8b-reflector-current",          "fallback": "hermes3:8b"},
-    "trading-bull":               {"backend": "ollama", "model": "hermes3:8b-bull-current",               "fallback": "hermes3:8b"},
-    "trading-bear":               {"backend": "ollama", "model": "hermes3:8b-bear-current",               "fallback": "hermes3:8b"},
-    "trading-arbiter":            {"backend": "ollama", "model": "hermes3:8b-arbiter-current",            "fallback": "hermes3:8b"},
+    "trading-reflector":          {"backend": "ollama", "model": "hermes3-8b-reflector-current",          "fallback": "hermes3:8b"},
+    "trading-bull":               {"backend": "ollama", "model": "hermes3-8b-bull-current",               "fallback": "hermes3:8b"},
+    "trading-bear":               {"backend": "ollama", "model": "hermes3-8b-bear-current",               "fallback": "hermes3:8b"},
+    "trading-arbiter":            {"backend": "ollama", "model": "hermes3-8b-arbiter-current",            "fallback": "hermes3:8b"},
 
-    "trading-regime-tagger":      {"backend": "ollama", "model": "hermes3:8b-regime-tagger-current",      "fallback": "hermes3:8b-trader"},
-    "trading-indicator-selector": {"backend": "ollama", "model": "hermes3:8b-indicator-selector-current", "fallback": "hermes3:8b-trader"}
+    "trading-regime-tagger":      {"backend": "ollama", "model": "hermes3-8b-regime-tagger-current",      "fallback": "hermes3:8b-trader"},
+    "trading-indicator-selector": {"backend": "ollama", "model": "hermes3-8b-indicator-selector-current", "fallback": "hermes3:8b-trader"}
   }
 }
