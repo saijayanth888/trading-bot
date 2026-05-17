@@ -399,6 +399,8 @@ def _to_hf_row(role: str, example: dict[str, Any]) -> dict[str, Any]:
 _PNL_PCT_RE = re.compile(r'"pnl_pct"\s*:\s*([+\-]?\d+(?:\.\d+)?)')
 _EXIT_REASON_RE = re.compile(r'"exit_reason"\s*:\s*"([^"]+)"')
 _EXIT_PRICE_RE = re.compile(r'"exit_price"\s*:\s*([+\-]?\d+(?:\.\d+)?|null)')
+_ENTRY_PRICE_RE = re.compile(r'"entry_price"\s*:\s*([+\-]?\d+(?:\.\d+)?|null)')
+_QTY_RE = re.compile(r'"(?:qty|quantity|shares)\s*"\s*:\s*([+\-]?\d+(?:\.\d+)?|null)')
 _SYMBOL_RE = re.compile(r'"symbol"\s*:\s*"([^"]+)"')
 
 
@@ -409,14 +411,15 @@ def _build_eval_test_set_row(role: str, example: dict[str, Any]) -> dict[str, An
     JSONL record per held-out example. Required across the family:
 
       * ``prompt`` -- the same prompt the role saw at runtime
-      * role-specific gold-truth fields (e.g. ``realized_pnl`` for reflector)
+      * role-specific gold-truth fields (e.g. ``realized_pnl_usd`` for reflector)
 
-    For ``trading-reflector`` we extract realized P&L from the embedded
-    Shark ``trade_reviewer`` payload (pnl_pct + exit_reason). ``realized_pnl``
-    in the test set is the percent value -- the eval scorer's
-    ``faithfulness_regex`` checks dollar citations, but until Alpaca-side
-    fills carry through with realized $ amounts the percent is the best
-    gold-truth we have, and ``judge_score`` doesn't need it at all.
+    For ``trading-reflector`` we compute ``realized_pnl_usd`` from dollar-side
+    fields only. The formula is ``(exit_price - entry_price) * qty``.  When
+    those three fields are not all present (i.e. the ledger only carries a
+    percent), we write ``realized_pnl_usd: null`` rather than fabricating a
+    notional.  Null records are kept in the test set (the prompt + gold_response
+    still train the prose quality) but are skipped by ``faithfulness_regex``
+    eval (which checks dollar-sign citations).
 
     Returns ``None`` when the example carries no usable prompt (drop it).
     """
@@ -438,16 +441,51 @@ def _build_eval_test_set_row(role: str, example: dict[str, Any]) -> dict[str, An
     }
     # Reflector-specific enrichment from the trade_reviewer trade JSON.
     if role == "trading-reflector":
-        m_pnl = _PNL_PCT_RE.search(user_msg)
-        if m_pnl:
+        # Attempt dollar-amount derivation: requires entry_price + exit_price + qty.
+        # Only write realized_pnl_usd when all three are present and non-null.
+        # NEVER fabricate a notional from pct alone.
+        realized_pnl_usd: float | None = None
+        ledger = example.get("ledger") or {}
+
+        # Prefer structured ledger fields first (set by reflector_example()).
+        entry_price_raw = ledger.get("entry_price")
+        exit_price_raw = ledger.get("exit_price")
+        qty_raw = ledger.get("qty") or ledger.get("quantity") or ledger.get("shares")
+
+        # Fall back to regex extraction from the embedded user message JSON.
+        if entry_price_raw is None:
+            m_ep = _ENTRY_PRICE_RE.search(user_msg)
+            if m_ep and m_ep.group(1) != "null":
+                try:
+                    entry_price_raw = float(m_ep.group(1))
+                except ValueError:
+                    pass
+        if exit_price_raw is None:
+            m_xp = _EXIT_PRICE_RE.search(user_msg)
+            if m_xp and m_xp.group(1) != "null":
+                try:
+                    exit_price_raw = float(m_xp.group(1))
+                except ValueError:
+                    pass
+        if qty_raw is None:
+            m_qty = _QTY_RE.search(user_msg)
+            if m_qty and m_qty.group(1) != "null":
+                try:
+                    qty_raw = float(m_qty.group(1))
+                except ValueError:
+                    pass
+
+        if (entry_price_raw is not None and exit_price_raw is not None
+                and qty_raw is not None):
             try:
-                row["realized_pnl_pct"] = float(m_pnl.group(1))
-                # `realized_pnl` is the scorer's documented field. Without
-                # dollar amounts we re-use pct so values_match_to_decimal
-                # at least has a number to compare against.
-                row["realized_pnl"] = float(m_pnl.group(1))
-            except ValueError:
-                pass
+                realized_pnl_usd = (float(exit_price_raw) - float(entry_price_raw)) * float(qty_raw)
+            except (TypeError, ValueError):
+                realized_pnl_usd = None
+
+        # Always write the field (even as None) so downstream code can rely on
+        # key presence rather than .get() with a default.
+        row["realized_pnl_usd"] = realized_pnl_usd
+
         m_reason = _EXIT_REASON_RE.search(user_msg)
         if m_reason:
             row["exit_reason"] = m_reason.group(1)

@@ -358,8 +358,10 @@ def reflector_example(entry: ReflectorEntry, *, target_date: dt.date) -> dict[st
         "system_message": (
             "You are Shark's nightly reflector. Given the trade thesis and the "
             "realized outcome, write 2-4 sentences naming what worked, what "
-            "missed, and one lesson to carry forward. Cite numeric values from "
-            "the ledger."
+            "missed, and one lesson to carry forward. When the ledger row "
+            "includes a USD P&L value, cite it with a dollar sign (e.g. $-123.45 "
+            "or $+87.00). When only a percentage is available, cite the percent. "
+            "Never fabricate a dollar figure."
         ),
         "user_message": (
             f"## Thesis ({entry.open_date} {entry.ticker} {entry.rating})\n"
