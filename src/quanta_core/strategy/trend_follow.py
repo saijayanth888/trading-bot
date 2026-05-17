@@ -212,10 +212,15 @@ class TrendFollow(Strategy):
         # Round to 8dp to keep the wire format predictable for crypto.
         return raw.quantize(Decimal("0.00000001"))
 
-    # Fixed namespace UUID for deterministic client_order_id derivation.
-    # MUST match MeanRevBB._COID_NAMESPACE so the (strategy, symbol, side, ts)
-    # tuple gives a globally-unique-but-stable id across the V4 stack.
-    _COID_NAMESPACE = uuid.UUID("a8e9c46f-0e2e-4b4a-9d1a-3f5e6c0b4a7e")
+    # Per-strategy namespace UUID for deterministic client_order_id
+    # derivation. MUST DIFFER from MeanRevBB._COID_NAMESPACE: the seed
+    # string is "<strategy>|<symbol>|<side>|<ts>", and while the strategy
+    # prefix today guarantees seeds differ across strategies, a future
+    # seed-format refactor (e.g. dropping the prefix) would silently
+    # collide identical (symbol, side, ts) tuples across strategies if
+    # both namespaces matched. Distinct namespaces are the structural
+    # belt-and-suspenders. Audit 2026-05-16 (CORE-6 → G9).
+    _COID_NAMESPACE = uuid.UUID("b7f0d57e-1f3f-5c5b-ae2b-4f6e7d1b5b8f")
 
     def _build_proposal(
         self,

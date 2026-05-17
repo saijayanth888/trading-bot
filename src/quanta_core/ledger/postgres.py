@@ -576,6 +576,16 @@ class PostgresLedger:
         async with self._acquire() as conn:
             conn.row_factory = dict_row
             async with conn.cursor() as cur:
+                # Audit 2026-05-16 CORE-7: original query did not filter
+                # on orders.status='FILLED', so proposals that were emitted
+                # but never filled (cancelled, slippage-rejected, expired)
+                # appeared in the result with qty=0 / avg_price=NULL and
+                # the weekly publisher computed PnL against them. INNER
+                # JOIN orders here so the result only contains truly
+                # filled order rows. Operationally this also matches the
+                # `trades` semantics callers (Hermes weekly publisher,
+                # post-mortem reflector) actually want — a "trade" is a
+                # fill, not a proposal.
                 await cur.execute(
                     """
                     SELECT
@@ -593,6 +603,9 @@ class PostgresLedger:
                         MAX(f.ts)                            AS last_fill,
                         p.created_at                         AS proposed_at
                     FROM proposals p
+                    JOIN orders o
+                           ON o.client_order_id = p.client_order_id
+                          AND o.status = 'FILLED'
                     LEFT JOIN fills f
                            ON f.client_order_id = p.client_order_id
                     WHERE p.created_at >= %s

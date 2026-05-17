@@ -449,6 +449,12 @@ def _h_select_trades_for_week(cursor: _FakeCursor, params: tuple[Any, ...]) -> N
         for p in _PROPOSALS.values():
             if not (start <= p["created_at"] < end):
                 continue
+            # Mirror the production INNER JOIN orders … AND status='FILLED'
+            # added in audit 2026-05-16 (G7): proposals that never reached
+            # a FILLED order are excluded from the weekly trades view.
+            order = _ORDERS.get(p["client_order_id"])
+            if not order or order.get("status") != "FILLED":
+                continue
             related = [f for f in _FILLS if f["client_order_id"] == p["client_order_id"]]
             qty = sum((f["qty"] for f in related), Decimal("0"))
             if qty != 0:
@@ -546,7 +552,11 @@ _HANDLERS.extend(
             "SELECT TS, EQUITY, UNREALIZED, DRAWDOWN_PCT, CASH FROM EQUITY_SNAPSHOTS",
             _h_select_equity,
         ),
-        # Trades-for-week join
+        # Trades-for-week join: production query now INNER-JOINs orders
+        # on status='FILLED' before LEFT-JOINing fills (G7 audit fix).
+        # Match the new fragment "JOIN ORDERS O" so the fake routes
+        # correctly under both shapes (old + new).
+        ("FROM PROPOSALS P JOIN ORDERS O", _h_select_trades_for_week),
         ("FROM PROPOSALS P LEFT JOIN FILLS F", _h_select_trades_for_week),
         # SELECT 1
         ("SELECT 1", _h_select_1),

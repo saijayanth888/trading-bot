@@ -23,7 +23,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 # Reuse shark's atomic write (already battle-tested with file locking)
-from shark.memory.atomic import atomic_write_text
+from shark.memory.atomic import atomic_write_text, file_lock
 
 logger = logging.getLogger(__name__)
 
@@ -141,10 +141,20 @@ def shares_held(underlying: str) -> int:
 
 
 def append_trade(rec: TradeRecord) -> None:
+    """Append one closed-trade record to trades.jsonl.
+
+    Wrapped in ``file_lock`` so concurrent close paths (Hermes-vs-runner
+    racing on profit-take, multiple sell_csps invocations, etc.) can't
+    interleave partial writes and corrupt JSONL line boundaries. Atomic
+    rename would not work here — the file is append-only — but the
+    OS-level advisory lock at write time gives us the same mutual-
+    exclusion guarantee. Audit 2026-05-16 (HERMES-6 → G12).
+    """
     _ensure_dir()
     line = json.dumps(asdict(rec))
-    with _TRADES_FILE.open("a") as f:
-        f.write(line + "\n")
+    with file_lock(_STATE_DIR / ".trades.lock"):
+        with _TRADES_FILE.open("a") as f:
+            f.write(line + "\n")
 
 
 def cumulative_pnl(since: date | None = None) -> float:

@@ -307,14 +307,20 @@ class StrategyDispatcher:
             return allowed
         except Exception:
             # Defensive: a bug in the gate must NOT crash the dispatcher
-            # loop. Fail-open here (forward the proposal) because the gate
-            # itself is broken — the operator will see the exception trail
-            # in logs and can disable enforcement via env var until fixed.
+            # loop. FAIL-CLOSED — reject the proposal when the gate itself
+            # is broken. This is a risk gate: silently letting proposals
+            # through on an internal error is the wrong direction. The
+            # operator sees the exception trail in logs and can disable
+            # enforcement via env var until fixed.
+            # Reversed from fail-open after 2026-05-16 audit (CORE-8 →
+            # G8). The prior fail-open posture made the dispatcher
+            # vulnerable to a partial wiring error silently bypassing the
+            # cap — exactly the failure mode the gate was added to prevent.
             _log.exception(
-                "dispatcher.single_name_cap_gate_error",
+                "dispatcher.single_name_cap_gate_error_REJECTING",
                 extra={"strategy": strategy_name, "correlation_id": correlation_id},
             )
-            return True
+            return False
 
     @staticmethod
     def _notional_usd(proposal: OrderProposal) -> float | None:

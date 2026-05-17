@@ -391,6 +391,14 @@ async def test_get_trades_for_week_aggregates_fills(
             fee=Decimal("0.5"),
         )
     )
+    # Production engine flips order status to FILLED once cumulative fill
+    # qty matches ordered qty (run_v4_shadow.py fill_pending_proposals
+    # does this directly via an UPDATE). The get_trades_for_week query
+    # joins on orders.status='FILLED' (audit 2026-05-16 G7) to exclude
+    # unfilled proposals. Simulate the engine's transition by poking the
+    # fake's state directly — keeps SQL-level tests (which assert PARTIAL
+    # after a single fill) separate from this pipeline-level test.
+    _fake_pg._ORDERS["cw1"]["status"] = "FILLED"
     # Add another trade OUTSIDE the window.
     next_week = datetime(2026, 5, 12, tzinfo=UTC)
     await ledger.record_proposal(

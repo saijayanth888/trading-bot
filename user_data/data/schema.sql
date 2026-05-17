@@ -118,6 +118,13 @@ CREATE TABLE IF NOT EXISTS regime_log (
     state_probabilities   JSONB
 );
 SELECT create_hypertable('regime_log', 'ts', if_not_exists => TRUE);
+-- Future-proofing index for queries that filter by regime label first
+-- (e.g. nightly_reflector's "what trades happened during trending_down").
+-- The hypertable's chunk_index on ts alone covers pure time windows;
+-- this composite covers regime-filtered time scans. Audit 2026-05-16
+-- (DB-9 → G13).
+CREATE INDEX IF NOT EXISTS ix_regime_log_regime_ts
+    ON regime_log (regime, ts DESC);
 
 CREATE TABLE IF NOT EXISTS regime_model_meta (
     id              BIGSERIAL PRIMARY KEY,

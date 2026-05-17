@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -230,7 +230,13 @@ def generate_dashboard_data() -> Path:
     closed_trades = _read_closed_trades()
 
     data = {
-        "generated_at": datetime.now().isoformat(),
+        # UTC-aware so the dashboard consumer doesn't have to guess the
+        # producer's local TZ. Previously `datetime.now()` returned a
+        # naive timestamp; the consumer at ops_routes.py:2370 tolerated
+        # it via `replace(tzinfo=UTC)`, which mis-tagged ET clock time as
+        # UTC and produced a 4-hour systematic age error during EDT
+        # (audit 2026-05-16 HERMES-4 → G10).
+        "generated_at": datetime.now(UTC).isoformat(),
         "state": _read_portfolio_state(),
         "kill_switch": _read_kill_switch(),
         "push_failed": _read_push_failed(),

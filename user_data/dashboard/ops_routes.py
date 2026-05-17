@@ -474,10 +474,20 @@ async def regime():
 
     # Stale check: regime model writes hourly → use 90min as the stale
     # threshold so the card stays green across normal hour transitions.
+    # psycopg returns timestamptz columns as aware datetimes in normal
+    # operation. If the column is ever stored as `timestamp without
+    # time zone` (deployment misconfig) the previous code silently set
+    # age_s=None and the stale gate went blind — a regime row from days
+    # ago would render as "ok" (audit 2026-05-16 BACKEND-7). Promote
+    # naive timestamps to UTC so age is always computed; the model
+    # writer is the same process for every deployment so UTC is the
+    # right interpretation.
     ts = latest.get("ts")
     age_s = None
-    if ts:
-        age_s = (datetime.now(UTC) - ts).total_seconds() if ts.tzinfo else None
+    if ts is not None:
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        age_s = (datetime.now(UTC) - ts).total_seconds()
     stale = (age_s is not None) and age_s > 90 * 60
 
     return _envelope(
@@ -1610,8 +1620,8 @@ async def rebalance_apply(request: Request):
     tmp.replace(CONFIG_PATH)
 
     return _envelope("ok", data={**result, "applied": True, "backup": str(backup_path),
-                                 "note": "freqtrade picks up new weights within 1h via "
-                                         "bot_loop_start config re-read; no restart needed"})
+                                 "note": "quanta-core re-reads capital_allocation.pair_weights "
+                                         "on its next 5-min cycle; no restart needed"})
 
 
 # --------------------------------------------------------------------------
@@ -3722,13 +3732,20 @@ async def flash_status():
                     )
                     open_rows = cur.fetchall()
 
-                    # Closed-today P&L from trade_journal
+                    # Closed-today P&L from trade_journal.
+                    # date_trunc('day', NOW()) truncates to the postgres
+                    # container's local-TZ midnight, not UTC. Every other
+                    # daily-boundary query in this file qualifies with
+                    # AT TIME ZONE 'UTC' (lines 1878, 1889, 1916, …); this
+                    # one was inconsistent (audit 2026-05-16 BACKEND-4).
+                    # Trust UTC across the dashboard so "today" matches the
+                    # rest of the stack regardless of host clock.
                     cur.execute(
                         """
                         SELECT count(*), COALESCE(SUM(pnl), 0)
                         FROM public.trade_journal
                         WHERE closed_at IS NOT NULL
-                          AND closed_at >= date_trunc('day', NOW())
+                          AND closed_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC')
                         """
                     )
                     closed_row = cur.fetchone()
@@ -5243,7 +5260,12 @@ async def weekly_training() -> dict[str, Any]:
         # mf-api is reachable, 6 tracks registered, just no LoRA adapter
         # has been trained yet. NOT a failure state — the operator's
         # weekly Sunday 14:00 ET window is when training kicks off.
-        env_status = "ready"
+        # Envelope contract values are ok|degraded|down (ops_spa.js:76
+        # slotState branches on these only). "ready" was a non-contract
+        # value that the frontend silently treated as "ok" — hiding the
+        # awaiting-first-training state. Use "degraded" with a clear
+        # error string so the card renders its degraded variant.
+        env_status = "degraded"
         env_error = f"ready · {len(rows)} tracks registered · awaiting first training cycle"
     else:
         env_status = "ok"
@@ -5941,12 +5963,18 @@ async def yesterday_pnl():
 
     try:
         with psycopg.connect(ops_db._resolve_dsn(), row_factory=dict_row) as conn, conn.cursor() as cur:
+            # Strictly the most recent COMPLETED UTC day. Excluding the
+            # current UTC date (`d < CURRENT_DATE` in UTC) prevents
+            # partial-today P&L from being labelled "yesterday" when
+            # fills landed earlier today. Audit 2026-05-16 BACKEND-8.
             cur.execute(
                 """
                 WITH last_day AS (
                   SELECT (closed_at AT TIME ZONE 'UTC')::date AS d
                   FROM trade_journal
                   WHERE closed_at IS NOT NULL
+                    AND (closed_at AT TIME ZONE 'UTC')::date
+                        < (NOW() AT TIME ZONE 'UTC')::date
                   ORDER BY closed_at DESC
                   LIMIT 1
                 )
