@@ -37,13 +37,22 @@ from typing import Any
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_CURATE_PATH = _REPO_ROOT / "scripts" / "modelforge_curate.py"
+_SCRIPTS_DIR = _REPO_ROOT / "scripts"
+_CURATE_PATH = _SCRIPTS_DIR / "modelforge_curate.py"
+
+# Add scripts/ to sys.path so the module is importable as a real module
+# (avoids the dataclass sys.modules lookup failure that happens when loading
+# via importlib.spec_from_file_location without registering in sys.modules).
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
 
 
 def _load_curate():
-    spec = importlib.util.spec_from_file_location("modelforge_curate", _CURATE_PATH)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    """Import modelforge_curate as a proper module (registered in sys.modules)."""
+    import importlib
+    if "modelforge_curate" in sys.modules:
+        return sys.modules["modelforge_curate"]
+    mod = importlib.import_module("modelforge_curate")
     return mod
 
 
