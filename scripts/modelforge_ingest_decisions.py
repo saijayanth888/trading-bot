@@ -105,7 +105,19 @@ CRYPTO_TERMS: tuple[str, ...] = (
 )
 
 #: quanta_schema.decisions.strategy → RegimeLabel enum mapping (Section A).
+#: Live quanta-core today emits only two strategy values: mean_rev_bb and trend_follow.
+#: The spec's broader set (meta_up_regime, bb_squeeze, etc.) is preserved for
+#: forward-compatibility if quanta-core's strategy taxonomy expands.
 STRATEGY_TO_REGIME: dict[str, str] = {
+    # Live strategies (2026-05-17): mean_rev_bb = mean-reversion bollinger
+    # band trade → ranging market; trend_follow = momentum continuation
+    # in the prevailing direction → trending_up (we use the bullish label
+    # because the strategy fires long-only in quanta-core today; if a
+    # short-trend variant is added the mapping must be updated to read
+    # the sign from another field).
+    "mean_rev_bb":       "ranging",
+    "trend_follow":      "trending_up",
+    # Forward-compat values (not currently emitted but spec'd in Section A):
     "meta_up_regime":    "trending_up",
     "meta_down_regime":  "trending_down",
     "bb_squeeze":        "ranging",
