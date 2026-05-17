@@ -780,9 +780,101 @@ def _load_routing() -> dict[str, dict]:
 
 
 def _reset_routing_cache() -> None:
-    """Test helper — forget the cached routing map."""
-    global _ROUTING_CACHE
+    """Test helper — forget the cached routing map AND the Ollama-tag probe cache."""
+    global _ROUTING_CACHE, _OLLAMA_TAGS_CACHE, _OLLAMA_TAGS_CACHED_AT, _FALLBACK_WARNED
     _ROUTING_CACHE = None
+    _OLLAMA_TAGS_CACHE = None
+    _OLLAMA_TAGS_CACHED_AT = 0.0
+    _FALLBACK_WARNED = set()
+
+
+# ── Ollama tag-probe cache for adapter availability ──────────────────────
+#
+# When a routing record points at a ModelForge-trained adapter (e.g.
+# "hermes3:8b-bull-current") we need to verify the tag actually exists in
+# Ollama before routing a live call to it. The probe is a single GET to
+# /api/tags; we cache for 60s so a tight loop of agent calls doesn't
+# hammer Ollama. On any probe failure we ASSUME the tag is absent and
+# fall back — fail-closed in the safe direction. The fallback path is
+# logged WARNING exactly once per (role, model) pair per probe-cycle so
+# the operator sees the situation without log spam.
+#
+# Design note: probing is sync because resolve_role_route is sync today
+# and is called from sync agent code. The 60s cache + tiny payload keeps
+# the latency at well under 50ms amortised. Worth-rewriting as async if
+# this ever lands in a hot path.
+
+_OLLAMA_TAGS_CACHE: set[str] | None = None
+_OLLAMA_TAGS_CACHED_AT: float = 0.0
+_OLLAMA_TAGS_CACHE_TTL_S = 60.0
+_FALLBACK_WARNED: set[tuple[str, str, str]] = set()
+
+
+def _ollama_base_url() -> str:
+    return (
+        os.environ.get("OLLAMA_BASE_URL")
+        or os.environ.get("OLLAMA_HOST")
+        or "http://localhost:11434"
+    ).rstrip("/")
+
+
+def _probe_ollama_tags() -> set[str]:
+    """Return the set of model tags currently served by Ollama.
+
+    Cached for ``_OLLAMA_TAGS_CACHE_TTL_S`` seconds. Returns an empty set
+    on any probe failure (transport error, non-200, malformed JSON);
+    callers must interpret an empty set as "no adapters available, fall
+    back to base" rather than "Ollama is empty" — fail-closed.
+    """
+    global _OLLAMA_TAGS_CACHE, _OLLAMA_TAGS_CACHED_AT
+    now = time.monotonic()
+    if (
+        _OLLAMA_TAGS_CACHE is not None
+        and (now - _OLLAMA_TAGS_CACHED_AT) < _OLLAMA_TAGS_CACHE_TTL_S
+    ):
+        return _OLLAMA_TAGS_CACHE
+    try:
+        # Lazy-import requests so test environments without it can still
+        # exercise the routing logic with a monkeypatched probe.
+        import requests  # type: ignore[import-untyped]
+        resp = requests.get(f"{_ollama_base_url()}/api/tags", timeout=2.0)
+        if resp.status_code != 200:
+            _OLLAMA_TAGS_CACHE = set()
+        else:
+            body = resp.json() or {}
+            _OLLAMA_TAGS_CACHE = {
+                str(m.get("name", "")) for m in (body.get("models") or [])
+            }
+    except Exception as exc:
+        logger.debug("Ollama tag probe failed: %s", exc)
+        _OLLAMA_TAGS_CACHE = set()
+    _OLLAMA_TAGS_CACHED_AT = now
+    return _OLLAMA_TAGS_CACHE
+
+
+def _route_with_fallback(
+    role_key: str, primary: str, fallback: str | None
+) -> str:
+    """Return ``primary`` if Ollama has the tag, else ``fallback`` (or primary
+    if no fallback is configured). Logs the fallback exactly once per probe
+    cycle so the operator sees the degraded state without log spam."""
+    if not primary:
+        return primary
+    tags = _probe_ollama_tags()
+    if primary in tags:
+        return primary
+    if not fallback:
+        # No fallback configured — return the primary even though it's
+        # missing. Downstream Ollama call will surface a clear 404.
+        return primary
+    warn_key = (role_key, primary, fallback)
+    if warn_key not in _FALLBACK_WARNED:
+        logger.warning(
+            "shark route fallback: role=%s requested=%s missing in Ollama → using %s",
+            role_key, primary, fallback,
+        )
+        _FALLBACK_WARNED.add(warn_key)
+    return fallback
 
 
 def resolve_role_route(role: str) -> dict[str, str]:
@@ -795,6 +887,14 @@ def resolve_role_route(role: str) -> dict[str, str]:
       2. ``routing[<role>]`` block in model_tiers.json.
       3. Default: ``{"backend": "ollama", "model": "hermes3:8b"}`` —
          safe, JSON-friendly, doesn't accidentally pull a 70b weight.
+
+    For Ollama-backed roles the routing entry may carry a ``"fallback"``
+    field naming a base model to use when the primary adapter-trained
+    tag is not yet present in Ollama. We probe ``/api/tags`` (cached
+    60s) on every resolve and silently swap to the fallback when the
+    primary is missing. This is what makes ModelForge promotions
+    "auto-pickup": the next resolve after publish completes will return
+    the adapter tag without any code change.
 
     Returns:
         ``{"backend": "ollama"|"vllm", "model": str, "adapter": str|None}``
@@ -819,9 +919,11 @@ def resolve_role_route(role: str) -> dict[str, str]:
                 or os.environ.get("VLLM_BASE_MODEL", "qwen3:30b"),
                 "adapter": rec.get("adapter", "") or "",
             }
+        primary = rec.get("model") or os.environ.get("OLLAMA_MODEL", "hermes3:8b")
+        fallback = rec.get("fallback")
         return {
             "backend": "ollama",
-            "model": rec.get("model") or os.environ.get("OLLAMA_MODEL", "hermes3:8b"),
+            "model": _route_with_fallback(role_key, primary, fallback),
             "adapter": "",
         }
     # Default: Ollama 8b — fast & cheap.
